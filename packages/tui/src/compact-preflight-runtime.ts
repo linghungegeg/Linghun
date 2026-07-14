@@ -14,8 +14,13 @@ import {
   injectDeepCompactSummary,
   insertAfterLeadingSystemMessages,
   maybeRunDeepCompactBeforeProvider,
+  sanitizeProviderStableCompactText,
 } from "./deep-compact-runtime.js";
-import { createEvidenceRecord, rememberEvidence } from "./evidence-runtime.js";
+import {
+  createEvidenceRecord,
+  rememberEvidence,
+  resolveToolResultBudgetLedgerRecords,
+} from "./evidence-runtime.js";
 import { buildPostCompactRestoreMessage } from "./compact-restore-runtime.js";
 import { isFeatureEnabled } from "./feature-flag-runtime.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
@@ -32,7 +37,10 @@ import {
   type ToolResultBudgetState,
   applyToolResultBudgetToMessages,
 } from "./tool-result-budget.js";
-import { LINGHUN_PROVIDER_TOOL_RESULT_CHARS } from "./runtime-budget.js";
+import {
+  LINGHUN_MAX_TOOL_RESULTS_PER_MESSAGE_CHARS,
+  LINGHUN_PROVIDER_TOOL_RESULT_CHARS,
+} from "./runtime-budget.js";
 import type {
   CompactPreflightTrigger,
   CompactProjection,
@@ -105,6 +113,9 @@ export async function prepareMessagesForProviderPreflight(input: {
     input.sessionId,
     input.deps,
   );
+  const budgetedToolResultChars = countProviderVisibleToolResultChars(budgeted);
+  const toolResultBudgetExceeded =
+    budgetedToolResultChars > LINGHUN_MAX_TOOL_RESULTS_PER_MESSAGE_CHARS;
   const contextMaxChars = getProviderContextMaxChars(input.context, input.runtime);
   const triggerChars = getAutoCompactTriggerChars(input.context, input.runtime);
   const postCompactTargetChars = getPostCompactTargetChars(input.context, input.runtime, {
@@ -132,6 +143,10 @@ export async function prepareMessagesForProviderPreflight(input: {
     compactProjectionIndex >= 0
       ? estimateModelMessageChars(budgeted.slice(compactProjectionIndex + 1))
       : budgetedChars;
+  const activeTailGrowthChars = Math.max(
+    0,
+    activeTailChars - (persistedRetriggerGuard?.baselineChars ?? 0),
+  );
   const retriggerTailGrowthThreshold = Math.max(
     COMPACT_SUMMARY_TARGET_RESERVE_CHARS,
     Math.floor(Math.max(0, contextMaxChars - triggerChars) / 2),
@@ -145,14 +160,19 @@ export async function prepareMessagesForProviderPreflight(input: {
     persistedRetriggerGuard &&
     compactProjectionIndex >= 0 &&
     budgetedChars <= contextMaxChars &&
-    activeTailChars < activeRetriggerTailGrowthThreshold
+    !toolResultBudgetExceeded &&
+    activeTailGrowthChars < activeRetriggerTailGrowthThreshold
   ) {
     const guardedMessages = await injectDeepCompactContext(budgeted, input.context);
     if (estimateModelMessageChars(guardedMessages) <= contextMaxChars) {
       return { blocked: false, messages: guardedMessages };
     }
   }
-  if (input.trigger !== "reactive" && budgetedChars <= triggerChars) {
+  if (
+    input.trigger !== "reactive" &&
+    budgetedChars <= triggerChars &&
+    !toolResultBudgetExceeded
+  ) {
     const withDeep = await injectDeepCompactContext(budgeted, input.context);
     const withDeepChars = estimateModelMessageChars(withDeep);
     strategySteps.push({
@@ -191,7 +211,7 @@ export async function prepareMessagesForProviderPreflight(input: {
       "context_compact_cooldown_active",
       "warning",
     );
-    if (budgetedChars <= contextMaxChars) {
+    if (budgetedChars <= contextMaxChars && !toolResultBudgetExceeded) {
       recordCompactStrategy(input.context, {
         runtime: input.runtime,
         trigger: input.trigger,
@@ -252,7 +272,7 @@ export async function prepareMessagesForProviderPreflight(input: {
         },
       ],
     });
-    if (budgetedChars > contextMaxChars) {
+    if (budgetedChars > contextMaxChars || toolResultBudgetExceeded) {
       await recordCompactFailure(
         input.context,
         input.sessionId,
@@ -295,35 +315,42 @@ export async function prepareMessagesForProviderPreflight(input: {
           beforeChars: budgetedChars,
           afterChars: afterDeep,
         });
-        recordCompactStrategy(input.context, {
-          runtime: input.runtime,
-          trigger: input.trigger,
-          contextMaxChars,
-          triggerChars,
-          postCompactTargetChars,
-          finalChars: afterDeep,
-          steps: strategySteps,
-        });
-        const blocked = budgetedChars > contextMaxChars;
-        await recordCompactFailure(
-          input.context,
-          input.sessionId,
-          `deep_compact_failed:${deepMessage}`,
-          blocked,
-          input.deps,
-        );
-        if (blocked) {
-          return { blocked: true, messages: budgeted, message: deepMessage };
+        if (!toolResultBudgetExceeded || budgetedChars > contextMaxChars) {
+          recordCompactStrategy(input.context, {
+            runtime: input.runtime,
+            trigger: input.trigger,
+            contextMaxChars,
+            triggerChars,
+            postCompactTargetChars,
+            finalChars: afterDeep,
+            steps: strategySteps,
+          });
+          const blocked = budgetedChars > contextMaxChars;
+          await recordCompactFailure(
+            input.context,
+            input.sessionId,
+            `deep_compact_failed:${deepMessage}`,
+            blocked,
+            input.deps,
+          );
+          if (blocked) {
+            return { blocked: true, messages: budgeted, message: deepMessage };
+          }
+          return {
+            blocked: false,
+            messages: await injectDeepCompactContext(budgeted, input.context),
+          };
         }
-        return { blocked: false, messages: await injectDeepCompactContext(budgeted, input.context) };
       }
-      strategySteps.push({
-        layer: "semantic_deep",
-        status: "applied",
-        reason: "semantic_compact_ready",
-        beforeChars: budgetedChars,
-        afterChars: afterDeep,
-      });
+      if (deep.ok) {
+        strategySteps.push({
+          layer: "semantic_deep",
+          status: "applied",
+          reason: "semantic_compact_ready",
+          beforeChars: budgetedChars,
+          afterChars: afterDeep,
+        });
+      }
     } else {
       const afterDeep = estimateModelMessageChars(
         await injectDeepCompactContext(budgeted, input.context),
@@ -340,7 +367,10 @@ export async function prepareMessagesForProviderPreflight(input: {
     }
     const compactPayloadTargetChars = Math.max(
       1,
-      postCompactTargetChars - COMPACT_SUMMARY_TARGET_RESERVE_CHARS,
+      Math.min(
+        postCompactTargetChars - COMPACT_SUMMARY_TARGET_RESERVE_CHARS,
+        LINGHUN_MAX_TOOL_RESULTS_PER_MESSAGE_CHARS,
+      ),
     );
     const compacted = compactMessagesToFit(budgeted, {
       maxChars: compactPayloadTargetChars,
@@ -364,6 +394,13 @@ export async function prepareMessagesForProviderPreflight(input: {
         finalChars: budgetedChars,
         steps: strategySteps,
       });
+      if (toolResultBudgetExceeded) {
+        const message =
+          input.context.language === "en-US"
+            ? "Tool result context still exceeds the provider-visible payload budget, so this request is blocked."
+            : "工具结果上下文仍超过 provider 可见载荷预算，本次请求已阻断。";
+        return { blocked: true, messages: budgeted, message };
+      }
       return { blocked: false, messages: budgeted };
     }
     const projection = createCompactProjection(input.context, {
@@ -392,6 +429,15 @@ export async function prepareMessagesForProviderPreflight(input: {
       input.context,
     );
     const providerMessageChars = estimateModelMessageChars(providerMessages);
+    const providerProjectionIndex = providerMessages.findIndex(
+      (message) =>
+        typeof message.content === "string" &&
+        message.content.startsWith("Context compact projection\n"),
+    );
+    const projectionTailChars =
+      providerProjectionIndex >= 0
+        ? estimateModelMessageChars(providerMessages.slice(providerProjectionIndex + 1))
+        : 0;
     strategySteps.push({
       layer: "full_summary",
       status: "applied",
@@ -411,9 +457,9 @@ export async function prepareMessagesForProviderPreflight(input: {
       });
     }
     const willRetriggerNextTurn = providerMessageChars >= triggerChars;
-    if (willRetriggerNextTurn) {
+    if (willRetriggerNextTurn && providerProjectionIndex >= 0) {
       projection.retriggerGuard = {
-        baselineChars: 0,
+        baselineChars: projectionTailChars,
         tailGrowthThreshold: retriggerTailGrowthThreshold,
       };
       strategySteps.push({
@@ -437,7 +483,11 @@ export async function prepareMessagesForProviderPreflight(input: {
       steps: strategySteps,
       savingsRatio: projection.savingsRatio,
     });
-    if (providerMessageChars > contextMaxChars) {
+    if (
+      providerMessageChars > contextMaxChars ||
+      countProviderVisibleToolResultChars(providerMessages) >
+        LINGHUN_MAX_TOOL_RESULTS_PER_MESSAGE_CHARS
+    ) {
       await recordCompactFailure(
         input.context,
         input.sessionId,
@@ -505,7 +555,7 @@ export async function prepareMessagesForProviderPreflight(input: {
     return { blocked: false, messages: providerMessages };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    const blocked = budgetedChars > contextMaxChars;
+    const blocked = budgetedChars > contextMaxChars || toolResultBudgetExceeded;
     await recordCompactFailure(input.context, input.sessionId, reason, blocked, input.deps);
     if (!blocked) {
       return { blocked: false, messages: budgeted };
@@ -529,11 +579,20 @@ async function prepareMessagesForProviderWithToolResultBudget(
     sessionId,
     state: getToolResultBudgetState(context),
     singleResultChars: LINGHUN_PROVIDER_TOOL_RESULT_CHARS,
+    resolveLedgerRecords: (lookups) =>
+      resolveToolResultBudgetLedgerRecords(context, sessionId, lookups),
   });
   for (const record of budgeted.records) {
     await deps.recordToolResultBudgetEvidence(context, sessionId, record);
   }
   return budgeted.messages;
+}
+
+function countProviderVisibleToolResultChars(messages: readonly ModelMessage[]): number {
+  return messages.reduce(
+    (total, message) => (message.role === "tool" ? total + message.content.length : total),
+    0,
+  );
 }
 
 function getToolResultBudgetState(context: TuiContext): ToolResultBudgetState {
@@ -940,16 +999,66 @@ async function injectDeepCompactContext(
   return injectDeepCompactSummary(messages, packet, restoreMessage ? [restoreMessage] : []);
 }
 
+export function formatCompactProjectionPromptSummary(
+  projection: { summary: string; restoreContext?: unknown },
+): string {
+  if (
+    !projection.restoreContext ||
+    typeof projection.restoreContext !== "object" ||
+    Array.isArray(projection.restoreContext)
+  ) {
+    return `Context compact projection\n${sanitizeProviderStableCompactText(projection.summary)}`;
+  }
+  const restore = projection.restoreContext as Record<string, unknown>;
+  const stringValue = (key: string) =>
+    typeof restore[key] === "string"
+      ? sanitizeProviderStableCompactText(restore[key] as string)
+      : "none";
+  const stringValues = (key: string) =>
+    Array.isArray(restore[key])
+      ? (restore[key] as unknown[])
+          .filter((value): value is string => typeof value === "string")
+          .map(sanitizeProviderStableCompactText)
+      : [];
+  const keyFiles = stringValues("keyFiles");
+  const changedFiles = stringValues("changedFiles");
+  const evidenceRefs = stringValues("evidenceRefs");
+  const activeWork = stringValues("activeAgentsWorkflows");
+  const needsAttention = stringValues("needsAttentionAgentsWorkflows");
+  const staleResumable = stringValues("staleResumableAgentsWorkflows");
+  const pendingItems = stringValues("pendingItems");
+  const decisions = stringValues("decisions");
+  const risks = stringValues("risks");
+  return [
+    "Context compact projection",
+    sanitizeProviderStableCompactText(projection.summary),
+    "[Context restore metadata]",
+    `goal: ${stringValue("goal")}`,
+    `current task: ${stringValue("currentTask")}`,
+    `phase status: ${stringValue("phaseStatus")}`,
+    `key files: ${keyFiles.join(", ") || "none"}`,
+    `changed files: ${changedFiles.join(", ") || "none"}`,
+    `evidence count: ${evidenceRefs.length}`,
+    `active work count: ${activeWork.length}`,
+    `needs attention count: ${needsAttention.length}`,
+    `stale resumable count: ${staleResumable.length}`,
+    `pending items: ${pendingItems.join("; ") || "none"}`,
+    `decision count: ${decisions.length}`,
+    `risk count: ${risks.length}`,
+    `index status: ${stringValue("indexStatus")}`,
+    `cache freshness: ${stringValue("cacheFreshness")}`,
+    `memory status: ${stringValue("memoryStatus")}`,
+    `verification requirement: ${stringValue("verificationRequirement")}`,
+  ].join("\n");
+}
+
 function injectCompactProjectionMessage(
   messages: ModelMessage[],
   projection: CompactProjection,
 ): ModelMessage[] {
-  const restoreMetadata = projection.restoreContext
-    ? `\n[Context restore metadata]\n${JSON.stringify(projection.restoreContext)}`
-    : "";
   const summaryMessage: ModelMessage = {
     role: "user",
-    content: `Context compact projection\n${projection.summary}${restoreMetadata}`,
+    content: formatCompactProjectionPromptSummary(projection),
   };
   return insertAfterLeadingSystemMessages(messages, summaryMessage);
 }

@@ -22,6 +22,7 @@ import { isRecord } from "./tui-state-runtime.js";
 import {
   createToolResultBudgetFingerprint,
   parseToolResultBudgetLedgerData,
+  pruneToolResultBudgetStateEntries,
   type ToolResultBudgetRecord,
 } from "./tool-result-budget.js";
 
@@ -221,6 +222,9 @@ function restoreToolResultBudgetLedger(context: TuiContext, transcript: Transcri
     };
     rememberRestoredToolResultBudgetReplacement(context, sessionId, event.content, record);
   }
+  if (context.toolResultBudgetState) {
+    pruneToolResultBudgetStateEntries(context.toolResultBudgetState);
+  }
 }
 
 function isCompletedToolResultBudgetEvidence(
@@ -272,6 +276,9 @@ function rememberRestoredToolResultBudgetReplacement(
   record: ToolResultBudgetRecord,
 ): void {
   context.toolResultBudgetState ??= { seenIds: new Set(), replacements: new Map() };
+  if (record.artifact.id !== record.artifact.sha256) {
+    context.toolResultBudgetState.hasLegacyArtifactPaths = true;
+  }
   const fingerprint = [
     sessionId,
     record.toolUseId,

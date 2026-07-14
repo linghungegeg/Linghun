@@ -8,6 +8,7 @@ import {
   insertAfterLeadingSystemMessages,
   isDeepCompactPacket,
   maybeRunDeepCompactBeforeProvider,
+  sanitizeProviderStableCompactText,
   shouldRunDeepCompact,
 } from "./deep-compact-runtime.js";
 import { hydrateResumeContext } from "./handoff-session-runtime.js";
@@ -605,6 +606,107 @@ describe("deep compact prompt insertion", () => {
     expect(text).not.toContain("[Deep compact diagnostics]");
     expect(text).not.toContain("id deep-test");
     expect(text).not.toContain("created at 2026-01-01T00:00:00.000Z");
+  });
+
+  it("keeps runtime ids and fallback state in the ledger packet but out of provider text", () => {
+    const runtimeId = "11111111-2222-4333-8444-555555555555";
+    const packet: DeepCompactPacket = {
+      ...makePacket(),
+      preservedEvidenceRefs: [runtimeId],
+      activeAgentsWorkflows: [`agent:${runtimeId}:running:work`],
+      needsAttentionAgentsWorkflows: [`workflow:${runtimeId}:blocked:work`],
+      toolResultSummaries: [
+        `tool_result:Read:is error no; evidence ${runtimeId}; summary ok`,
+        `tool_end:${runtimeId}:truncated no; full output path none; summary ok`,
+      ],
+      decisions: ["executor:test/model fallback yes"],
+      risks: ["compactFailure:temporary provider fallback"],
+    };
+    const text = formatDeepCompactPromptSummary(packet) ?? "";
+
+    expect(packet.preservedEvidenceRefs).toContain(runtimeId);
+    expect(packet.activeAgentsWorkflows.join("\n")).toContain(runtimeId);
+    expect(text).not.toContain(runtimeId);
+    expect(text).not.toContain("fallback yes");
+    expect(text).not.toContain("compactFailure");
+    expect(text).toContain("active agents/workflows 1");
+    expect(text).toContain("needs-attention agents/workflows 1");
+  });
+
+  it("removes quoted owner and fallback fields from provider-stable compact text", () => {
+    const text = sanitizeProviderStableCompactText(
+      '{"requestTurnId":"turn-json-42","ownerId":"owner-json-42","fallbackUsed":true,"path":"src/a.ts"}',
+    );
+
+    expect(text).not.toContain("requestTurnId");
+    expect(text).not.toContain("turn-json-42");
+    expect(text).not.toContain("ownerId");
+    expect(text).not.toContain("owner-json-42");
+    expect(text).not.toContain("fallbackUsed");
+    expect(text).toContain('"path":"src/a.ts"');
+  });
+
+  it("omits transcript runtime ids before asking the deep compact model for a summary", () => {
+    const { context } = createOwnedCompactHarness();
+    const runtimeId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const messages = buildDeepCompactRequestMessages(
+      context,
+      [
+        {
+          type: "user_message",
+          id: "u1",
+          text: "keep the migration goal",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          type: "tool_call_start",
+          id: "call-stable",
+          name: "Read",
+          input: {
+            path: "src/a.ts",
+            requestTurnId: "turn-json-42",
+            ownerId: "owner-json-42",
+            fallbackUsed: true,
+          },
+          createdAt: "2026-01-01T00:00:00.500Z",
+        },
+        {
+          type: "tool_result",
+          toolUseId: runtimeId,
+          toolName: "Read",
+          content: "source summary",
+          evidenceId: runtimeId,
+          createdAt: "2026-01-01T00:00:01.000Z",
+        },
+        {
+          type: "tool_call_end",
+          id: runtimeId,
+          name: "Read",
+          input: { path: "src/a.ts" },
+          output: { text: "source summary", truncated: false },
+          createdAt: "2026-01-01T00:00:02.000Z",
+        },
+        {
+          type: "system_event",
+          level: "info",
+          message:
+            'resume {"requestTurnId":"turn-system-42","ownerId":"owner-system-42","fallbackUsed":true} path src/a.ts',
+          createdAt: "2026-01-01T00:00:03.000Z",
+        },
+      ] as never,
+      "request",
+    );
+    const providerText = messages.map((message) => message.content).join("\n");
+
+    expect(providerText).toContain("keep the migration goal");
+    expect(providerText).not.toContain(runtimeId);
+    expect(providerText).not.toContain("2026-01-01T00:00:01.000Z");
+    expect(providerText).not.toContain("turn-json-42");
+    expect(providerText).not.toContain("owner-json-42");
+    expect(providerText).not.toContain("turn-system-42");
+    expect(providerText).not.toContain("owner-system-42");
+    expect(providerText).not.toContain("fallbackUsed");
+    expect(providerText).toContain("src/a.ts");
   });
 
   it("accepts old deep compact packets without new fidelity fields", () => {

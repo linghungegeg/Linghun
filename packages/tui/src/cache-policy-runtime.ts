@@ -652,28 +652,21 @@ function normalizeToolSchema(tools: NonNullable<ModelRequest["tools"]>): Array<{
   source: string;
   schemaHash: string;
 }> {
-  return tools
-    .map((tool) => {
-      const source = resolveToolSource(tool);
-      return {
-        name: tool.name,
-        source,
-        schemaHash:
-          tool.schemaHash ??
-          stableHash({
-            name: tool.name,
-            description: tool.description,
-            inputSchema: tool.inputSchema,
-            source,
-          }),
-      };
-    })
-    .sort(
-      (a, b) =>
-        a.name.localeCompare(b.name) ||
-        a.source.localeCompare(b.source) ||
-        a.schemaHash.localeCompare(b.schemaHash),
-    );
+  return tools.map((tool) => {
+    const source = resolveToolSource(tool);
+    return {
+      name: tool.name,
+      source,
+      schemaHash:
+        tool.schemaHash ??
+        stableHash({
+          name: tool.name,
+          description: tool.description,
+          inputSchema: tool.inputSchema,
+          source,
+        }),
+    };
+  });
 }
 
 function splitToolSchemaBoundary(

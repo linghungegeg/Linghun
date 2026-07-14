@@ -397,6 +397,52 @@ describe("foreground delayed tool ownership", () => {
 });
 
 describe("session-scoped background interrupt", () => {
+  it("releases a captured foreground controller on persistence failure without clearing a replacement", async () => {
+    const runCase = async (installReplacement: boolean) => {
+      const context = makeContext([]);
+      context.sessionId = "session-interrupt-failure";
+      context.sessionStoreVerifiedId = context.sessionId;
+      context.projectPath = process.cwd();
+      context.config = defaultConfig;
+      context.memory = { sessionDir: "" } as TuiContext["memory"];
+      context.interrupt = { type: "running", taskId: "noncooperative", canCancel: true };
+      const capturedController = new AbortController();
+      const replacementController = new AbortController();
+      context.activeAbortController = capturedController;
+      context.tools.abortSignal = capturedController.signal;
+      context.store.appendEvent = async (_sessionId: string, event: unknown) => {
+        if ((event as { type?: string }).type !== "interrupt") return;
+        if (installReplacement) {
+          context.activeAbortController = replacementController;
+          context.tools.abortSignal = replacementController.signal;
+          context.interrupt = { type: "running", taskId: "replacement", canCancel: true };
+        }
+        throw new Error("interrupt persistence failed");
+      };
+
+      await expect(interruptAllActiveWork(context)).rejects.toThrow("interrupt persistence failed");
+      return { capturedController, context, replacementController };
+    };
+
+    const released = await runCase(false);
+    expect(released.capturedController.signal.aborted).toBe(true);
+    expect(released.context.activeAbortController).toBeUndefined();
+    expect(released.context.foregroundAbortPendingUntilMs).toBeGreaterThan(Date.now());
+    expect(released.context.requestActivityOwner).toBeUndefined();
+    expect(released.context.interrupt).toEqual({ type: "idle" });
+
+    const replaced = await runCase(true);
+    expect(replaced.capturedController.signal.aborted).toBe(true);
+    expect(replaced.replacementController.signal.aborted).toBe(false);
+    expect(replaced.context.activeAbortController).toBe(replaced.replacementController);
+    expect(replaced.context.tools.abortSignal).toBe(replaced.replacementController.signal);
+    expect(replaced.context.interrupt).toEqual({
+      type: "running",
+      taskId: "replacement",
+      canCancel: true,
+    });
+  });
+
   it("does not cancel another session's background owner", async () => {
     const events: unknown[] = [];
     const context = makeContext(events);

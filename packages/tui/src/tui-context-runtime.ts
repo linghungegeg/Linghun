@@ -264,8 +264,28 @@ export type PendingModelContinuation = {
   reportWriteGuard?: ReportWriteGuard;
   requestTurnId?: string;
   abortSignal?: AbortSignal;
+  /** Absolute owner-local wall-clock deadline; never serialized into provider messages. */
+  deadlineAtMs?: number;
   attemptedRuntimeKeys?: string[];
   originalUserText?: string;
+  finalAnswerEvidenceActionRetries?: number;
+  finalGapProgressState?: {
+    unsupportedKinds: string[];
+    scopeFingerprint?: string;
+    freshnessFingerprint?: string;
+    relevantEvidenceIds: Set<string>;
+    relevantEvidenceFingerprints?: Set<string>;
+    evidenceAction?: {
+      toolName: string;
+      input?: unknown;
+      strategy?: "minimal_bash_verification" | "artifact_readonly_check" | "service_runtime_readonly_check";
+      summary: string;
+    };
+    commandFingerprint?: string;
+    attemptedCommandFingerprints: Set<string>;
+    /** Request-local external stop for the currently planned evidence action. */
+    externalBlockReason?: "permission_denied" | "user_cancelled";
+  };
 };
 
 export function runtimeFromContinuation(
@@ -327,7 +347,7 @@ export type TuiContext = {
   currentRequestUserMessageId?: string;
   lastInterruptedTurn?: {
     requestTurnId: string;
-    reason: "user_interrupt" | "provider_disconnect" | "model_abort";
+    reason: "user_interrupt" | "provider_disconnect" | "model_abort" | "model_timeout";
     userMessageId?: string;
     at: string;
   };
@@ -462,12 +482,10 @@ export type TuiContext = {
   // ExecuteExtraTool 必须先看 Set，命中后再走白名单/适配器/必填参数检查。
   // 这是"已发现"的唯一证据；listDeferredTools 仅作为白名单存在性，不能等同于"发现过"。
   discoveredDeferredToolNames: Set<string>;
-  /**
-   * Session-local repository analysis preference. Set after pre-engine reports
-   * fallback_required for this project so later turns prefer real workspace tools first.
-   */
+  /** Request-local pre-engine fallback decision for the active foreground owner. */
   preEngineFallbackPreference?: {
     projectPath: string;
+    requestTurnId: string;
     active: boolean;
     activatedAt: string;
     reason: "fallback_required";
@@ -648,6 +666,11 @@ export const MEMORY_PROMPT_ITEM_WIDTH = 180;
 export const MEMORY_PROMPT_TOTAL_WIDTH = 720;
 export const MAX_CONTEXT_MESSAGES = 12;
 export const REQUEST_SLOW_HINT_MS = readPositiveIntEnv("LINGHUN_REQUEST_SLOW_HINT_MS", 20_000);
+export const MODEL_REQUEST_WALL_CLOCK_TIMEOUT_REASON = "model_request_wall_clock_timeout";
+export const MODEL_REQUEST_WALL_CLOCK_LIMIT_MS = readPositiveIntEnv(
+  "LINGHUN_MODEL_REQUEST_WALL_CLOCK_LIMIT_MS",
+  30 * 60 * 1000,
+);
 export const MAX_EVIDENCE_RECORDS = readPositiveIntEnv("LINGHUN_MAX_EVIDENCE_RECORDS", 50);
 export const MAX_BACKGROUND_TASKS = 50;
 export const WORKFLOW_ARCHITECTURE_REVIEW_FILE_LIMIT = 8;

@@ -275,14 +275,25 @@ impl Drop for PyDeepLayer {
     }
 }
 
-pub fn run(deep: &mut Option<PyDeepLayer>, root: &Path, files: &[String]) -> PyDeepLayerResult {
-    if deep.is_none() {
-        match PyDeepLayer::try_init(root) {
-            Ok(layer) => *deep = Some(layer),
-            Err(reason) => return unavailable_result(root, "tool_missing", reason),
-        }
+fn ensure_layer<'a>(
+    deep: &'a mut Option<PyDeepLayer>,
+    root: &Path,
+) -> Result<&'a mut PyDeepLayer, String> {
+    if deep.as_ref().is_some_and(|layer| layer.root != root) {
+        *deep = None;
     }
-    match deep.as_mut().unwrap().query_verify(files) {
+    if deep.is_none() {
+        *deep = Some(PyDeepLayer::try_init(root)?);
+    }
+    Ok(deep.as_mut().unwrap())
+}
+
+pub fn run(deep: &mut Option<PyDeepLayer>, root: &Path, files: &[String]) -> PyDeepLayerResult {
+    let layer = match ensure_layer(deep, root) {
+        Ok(layer) => layer,
+        Err(reason) => return unavailable_result(root, "tool_missing", reason),
+    };
+    match layer.query_verify(files) {
         Ok(result) => result,
         Err(reason) => {
             *deep = None;
@@ -299,19 +310,11 @@ pub fn run_structure(
     symbol_positions: &[Value],
     import_tokens: &[Value],
 ) -> StructureResult {
-    if deep.is_none() {
-        match PyDeepLayer::try_init(root) {
-            Ok(layer) => *deep = Some(layer),
-            Err(reason) => {
-                return unavailable_structure(symbols, "tool_missing", reason);
-            }
-        }
-    }
-    match deep
-        .as_mut()
-        .unwrap()
-        .query_structure(files, symbols, symbol_positions, import_tokens)
-    {
+    let layer = match ensure_layer(deep, root) {
+        Ok(layer) => layer,
+        Err(reason) => return unavailable_structure(symbols, "tool_missing", reason),
+    };
+    match layer.query_structure(files, symbols, symbol_positions, import_tokens) {
         Ok(result) => result,
         Err(reason) => {
             *deep = None;
@@ -325,23 +328,21 @@ pub fn run_discovery(
     root: &Path,
     terms: &[String],
 ) -> PyDiscoveryResult {
-    if deep.is_none() {
-        match PyDeepLayer::try_init(root) {
-            Ok(layer) => *deep = Some(layer),
-            Err(reason) => {
-                return PyDiscoveryResult {
-                    candidates: vec![],
-                    status: "tool_missing",
-                    reason: Some(reason),
-                    program_build_count: 0,
-                    program_rebuilt: false,
-                    snapshot_id: "0".to_string(),
-                    elapsed_ms: 0,
-                };
-            }
+    let layer = match ensure_layer(deep, root) {
+        Ok(layer) => layer,
+        Err(reason) => {
+            return PyDiscoveryResult {
+                candidates: vec![],
+                status: "tool_missing",
+                reason: Some(reason),
+                program_build_count: 0,
+                program_rebuilt: false,
+                snapshot_id: "0".to_string(),
+                elapsed_ms: 0,
+            };
         }
-    }
-    match deep.as_mut().unwrap().query_discovery(terms) {
+    };
+    match layer.query_discovery(terms) {
         Ok(result) => result,
         Err(reason) => {
             *deep = None;

@@ -74,9 +74,11 @@ import {
 } from "./job-agent-command-runtime.js";
 import { formatBackgroundTask } from "./job-runner-presenter.js";
 import { formatIndexRefreshSummary, formatIndexStatus } from "./mcp-index-command-runtime.js";
+import { summarizeIndexResult } from "./index-result-presenter.js";
 import {
   executeExtraTool,
   executeSearchExtraTools,
+  recordIndexEvidence,
   refreshIndexStatus,
   runIndexRepository,
 } from "./mcp-index-runtime.js";
@@ -107,7 +109,11 @@ import {
   readToolInputString,
   sanitizeDeferredToolPrimaryText,
 } from "./model-loop-runtime.js";
-import { clearRequestActivity, startRequestActivity } from "./model-stream-runtime.js";
+import {
+  clearRequestActivity,
+  recordFinalGapExternalBlock,
+  startRequestActivity,
+} from "./model-stream-runtime.js";
 import {
   type ReportWriteGuard,
   collectInputFiles,
@@ -600,6 +606,13 @@ export async function executeModelToolUse(
       toolCall.id,
     );
     if (requestIsStale()) return staleResult();
+    if (continuation) {
+      recordFinalGapExternalBlock(
+        continuation,
+        toolCall,
+        "permission_denied",
+      );
+    }
     await appendToolResultEvent(
       context,
       sessionId,
@@ -1066,20 +1079,36 @@ export async function executeApprovedModelToolUse(
       isError && (toolName === "WebSearch" || toolName === "WebFetch")
         ? (result.output.data as { aborted?: unknown; timedOut?: unknown } | undefined)
         : undefined;
+    const bashFailureOutcome =
+      isError && toolName === "Bash"
+        ? (result.output.data as { outcome?: unknown } | undefined)?.outcome
+        : undefined;
     if (isError && webFailureData?.aborted !== true) {
       const isWebFailure = webFailureData !== undefined;
       await captureFailureLearning(context, sessionId, {
         category: "tool_failure",
         failureSummary: isWebFailure
           ? `${toolName} ${webFailureData.timedOut === true ? "timed out" : "failed"}: ${result.output.text}`
+          : bashFailureOutcome === "timeout"
+            ? `${toolName} timed out: ${result.output.text}`
+            : bashFailureOutcome === "cancelled"
+              ? `${toolName} cancelled: ${result.output.text}`
           : `${toolName} exited non-zero: ${result.output.text}`,
         rootCauseGuess: isWebFailure
           ? webFailureData.timedOut === true
             ? `${toolName} exceeded its request timeout`
             : `${toolName} returned a structured failure result`
+          : bashFailureOutcome === "timeout"
+            ? `${toolName} exceeded its command timeout`
+            : bashFailureOutcome === "cancelled"
+              ? `${toolName} was cancelled before completion`
           : `${toolName} command returned a non-zero exit code`,
         avoidNextTime: isWebFailure
           ? "Inspect the structured Web failure details and retry or adjust the request without claiming success"
+          : bashFailureOutcome === "timeout"
+            ? "Reduce the command scope or adjust its timeout before retrying"
+            : bashFailureOutcome === "cancelled"
+              ? "Do not treat a cancelled command as completed; rerun only if the request still needs it"
           : "Inspect the command output and exit code; fix the underlying cause before claiming the command passed",
         sourceRef: evidence?.id ? `evidence:${evidence.id}` : `tool:${toolName}`,
         relatedTarget: toolName,
@@ -1222,6 +1251,37 @@ async function appendPolicyToolFeedback(
   await appendSystemEvent(context, sessionId, `policy_tool_feedback: ${summary}`, level, commitGuard);
 }
 
+async function recordDeferredOutputEvidence(
+  context: TuiContext,
+  sessionId: string,
+  toolUseId: string,
+  toolName: string,
+  text: string,
+  options: { failed?: boolean; degraded?: boolean; commitGuard?: () => boolean } = {},
+) {
+  const evidence = createEvidenceRecord(
+    "command_output",
+    `${toolName}${options.failed ? " failure" : ""}: ${truncateDisplay(text.replace(/\s+/g, " "), 160)}`,
+    `deferred-tool:${toolName}`,
+    [
+      "deferred_tool_output",
+      toolName,
+      ...(options.failed ? ["tool_failure"] : []),
+      ...(options.degraded ? ["degraded", "fallback_required"] : []),
+    ],
+  );
+  evidence.toolUseId = toolUseId;
+  scopeEvidenceToContext(context, evidence, { ownerSessionId: sessionId });
+  if (options.commitGuard && !options.commitGuard()) return evidence;
+  await context.store.appendEvent(
+    sessionId,
+    { type: "evidence_record", ...evidence },
+    options.commitGuard,
+  );
+  if (!options.commitGuard || options.commitGuard()) rememberEvidence(context, evidence);
+  return evidence;
+}
+
 // Module 3 — toPermissionPromptView 已移至 ./tui-permission-runtime.ts。
 
 // D.13I：deferred dispatch 的特殊执行路径。复用 tool_call_start / tool_result / evidence
@@ -1320,13 +1380,13 @@ export async function executeDeferredDispatchToolUse(
       const queryRaw = input.query;
       if (typeof queryRaw !== "string") {
         const text = "SearchExtraTools: query 必须是字符串（可为空字符串）。";
-        const evidence = await recordToolFailureEvidence(
+        const evidence = await recordDeferredOutputEvidence(
           context,
           sessionId,
-          "Read",
-          `${dispatchName}: ${text}`,
-          commitGuard,
           toolCall.id,
+          dispatchName,
+          text,
+          { failed: true, commitGuard },
         );
         ownedEvidenceId = evidence.id;
         if (requestIsStale()) return dropStaleResult();
@@ -1346,11 +1406,15 @@ export async function executeDeferredDispatchToolUse(
       }
       const result = executeSearchExtraTools(queryRaw, context);
       if (requestIsStale()) return dropStaleResult();
-      const evidence = await recordToolEvidence(context, sessionId, "Read", {
-        text: result.text,
-        data: result.data,
-      } as ToolOutput, undefined, commitGuard, toolCall.id);
-      ownedEvidenceId = evidence?.id;
+      const evidence = await recordDeferredOutputEvidence(
+        context,
+        sessionId,
+        toolCall.id,
+        dispatchName,
+        result.text,
+        { commitGuard },
+      );
+      ownedEvidenceId = evidence.id;
       if (requestIsStale()) return dropStaleResult();
       await appendDeferredToolResultEvent(
         context,
@@ -1359,7 +1423,7 @@ export async function executeDeferredDispatchToolUse(
         dispatchName,
         { text: result.text, data: result.data },
         false,
-        evidence?.id,
+          evidence.id,
         commitGuard,
       );
       if (requestIsStale()) return dropStaleResult();
@@ -1487,13 +1551,13 @@ export async function executeDeferredDispatchToolUse(
     if (requestIsStale()) return dropStaleResult();
     if (!result.ok) {
       if (requestIsStale()) return dropStaleResult();
-      const evidence = await recordToolFailureEvidence(
+      const evidence = await recordDeferredOutputEvidence(
         context,
         sessionId,
-        "Read",
-        `${dispatchName}: ${result.text}`,
-        () => !requestIsStale(),
         toolCall.id,
+        requestedToolName,
+        result.text,
+        { failed: true, commitGuard: () => !requestIsStale() },
       );
       ownedEvidenceId = evidence.id;
       if (requestIsStale()) return dropStaleResult();
@@ -1520,11 +1584,32 @@ export async function executeDeferredDispatchToolUse(
       return { ok: false, tool: dispatchName, text: result.text, evidenceId: evidence.id };
     }
     if (requestIsStale()) return dropStaleResult();
-    const evidence = await recordToolEvidence(context, sessionId, "Read", {
-      text: result.text,
-      data: result.data,
-    } as ToolOutput, undefined, () => !requestIsStale(), toolCall.id);
-    ownedEvidenceId = evidence?.id;
+    const normalizedResult = result.degraded
+      ? buildPreEngineFallbackRequiredResult(result, context)
+      : ({ text: result.text, data: result.data } satisfies ToolOutput);
+    const evidenceId = isCodebaseMemoryToolName(requestedToolName)
+      ? await recordIndexEvidence(
+          context,
+          requestedToolName,
+          summarizeIndexResult(
+            requestedToolName as "search_code" | "search_graph" | "get_architecture",
+            result.data,
+          ),
+          ["deferred_tool_output"],
+          () => !requestIsStale(),
+          toolCall.id,
+        )
+      : (
+          await recordDeferredOutputEvidence(
+            context,
+            sessionId,
+            toolCall.id,
+            requestedToolName,
+            normalizedResult.text,
+            { degraded: result.degraded === true, commitGuard: () => !requestIsStale() },
+          )
+        ).id;
+    ownedEvidenceId = evidenceId;
     if (requestIsStale()) return dropStaleResult();
     rememberSourcePackCandidatesFromToolData(context, input.tool_name, result.data);
     await appendDeferredToolResultEvent(
@@ -1532,39 +1617,43 @@ export async function executeDeferredDispatchToolUse(
       sessionId,
       toolCall.id,
       dispatchName,
-      { text: result.text, data: result.data },
+      normalizedResult,
       false,
-      evidence?.id,
+      evidenceId,
       () => !requestIsStale(),
     );
     if (requestIsStale()) return dropStaleResult();
     clearDeferredActivity();
-    writeLine(
-      output,
-      sanitizeDeferredToolPrimaryText(result.text, context.language, {
-        dispatchKind: "ExecuteExtraTool",
-        ok: true,
-      }),
-    );
+    if (result.degraded) {
+      writeLine(output, formatPreEngineDegradedPrimaryText(context));
+    } else {
+      writeLine(
+        output,
+        sanitizeDeferredToolPrimaryText(result.text, context.language, {
+          dispatchKind: "ExecuteExtraTool",
+          ok: true,
+        }),
+      );
+    }
     return {
       ok: true,
       tool: dispatchName,
-      text: result.text,
-      data: result.data,
-      evidenceId: evidence?.id,
+      text: normalizedResult.text,
+      data: normalizedResult.data,
+      evidenceId,
     };
   } catch (error) {
     if (requestIsStale()) return dropStaleResult();
     clearDeferredActivity();
     const text = formatError(error, context.language);
     if (requestIsStale()) return dropStaleResult();
-    const evidence = await recordToolFailureEvidence(
+    const evidence = await recordDeferredOutputEvidence(
       context,
       sessionId,
-      "Read",
-      `${dispatchName}: ${text}`,
-      () => !requestIsStale(),
       toolCall.id,
+      dispatchName,
+      text,
+      { failed: true, commitGuard: () => !requestIsStale() },
     );
     ownedEvidenceId = evidence.id;
     if (requestIsStale()) return dropStaleResult();
@@ -1643,25 +1732,20 @@ export async function executePreEngineToolUse(
   );
   if (requestIsStale()) return dropStaleResult();
   try {
-    context.discoveredDeferredToolNames.add(toolName);
-    const params =
-      toolCall.input && typeof toolCall.input === "object" && !Array.isArray(toolCall.input)
-        ? (toolCall.input as Record<string, unknown>)
-        : {};
     const result = await executeExtraTool(
-      { tool_name: toolName, params },
+      { tool_name: toolName, params: toolCall.input },
       context,
-      { signal: requestSignal },
+      { signal: requestSignal, firstClassPreEngine: true },
     );
     if (requestIsStale()) return dropStaleResult();
     if (!result.ok) {
-      const evidence = await recordToolFailureEvidence(
+      const evidence = await recordDeferredOutputEvidence(
         context,
         sessionId,
-        "Read",
-        `${toolName}: ${result.text}`,
-        commitGuard,
         toolCall.id,
+        toolName,
+        result.text,
+        { failed: true, commitGuard },
       );
       ownedEvidenceId = evidence.id;
       if (requestIsStale()) return dropStaleResult();
@@ -1682,11 +1766,15 @@ export async function executePreEngineToolUse(
     }
     if (result.degraded) {
       const fallbackResult = buildPreEngineFallbackRequiredResult(result, context);
-      const evidence = await recordToolEvidence(context, sessionId, "Read", {
-        text: fallbackResult.text,
-        data: fallbackResult.data,
-      } as ToolOutput, undefined, commitGuard, toolCall.id);
-      ownedEvidenceId = evidence?.id;
+      const evidence = await recordDeferredOutputEvidence(
+        context,
+        sessionId,
+        toolCall.id,
+        toolName,
+        fallbackResult.text,
+        { degraded: true, commitGuard },
+      );
+      ownedEvidenceId = evidence.id;
       if (requestIsStale()) return dropStaleResult();
       await appendDeferredToolResultEvent(
         context,
@@ -1695,7 +1783,7 @@ export async function executePreEngineToolUse(
         toolName,
         fallbackResult,
         false,
-        evidence?.id,
+        evidence.id,
         commitGuard,
       );
       if (requestIsStale()) return dropStaleResult();
@@ -1706,14 +1794,18 @@ export async function executePreEngineToolUse(
         tool: toolName,
         text: fallbackResult.text,
         data: fallbackResult.data,
-        evidenceId: evidence?.id,
+        evidenceId: evidence.id,
       };
     }
-    const evidence = await recordToolEvidence(context, sessionId, "Read", {
-      text: result.text,
-      data: result.data,
-    } as ToolOutput, undefined, commitGuard, toolCall.id);
-    ownedEvidenceId = evidence?.id;
+    const evidence = await recordDeferredOutputEvidence(
+      context,
+      sessionId,
+      toolCall.id,
+      toolName,
+      result.text,
+      { commitGuard },
+    );
+    ownedEvidenceId = evidence.id;
     if (requestIsStale()) return dropStaleResult();
     await appendDeferredToolResultEvent(
       context,
@@ -1722,7 +1814,7 @@ export async function executePreEngineToolUse(
       toolName,
       { text: result.text, data: result.data },
       false,
-      evidence?.id,
+      evidence.id,
       commitGuard,
     );
     if (requestIsStale()) return dropStaleResult();
@@ -1734,19 +1826,19 @@ export async function executePreEngineToolUse(
       tool: toolName,
       text: result.text,
       data: result.data,
-      evidenceId: evidence?.id,
+      evidenceId: evidence.id,
     };
   } catch (error) {
     if (requestIsStale()) return dropStaleResult();
     clearPreEngineActivity();
     const text = formatError(error, context.language);
-    const evidence = await recordToolFailureEvidence(
+    const evidence = await recordDeferredOutputEvidence(
       context,
       sessionId,
-      "Read",
-      `${toolName}: ${text}`,
-      commitGuard,
       toolCall.id,
+      toolName,
+      text,
+      { failed: true, commitGuard },
     );
     ownedEvidenceId = evidence.id;
     if (requestIsStale()) return dropStaleResult();

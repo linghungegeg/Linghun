@@ -1,10 +1,12 @@
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { checkClaimSupport } from "./final-answer-gate.js";
 import { appendToolResultEvent, createToolEndEvent } from "./evidence-runtime.js";
+import { pruneToolResultBudgetState } from "./memory-eviction-runtime.js";
 import {
   createToolResultBudgetLedgerData,
   parseToolResultBudgetLedgerData,
@@ -37,6 +39,35 @@ describe("tool_result budget", () => {
 
     data.record.artifact.relativePath = "tool-results/other.txt";
     expect(parseToolResultBudgetLedgerData(data)).toBeUndefined();
+  });
+
+  it("preserves a validated legacy provider replacement and hash exactly", () => {
+    const data = createToolResultBudgetLedgerData({
+      toolUseId: "call-legacy-ledger",
+      originalChars: 12,
+      replacementChars: 0,
+      reason: "pressure_age",
+      artifact: {
+        id: "artifact-legacy",
+        toolUseId: "call-legacy-ledger",
+        path: "tool-results/call-legacy-ledger.txt",
+        relativePath: "tool-results/call-legacy-ledger.txt",
+        bytes: 12,
+        chars: 12,
+        sha256: "b".repeat(64),
+        previewChars: 7,
+        preview: "preview",
+        hasMore: true,
+      },
+    });
+    data.replacement = data.replacement.replace(
+      "<persisted-tool-result>\n",
+      "<persisted-tool-result>\nreason: pressure_age\n",
+    );
+    data.replacementSha256 = createHash("sha256").update(data.replacement).digest("hex");
+    data.record.replacementChars = data.replacement.length;
+
+    expect(parseToolResultBudgetLedgerData(data)).toEqual(data);
   });
 
   it("persists a single oversized Read tool_result and preserves tool role pairing", async () => {
@@ -195,7 +226,7 @@ describe("tool_result budget", () => {
     expect(visibleToolChars).toBeLessThanOrEqual(120_000);
   });
 
-  it("caps aggregate visible tool_result content after small results were already seen", async () => {
+  it("keeps the provider-seen raw prefix stable when later pressure only budgets fresh results", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));
     const state: ToolResultBudgetState = { seenIds: new Set(), replacements: new Map() };
     const messages = Array.from({ length: 12 }).flatMap((_, index) => {
@@ -223,22 +254,69 @@ describe("tool_result budget", () => {
       expect(firstPass.records).toHaveLength(0);
     }
 
-    const result = await applyToolResultBudgetToMessages(messages, {
+    const prefixHash = createHash("sha256").update(JSON.stringify(messages)).digest("hex");
+    const freshId = "call-fresh-after-prefix";
+    const result = await applyToolResultBudgetToMessages(
+      [
+        ...messages,
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: freshId, name: "Bash", input: { command: "fresh-large" } }],
+        },
+        {
+          role: "tool",
+          tool_call_id: freshId,
+          content: `FRESH_AFTER_PREFIX_START:${"f".repeat(49_000)}:FRESH_AFTER_PREFIX_END`,
+        },
+      ],
+      {
+        projectPath: project,
+        sessionId: "session-seen-multi-turn",
+        state,
+      },
+    );
+
+    const stablePrefix = result.messages.slice(0, messages.length);
+    expect(stablePrefix).toEqual(messages);
+    expect(createHash("sha256").update(JSON.stringify(stablePrefix)).digest("hex")).toBe(
+      prefixHash,
+    );
+    expect(result.records.map((record) => record.toolUseId)).toEqual([freshId]);
+    expect(result.messages.at(-1)?.content).toContain("<persisted-tool-result>");
+  });
+
+  it("does not let a later same-content replacement rewrite an already seen raw identity", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-stable-identity-"));
+    const state: ToolResultBudgetState = { seenIds: new Set(), replacements: new Map() };
+    const content = `STABLE_RAW_IDENTITY:${"s".repeat(10_000)}`;
+    const raw = [{ role: "tool" as const, tool_call_id: "call-stable-raw", content }];
+    const first = await applyToolResultBudgetToMessages(raw, {
       projectPath: project,
-      sessionId: "session-seen-multi-turn",
+      sessionId: "session-stable-identity",
       state,
     });
+    expect(first.messages).toEqual(raw);
 
-    const visibleToolChars = result.messages.reduce((sum, message) => {
-      return message.role === "tool" ? sum + message.content.length : sum;
-    }, 0);
-    expect(visibleToolChars).toBeLessThanOrEqual(200_000);
-    expect(result.records.length).toBeGreaterThan(0);
-    expect(
-      result.messages.some(
-        (message) => message.role === "tool" && message.content.includes("<persisted-tool-result>"),
-      ),
-    ).toBe(true);
+    const persisted = await applyToolResultBudgetToMessages(
+      [{ role: "tool", tool_call_id: "call-same-content-later", content }],
+      {
+        projectPath: project,
+        sessionId: "session-stable-identity",
+        state,
+        singleResultChars: 1,
+      },
+    );
+    expect(persisted.records).toHaveLength(1);
+
+    const replay = await applyToolResultBudgetToMessages(raw, {
+      projectPath: project,
+      sessionId: "session-stable-identity",
+      state,
+      resolveLedgerRecords: () => [{}],
+    });
+    expect(replay.records).toHaveLength(0);
+    expect(replay.messages).toEqual(raw);
   });
 
   it("persists Bash and RunWorkflow tool_results without changing their tool_call_id pairing", async () => {
@@ -313,6 +391,202 @@ describe("tool_result budget", () => {
       "REUSE_BIG_END",
     );
   });
+
+  it("persists one artifact and one budget record for concurrent identical results", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-concurrent-"));
+    const state = {
+      seenIds: new Set<string>(),
+      replacements: new Map(),
+      pendingArtifacts: new Map(),
+    } as ToolResultBudgetState & { pendingArtifacts: Map<string, Promise<unknown>> };
+    const content = `CONCURRENT_RESULT:${"x".repeat(128)}`;
+    const messages = [{ role: "tool" as const, tool_call_id: "call-concurrent", content }];
+
+    const results = await Promise.all(
+      Array.from({ length: 32 }, () =>
+        applyToolResultBudgetToMessages(messages, {
+          projectPath: project,
+          sessionId: "session-concurrent",
+          state,
+          singleResultChars: 1,
+        }),
+      ),
+    );
+    const replacements = new Set(
+      results.map((result) =>
+        result.messages[0]?.role === "tool" ? result.messages[0].content : "",
+      ),
+    );
+    const artifactDir = join(
+      project,
+      ".linghun",
+      "session",
+      "tool-results",
+      "session-concurrent",
+    );
+
+    expect(results.reduce((total, result) => total + result.records.length, 0)).toBe(1);
+    expect(replacements.size).toBe(1);
+    expect(await readdir(artifactDir)).toHaveLength(1);
+    expect(state.pendingArtifacts.size).toBe(0);
+  });
+
+  it("rebuilds the same canonical replacement after hot state loss and reason changes", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-canonical-"));
+    const content = `CANONICAL_RESULT:${"y".repeat(128)}`;
+    const messages = [{ role: "tool" as const, tool_call_id: "", content }];
+    const first = await applyToolResultBudgetToMessages(messages, {
+      projectPath: project,
+      sessionId: "session-canonical",
+      state: { seenIds: new Set(), replacements: new Map() },
+      singleResultChars: 1,
+    });
+    const replayState: ToolResultBudgetState = {
+      seenIds: new Set(),
+      replacements: new Map(),
+      forcedToolUseIds: new Set([""]),
+    };
+    const replay = await applyToolResultBudgetToMessages(messages, {
+      projectPath: project,
+      sessionId: "session-canonical",
+      state: replayState,
+      singleResultChars: Number.MAX_SAFE_INTEGER,
+      singleResultBytes: Number.MAX_SAFE_INTEGER,
+    });
+    const firstReplacement = first.messages[0]?.role === "tool" ? first.messages[0].content : "";
+    const replayReplacement = replay.messages[0]?.role === "tool" ? replay.messages[0].content : "";
+
+    expect(first.records).toHaveLength(1);
+    expect(replay.records).toHaveLength(0);
+    expect(replayReplacement).toBe(firstReplacement);
+    expect(firstReplacement).not.toContain("reason:");
+    expect(first.records[0]?.artifact.id).toBe(first.records[0]?.artifact.sha256);
+  });
+
+  it("replays the same replacement without a record after memory eviction prunes its hot identity", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-evicted-"));
+    const content = `EVICTED_RESULT:${"e".repeat(128)}`;
+    const messages = [{ role: "tool" as const, tool_call_id: "call-evicted", content }];
+    const state: ToolResultBudgetState = { seenIds: new Set(), replacements: new Map() };
+    const first = await applyToolResultBudgetToMessages(messages, {
+      projectPath: project,
+      sessionId: "session-evicted",
+      state,
+      singleResultChars: 1,
+    });
+    const stateKey = [...state.seenIds][0];
+    const contentKey = [...(state.contentReplacements?.keys() ?? [])][0];
+    const replacementState = stateKey ? state.replacements.get(stateKey) : undefined;
+    expect(stateKey).toBeDefined();
+    expect(contentKey).toBeDefined();
+    expect(replacementState).toBeDefined();
+
+    for (let index = 0; index < 250; index += 1) {
+      const key = `newer-${index}`;
+      state.seenIds.add(key);
+      if (replacementState) {
+        state.replacements.set(key, replacementState);
+        state.contentReplacements?.set(`newer-content-${index}`, replacementState);
+      }
+    }
+    pruneToolResultBudgetState({ toolResultBudgetState: state } as never);
+    expect(stateKey ? state.seenIds.has(stateKey) : true).toBe(false);
+    expect(contentKey ? state.contentReplacements?.has(contentKey) : true).toBe(false);
+
+    const replay = await applyToolResultBudgetToMessages(messages, {
+      projectPath: project,
+      sessionId: "session-evicted",
+      state,
+      singleResultChars: 1,
+    });
+    const firstReplacement = first.messages[0]?.role === "tool" ? first.messages[0].content : "";
+    const replayReplacement = replay.messages[0]?.role === "tool" ? replay.messages[0].content : "";
+
+    expect(first.records).toHaveLength(1);
+    expect(replay.records).toHaveLength(0);
+    expect(replayReplacement).toBe(firstReplacement);
+  });
+
+  it("keeps 1000 artifacts and 100 replay rounds bounded without duplicate records", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-pressure-"));
+    const sessionId = "session-pressure";
+    const state: ToolResultBudgetState = {
+      seenIds: new Set(),
+      replacements: new Map(),
+      pendingArtifacts: new Map(),
+    };
+    const contentFor = (index: number) => `PRESSURE_RESULT_${index}:${"p".repeat(128)}`;
+    const expectedReplacements = new Map<number, string>();
+    let persistedRecords = 0;
+
+    for (let round = 0; round < 100; round += 1) {
+      const messages = Array.from({ length: 10 }, (_, offset) => {
+        const index = round * 10 + offset;
+        return {
+          role: "tool" as const,
+          tool_call_id: `call-pressure-${index}`,
+          content: contentFor(index),
+        };
+      });
+      const result = await applyToolResultBudgetToMessages(messages, {
+        projectPath: project,
+        sessionId,
+        state,
+        singleResultChars: 1,
+      });
+      persistedRecords += result.records.length;
+      for (let offset = 0; offset < result.messages.length; offset += 1) {
+        const message = result.messages[offset];
+        if (message?.role === "tool") {
+          expectedReplacements.set(round * 10 + offset, message.content);
+        }
+      }
+    }
+
+    const afterPersist = process.memoryUsage();
+    let replayRecords = 0;
+    for (let round = 0; round < 100; round += 1) {
+      const messages = Array.from({ length: 10 }, (_, offset) => {
+        const index = round * 10 + offset;
+        return {
+          role: "tool" as const,
+          tool_call_id: `call-pressure-${index}`,
+          content: contentFor(index),
+        };
+      });
+      const result = await applyToolResultBudgetToMessages(
+        messages,
+        {
+          projectPath: project,
+          sessionId,
+          state,
+          singleResultChars: 1,
+        },
+      );
+      replayRecords += result.records.length;
+      for (let offset = 0; offset < result.messages.length; offset += 1) {
+        const message = result.messages[offset];
+        expect(message?.role === "tool" ? message.content : "").toBe(
+          expectedReplacements.get(round * 10 + offset),
+        );
+      }
+    }
+    const afterReplay = process.memoryUsage();
+    const artifactDir = join(project, ".linghun", "session", "tool-results", sessionId);
+    const artifacts = await readdir(artifactDir);
+
+    expect(persistedRecords).toBe(1_000);
+    expect(replayRecords).toBe(0);
+    expect(artifacts).toHaveLength(1_000);
+    expect(new Set(artifacts).size).toBe(1_000);
+    expect(artifacts.every((name) => /^[a-f0-9]{64}\.txt$/u.test(name))).toBe(true);
+    expect(state.seenIds.size).toBeLessThanOrEqual(200);
+    expect(state.replacements.size).toBeLessThanOrEqual(200);
+    expect(state.contentReplacements?.size ?? 0).toBeLessThanOrEqual(200);
+    expect(state.pendingArtifacts?.size ?? 0).toBe(0);
+    expect(afterReplay.heapUsed - afterPersist.heapUsed).toBeLessThan(64 * 1024 * 1024);
+    expect(afterReplay.rss - afterPersist.rss).toBeLessThan(128 * 1024 * 1024);
+  }, 60_000);
 
   it("does not mark large results seen when artifact persistence fails", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-"));

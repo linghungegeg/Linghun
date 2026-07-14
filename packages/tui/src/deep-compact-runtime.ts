@@ -61,6 +61,10 @@ const VERBATIM_USER_MESSAGE_LIMIT = 6;
 const TOOL_RESULT_SUMMARY_LIMIT = 12;
 const CODE_SNIPPET_LIMIT = 8;
 const CODE_SNIPPET_TEXT_LIMIT = 360;
+const RUNTIME_UUID_PATTERN =
+  /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/giu;
+const ISO_TIMESTAMP_PATTERN =
+  /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z\b/gu;
 
 export function createDeepCompactProgress(): CompactProgressSnapshot {
   return {
@@ -516,26 +520,58 @@ export function formatDeepCompactPromptSummary(
   packet: DeepCompactPacket | undefined,
 ): string | undefined {
   if (!packet) return undefined;
+  const toolResultSummaries = (packet.toolResultSummaries ?? []).map(
+    formatProviderToolResultSummary,
+  );
+  const decisions = packet.decisions.map(sanitizeProviderStableCompactText);
+  const risks = packet.risks
+    .filter((risk) => !/^compactFailure:/iu.test(risk.trim()))
+    .map(sanitizeProviderStableCompactText);
   return [
     "Deep compact context",
     `scope ${packet.scope}`,
     "role older context continuity",
-    `summary ${packet.summary}`,
-    `preserved evidence refs ${packet.preservedEvidenceRefs.join(", ") || "none"}`,
-    `preserved files ${packet.preservedFiles.join(", ") || "none"}`,
-    `narrative summary ${packet.narrativeSummary || "none"}`,
-    `user messages verbatim ${packet.userMessagesVerbatim?.join("\n") || "none"}`,
-    `tool result summaries ${packet.toolResultSummaries?.join("\n") || "none"}`,
-    `code snippets ${packet.codeSnippets?.join("\n") || "none"}`,
-    `active agents/workflows ${packet.activeAgentsWorkflows.join("; ") || "none"}`,
-    `needs-attention agents/workflows ${packet.needsAttentionAgentsWorkflows?.join("; ") || "none"}`,
-    `stale resumable agents/workflows ${packet.staleResumableAgentsWorkflows?.join("; ") || "none"}`,
-    `pending items ${packet.pendingItems.join("; ") || "none"}`,
-    `decisions ${packet.decisions.join("; ") || "none"}`,
-    `risks ${packet.risks.join("; ") || "none"}`,
+    `summary ${sanitizeProviderStableCompactText(packet.summary)}`,
+    `preserved evidence count ${packet.preservedEvidenceRefs.length}`,
+    `preserved files ${packet.preservedFiles.map(sanitizeProviderStableCompactText).join(", ") || "none"}`,
+    `narrative summary ${sanitizeProviderStableCompactText(packet.narrativeSummary || "none")}`,
+    `user messages verbatim ${packet.userMessagesVerbatim?.map(sanitizeProviderStableCompactText).join("\n") || "none"}`,
+    `tool result summaries ${toolResultSummaries.join("\n") || "none"}`,
+    `code snippets ${packet.codeSnippets?.map(sanitizeProviderStableCompactText).join("\n") || "none"}`,
+    `active agents/workflows ${packet.activeAgentsWorkflows.length}`,
+    `needs-attention agents/workflows ${packet.needsAttentionAgentsWorkflows?.length ?? 0}`,
+    `stale resumable agents/workflows ${packet.staleResumableAgentsWorkflows?.length ?? 0}`,
+    `pending items ${packet.pendingItems.map(sanitizeProviderStableCompactText).join("; ") || "none"}`,
+    `decisions ${decisions.join("; ") || "none"}`,
+    `risks ${risks.join("; ") || "none"}`,
     "priority boundary: This deep compact is older context continuity. If it conflicts with later transcript messages or the latest user request, the later/latest request wins.",
     "anti hallucination: Use deep compact only for context continuity; never treat it as PASS engineering evidence.",
   ].join("\n");
+}
+
+function formatProviderToolResultSummary(value: string): string {
+  return sanitizeProviderStableCompactText(
+    value
+      .replace(/^tool_end:[^:]+:(?=truncated\b)/u, "tool_end:")
+      .replace(/;\s*evidence\s+[^;]+;/gu, "; evidence recorded;"),
+  );
+}
+
+export function sanitizeProviderStableCompactText(value: string): string {
+  return value
+    .replace(RUNTIME_UUID_PATTERN, "[runtime-id]")
+    .replace(ISO_TIMESTAMP_PATTERN, "[runtime-time]")
+    .replace(
+      /"?\b(?:requestTurnId|ownerId|ownerRequestTurnId|ownerRuntimeContextId|runtimeContextId|toolUseId|evidenceId|agentId|workflowId)\b"?\s*(?:[:=]\s*|\s+)(?:"(?:\\.|[^"\\])*"|[^,;}\s]+)/giu,
+      "[runtime-owner]",
+    )
+    .replace(
+      /\s*"?\bfallback(?:Used)?\b"?\s*(?:[:=]\s*|\s+)(?:"?(?:yes|no|true|false)"?)/giu,
+      "",
+    )
+    .replace(/\bcompactFailure\s*:[^;\n]*/giu, "compact failure recorded")
+    .replace(/\s+/gu, " ")
+    .trim();
 }
 
 export function injectDeepCompactSummary(
@@ -712,14 +748,18 @@ export function buildDeepCompactRequestMessages(
   const state = [
     `trigger ${trigger}`,
     `transcript events ${transcript.length}`,
-    `project rules ${sanitizeDeepCompactText(context, context.memory.projectRulesSummary || "none", 300)}`,
-    `index ${formatIndexRuntimeRef(context.index)}`,
-    `cache freshness ${context.cache.lastFreshness?.changedKeys.join(", ") || "stable or unknown"}`,
+    `project rules ${sanitizeProviderStableCompactText(sanitizeDeepCompactText(context, context.memory.projectRulesSummary || "none", 300))}`,
+    `index ${sanitizeProviderStableCompactText(formatIndexRuntimeRef(context.index))}`,
+    `cache freshness ${sanitizeProviderStableCompactText(context.cache.lastFreshness?.changedKeys.join(", ") || "stable or unknown")}`,
     `accepted memory ${context.memory.accepted.length}`,
     `failure learning ${
       context.failureLearning.records
         .slice(0, 5)
-        .map((item) => sanitizeDeepCompactText(context, item.avoidNextTime, 180))
+        .map((item) =>
+          sanitizeProviderStableCompactText(
+            sanitizeDeepCompactText(context, item.avoidNextTime, 180),
+          ),
+        )
         .join("; ") || "none"
     }`,
   ];
@@ -768,12 +808,12 @@ function buildFullTranscriptSemanticOutline(
       : undefined;
   const previousAuthoritativeCompact = previousPacket
     ? [
-        `narrative ${previousPacket.narrativeSummary || previousPacket.summary}`,
-        `user messages ${previousPacket.userMessagesVerbatim?.join(" | ") || "none"}`,
-        `decisions ${previousPacket.decisions.join(" | ") || "none"}`,
-        `risks ${previousPacket.risks.join(" | ") || "none"}`,
-        `evidence ${previousPacket.preservedEvidenceRefs.join(", ") || "none"}`,
-        `files ${previousPacket.preservedFiles.join(", ") || "none"}`,
+        `narrative ${sanitizeProviderStableCompactText(previousPacket.narrativeSummary || previousPacket.summary)}`,
+        `user messages ${previousPacket.userMessagesVerbatim?.map(sanitizeProviderStableCompactText).join(" | ") || "none"}`,
+        `decisions ${previousPacket.decisions.map(sanitizeProviderStableCompactText).join(" | ") || "none"}`,
+        `risks ${previousPacket.risks.filter((risk) => !/^compactFailure:/iu.test(risk.trim())).map(sanitizeProviderStableCompactText).join(" | ") || "none"}`,
+        `evidence count ${previousPacket.preservedEvidenceRefs.length}`,
+        `files ${previousPacket.preservedFiles.map(sanitizeProviderStableCompactText).join(", ") || "none"}`,
       ].join("\n")
     : "none";
 
@@ -795,7 +835,7 @@ function buildFullTranscriptSemanticOutline(
   const latestUser = findLatestEvent(transcript, "user_message");
   const recentTail = transcript
     .slice(-RECENT_TRANSCRIPT_TAIL_EVENTS)
-    .map((event) => summarizeTranscriptEvent(context, event));
+    .map((event) => summarizeTranscriptEventForProvider(context, event));
 
   return [
     "Full transcript semantic outline:",
@@ -805,12 +845,12 @@ function buildFullTranscriptSemanticOutline(
       12_000,
     )}`,
     `event type counts: ${Array.from(eventTypeCounts.entries()).map(([type, count]) => `${type}:${count}`).join(", ") || "none"}`,
-    `first user goal: ${firstUser?.type === "user_message" ? sanitizeDeepCompactText(context, firstUser.text, EVENT_TEXT_LIMIT) : "none"}`,
-    `latest user goal: ${latestUser?.type === "user_message" ? sanitizeDeepCompactText(context, latestUser.text, EVENT_TEXT_LIMIT) : "none"}`,
+    `first user goal: ${firstUser?.type === "user_message" ? sanitizeProviderStableCompactText(sanitizeDeepCompactText(context, firstUser.text, EVENT_TEXT_LIMIT)) : "none"}`,
+    `latest user goal: ${latestUser?.type === "user_message" ? sanitizeProviderStableCompactText(sanitizeDeepCompactText(context, latestUser.text, EVENT_TEXT_LIMIT)) : "none"}`,
     formatOutlineSection("key user requirements", userMessages, 24),
     formatOutlineSection("assistant decisions", assistantDecisions, 24),
     formatOutlineSection("tool calls and results", toolSummaries, 28),
-    formatOutlineSection("evidence refs", evidenceRefs, 20),
+    formatOutlineSection("evidence summaries", evidenceRefs, 20),
     formatOutlineSection("changed or preserved files", changedOrPreservedFiles, 20),
     formatOutlineSection("agent workflow events", agentWorkflowEvents, 20),
     formatOutlineSection("verification and failure learning", verificationFailures, 20),
@@ -837,49 +877,49 @@ function collectOutlineEvent(
     case "user_message":
       pushEarlyAndRecent(
         buckets.userMessages,
-        `user:${sanitizeDeepCompactText(context, event.text, EVENT_TEXT_LIMIT)}`,
+        `user:${sanitizeProviderStableCompactText(sanitizeDeepCompactText(context, event.text, EVENT_TEXT_LIMIT))}`,
       );
       break;
     case "assistant_text_delta":
       if (looksLikeDecision(event.text)) {
         pushEarlyAndRecent(
           buckets.assistantDecisions,
-          `assistant:${sanitizeDeepCompactText(context, event.text, EVENT_TEXT_LIMIT)}`,
+          `assistant:${sanitizeProviderStableCompactText(sanitizeDeepCompactText(context, event.text, EVENT_TEXT_LIMIT))}`,
         );
       }
       break;
     case "tool_call_start":
       pushEarlyAndRecent(
         buckets.toolSummaries,
-        `tool_start:${event.name}:${sanitizeDeepCompactText(context, stringifyValueWithinBudget(event.input, 221) ?? "[unserializable]", 220)}`,
+        summarizeTranscriptEventForProvider(context, event),
       );
       break;
     case "tool_result":
-      pushEarlyAndRecent(buckets.toolSummaries, summarizeTranscriptEvent(context, event));
+      pushEarlyAndRecent(buckets.toolSummaries, summarizeTranscriptEventForProvider(context, event));
       if (event.evidenceId) {
-        pushEarlyAndRecent(buckets.evidenceRefs, `evidence:${event.evidenceId}`);
+        pushEarlyAndRecent(buckets.evidenceRefs, `tool_result:${event.toolName}:evidence recorded`);
       }
       break;
     case "tool_call_end":
-      pushEarlyAndRecent(buckets.toolSummaries, summarizeTranscriptEvent(context, event));
+      pushEarlyAndRecent(buckets.toolSummaries, summarizeTranscriptEventForProvider(context, event));
       if (event.output.fullOutputPath) {
         pushEarlyAndRecent(buckets.changedOrPreservedFiles, "tool_output_artifact:[artifact]");
       }
       for (const file of event.output.changedFiles ?? []) {
         pushEarlyAndRecent(
           buckets.changedOrPreservedFiles,
-          sanitizeDeepCompactText(context, file, 180),
+          sanitizeProviderStableCompactText(sanitizeDeepCompactText(context, file, 180)),
         );
       }
       break;
     case "evidence_record":
       pushEarlyAndRecent(
         buckets.evidenceRefs,
-        `${event.id}:${event.kind}:${sanitizeDeepCompactText(context, event.summary, EVENT_TEXT_LIMIT)}`,
+        `${event.kind}:${sanitizeProviderStableCompactText(sanitizeDeepCompactText(context, event.summary, EVENT_TEXT_LIMIT))}`,
       );
       pushEarlyAndRecent(
         buckets.changedOrPreservedFiles,
-        sanitizeDeepCompactText(context, event.source, 180),
+        sanitizeProviderStableCompactText(sanitizeDeepCompactText(context, event.source, 180)),
       );
       break;
     case "agent_start":
@@ -887,10 +927,16 @@ function collectOutlineEvent(
     case "workflow_start":
     case "workflow_step_result":
     case "workflow_end":
-      pushEarlyAndRecent(buckets.agentWorkflowEvents, summarizeTranscriptEvent(context, event));
+      pushEarlyAndRecent(
+        buckets.agentWorkflowEvents,
+        summarizeTranscriptEventForProvider(context, event),
+      );
       break;
     case "verification_end":
-      pushEarlyAndRecent(buckets.verificationFailures, summarizeTranscriptEvent(context, event));
+      pushEarlyAndRecent(
+        buckets.verificationFailures,
+        summarizeTranscriptEventForProvider(context, event),
+      );
       break;
     case "system_event":
       if (
@@ -898,13 +944,19 @@ function collectOutlineEvent(
           event.message,
         )
       ) {
-        pushEarlyAndRecent(buckets.verificationFailures, summarizeTranscriptEvent(context, event));
+        pushEarlyAndRecent(
+          buckets.verificationFailures,
+          summarizeTranscriptEventForProvider(context, event),
+        );
       }
       break;
     case "permission_request":
     case "permission_result":
     case "todo_update":
-      pushEarlyAndRecent(buckets.permissionsTodos, summarizeTranscriptEvent(context, event));
+      pushEarlyAndRecent(
+        buckets.permissionsTodos,
+        summarizeTranscriptEventForProvider(context, event),
+      );
       break;
     default:
       break;
@@ -946,6 +998,72 @@ function looksLikeDecision(text: string): boolean {
   return /decid|decision|choose|chosen|plan|will|must|should|done|fixed|blocked|risk|决定|选择|计划|必须|应该|已|阻断|风险/i.test(
     text,
   );
+}
+
+function summarizeTranscriptEventForProvider(
+  context: TuiContext,
+  event: TranscriptEvent,
+): string {
+  const stableText = (value: string, maxChars = EVENT_TEXT_LIMIT) =>
+    sanitizeProviderStableCompactText(sanitizeDeepCompactText(context, value, maxChars));
+  switch (event.type) {
+    case "user_message":
+      return `user:${stableText(event.text)}`;
+    case "assistant_text_delta":
+      return `assistant:${stableText(event.text)}`;
+    case "tool_call_start":
+      return `tool_start:${event.name}:${stableText(
+        stringifyValueWithinBudget(event.input, 221) ?? "[unserializable]",
+        220,
+      )}`;
+    case "tool_result":
+      return `tool_result:${event.toolName}:is error ${event.isError ? "yes" : "no"}; evidence ${event.evidenceId ? "recorded" : "none"}; summary ${stableText(summarizeToolResultContent(event.content))}`;
+    case "tool_call_end":
+      return `tool_end:truncated ${event.output.truncated ? "yes" : "no"}; full output path ${event.output.fullOutputPath ? "[artifact]" : "none"}; summary ${stableText(event.output.text)}`;
+    case "verification_end":
+      return `verification:${event.report.status}:${stableText(event.report.summary)}`;
+    case "todo_update":
+      return `todos:${event.items.map((item) => `${item.status}:${stableText(item.content, 80)}`).join("; ")}`;
+    case "background_task_update":
+      return `background:${event.task.kind}:${event.task.status}:${stableText(event.task.userVisibleSummary)}`;
+    case "agent_start":
+      return `agent_start:${summarizeProviderRuntimeObject(context, event.agent)}`;
+    case "agent_end":
+      return `agent_end:${event.status}:${stableText(event.summary)}`;
+    case "workflow_start":
+      return `workflow_start:${summarizeProviderRuntimeObject(context, event.workflow)}`;
+    case "workflow_step_result":
+      return `workflow_step:${event.status}:${stableText(event.summary)} evidence count ${event.evidenceRefs.length}`;
+    case "workflow_end":
+      return `workflow_end:${event.status}:${stableText(event.summary)}`;
+    case "permission_request":
+      return `permission_request:${event.request.toolName}:${event.request.risk}:${stableText(event.request.summary, 220)}`;
+    case "permission_result":
+      return `permission_result:${event.decision}:${stableText(event.reason, 160)}`;
+    case DEEP_COMPACT_EVENT_TYPE:
+      return "deep_compact_packet:previous summary exists";
+    case "system_event":
+      return `system:${event.level}:${stableText(event.message)}`;
+    default:
+      return `${event.type}:recorded`;
+  }
+}
+
+function summarizeProviderRuntimeObject(context: TuiContext, value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "state recorded";
+  const record = value as Record<string, unknown>;
+  const fields = ["status", "task", "summary", "goal", "title", "userVisibleSummary", "currentStep"];
+  const values = fields.flatMap((field) => {
+    const item = record[field];
+    return typeof item === "string" && item.trim()
+      ? [
+          `${field} ${sanitizeProviderStableCompactText(
+            sanitizeDeepCompactText(context, item, EVENT_TEXT_LIMIT),
+          )}`,
+        ]
+      : [];
+  });
+  return values.join("; ") || "state recorded";
 }
 
 function summarizeTranscriptEvent(context: TuiContext, event: TranscriptEvent): string {

@@ -705,6 +705,7 @@ import {
 } from "./mcp-index-command-runtime.js";
 import {
   configureMcpIndexRuntime,
+  disposePreEngineDaemonsForOwner,
   executeExtraTool,
   executeSearchExtraTools,
   handleIndexCommand,
@@ -1553,8 +1554,11 @@ async function createTuiRuntimeContext(projectPath: string): Promise<{
     if (!task) return;
     if (task.status === "running") {
       const fakeOutput = {
-        text: `exit ${result.exitCode} (${result.outcome})`,
-        data: { exitCode: result.exitCode, outcome: result.outcome },
+        text: `${result.outcome}${result.exitCode !== undefined ? `; exit ${result.exitCode}` : ""}`,
+        data: {
+          ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
+          outcome: result.outcome,
+        },
         fullOutputPath: result.outputPath,
       };
       finishBackgroundTaskFromToolOutput(task, fakeOutput as never, context);
@@ -1569,9 +1573,11 @@ async function createTuiRuntimeContext(projectPath: string): Promise<{
       void appendBackgroundTaskEvent(context, sessionId, task).catch(() => {});
       const evidence = createEvidenceRecord(
         "command_output",
-        `Bash(background): ${result.command}; exit=${result.exitCode} ${result.outcome}`,
+        `Bash(background): ${result.command}; outcome=${result.outcome}${result.exitCode !== undefined ? ` exit=${result.exitCode}` : ""}`,
         result.outputPath,
-        result.exitCode === 0 ? ["background_bash_pass"] : ["background_bash_fail"],
+        result.outcome === "completed" && result.exitCode === 0
+          ? ["background_bash_pass", "bash_outcome_completed"]
+          : ["background_bash_fail", `bash_outcome_${result.outcome}`],
       );
       scopeEvidenceToContext(context, evidence, {
         ownerSessionId: sessionId,
@@ -1676,6 +1682,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     return 1;
   } finally {
     options.signal?.removeEventListener("abort", interruptHandler);
+    disposePreEngineDaemonsForOwner(context.runtimeOwnerId);
     try {
       await clearRemoteCommandRuntime(context);
     } catch (error) {
@@ -2156,6 +2163,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
     return 1;
   } finally {
     options.signal?.removeEventListener("abort", interruptHandler);
+    disposePreEngineDaemonsForOwner(context.runtimeOwnerId);
     // Clean up any remaining retained processes from attempts
     if (previousAttemptProcessGuard) {
       await stopHeadlessAttemptProcesses(previousAttemptProcessGuard);

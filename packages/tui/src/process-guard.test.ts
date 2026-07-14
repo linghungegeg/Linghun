@@ -216,6 +216,41 @@ describe("ProcessGuard", () => {
     expect(guard.snapshot()).toEqual([]);
   });
 
+  it("waits for the Windows descendant stopper before confirming stop", async () => {
+    const registry = new ProcessGuardRegistry();
+    const gone = Object.assign(new Error("gone"), { code: "ESRCH" });
+    let alive = true;
+    const killMock = vi.fn((_pid: number, signal: NodeJS.Signals | number) => {
+      if (signal === 0 && alive) return true;
+      if (signal === 0) throw gone;
+      return true;
+    });
+    const spawnMock = vi.fn(() => {
+      const killer = new EventEmitter();
+      setTimeout(() => {
+        alive = false;
+        killer.emit("close", 0);
+      }, 20);
+      return killer;
+    });
+    const guard = createProcessGuard(registry, {
+      platform: "win32",
+      kill: killMock as never,
+      spawn: spawnMock as never,
+    });
+    guard.track(createFakeChild(5022));
+
+    await expect(guard.requestStopAndConfirm(true, 100)).resolves.toMatchObject({
+      ok: true,
+      stopResult: { attempted: 1, force: true, failures: [] },
+    });
+    expect(spawnMock).toHaveBeenCalledWith(
+      "powershell.exe",
+      expect.arrayContaining(["-NoProfile", "-NonInteractive", "-Command"]),
+      expect.any(Object),
+    );
+  });
+
   it("removes exited children from the tracked registry", () => {
     const registry = new ProcessGuardRegistry();
     const child = createFakeChild(5003);

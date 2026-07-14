@@ -10,12 +10,14 @@ import {
   __testClassifyWindowsShellCommand,
   __testCreateBashOutcomeDiagnostics,
   __testCreateBashPromptDiagnostic,
+  __testCreateShellChunkDecoder,
   __testDecodeShellChunk,
   __testCanSafelyAliasPythonCommand,
   __testGlobToRegExp,
   __testParseBashCommandIntent,
   adaptShellCommandForPlatform,
   builtInTools,
+  createShellChunkDecoder,
   createTool,
   createToolContext,
   runTool,
@@ -672,7 +674,8 @@ describe("Phase 05 core tools", () => {
       context,
     );
 
-    expect(timeout.output.data).toMatchObject({ exitCode: 1, outcome: "timeout" });
+    expect(timeout.output.data).toMatchObject({ outcome: "timeout" });
+    expect(timeout.output.data).not.toHaveProperty("exitCode");
     expect(timeout.output.text).toContain("命令超时");
 
     const controller = new AbortController();
@@ -688,7 +691,8 @@ describe("Phase 05 core tools", () => {
     controller.abort();
     const cancelled = await running;
 
-    expect(cancelled.output.data).toMatchObject({ exitCode: 1, outcome: "cancelled" });
+    expect(cancelled.output.data).toMatchObject({ outcome: "cancelled" });
+    expect(cancelled.output.data).not.toHaveProperty("exitCode");
     expect(cancelled.output.text).toContain("工具调用已取消");
   }, 15_000);
 
@@ -1292,7 +1296,8 @@ describe("Phase 05 core tools", () => {
       createToolContext(project),
     );
 
-    expect(timeout.output.data).toMatchObject({ exitCode: 1, outcome: "timeout" });
+    expect(timeout.output.data).toMatchObject({ outcome: "timeout" });
+    expect(timeout.output.data).not.toHaveProperty("exitCode");
     if (process.platform === "win32") {
       await expect(readFile(timeoutSentinel, "utf8")).rejects.toThrow();
     }
@@ -1313,7 +1318,8 @@ describe("Phase 05 core tools", () => {
     controller.abort();
     const cancelled = await running;
 
-    expect(cancelled.output.data).toMatchObject({ exitCode: 1, outcome: "cancelled" });
+    expect(cancelled.output.data).toMatchObject({ outcome: "cancelled" });
+    expect(cancelled.output.data).not.toHaveProperty("exitCode");
     if (process.platform === "win32") {
       await expect(readFile(cancelSentinel, "utf8")).rejects.toThrow();
     }
@@ -1347,7 +1353,8 @@ describe("Phase 05 core tools", () => {
       createToolContext(project),
     );
 
-    expect(timeout.output.data).toMatchObject({ exitCode: 1, outcome: "timeout" });
+    expect(timeout.output.data).toMatchObject({ outcome: "timeout" });
+    expect(timeout.output.data).not.toHaveProperty("exitCode");
     await new Promise((resolve) => setTimeout(resolve, 1400));
     await expect(readFile(sentinel, "utf8")).rejects.toThrow();
   });
@@ -1363,7 +1370,8 @@ describe("Phase 05 core tools", () => {
       createToolContext(project),
     );
 
-    expect(result.output.data).toMatchObject({ exitCode: 1, outcome: "timeout" });
+    expect(result.output.data).toMatchObject({ outcome: "timeout" });
+    expect(result.output.data).not.toHaveProperty("exitCode");
     expect(result.output.details).toContain("fullOutputPath:");
     expect(result.output.details).toContain("命令超时");
     expect(result.output.fullOutputPath).toBeTruthy();
@@ -2861,6 +2869,164 @@ describe("Phase 05 core tools", () => {
     const utf8Bytes = Buffer.from("hello world 测试 UTF-8", "utf8");
     const result = __testDecodeShellChunk(utf8Bytes);
     expect(result).toBe("hello world 测试 UTF-8");
+  });
+
+  it("removes PowerShell CLIXML while preserving surrounding text", () => {
+    const clixml = [
+      "before\n#< CLIXML\n",
+      '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">',
+      '<Obj S="progress"><MS><S N="Activity">noise</S></MS></Obj></Objs>\n',
+      "after\n",
+    ].join("");
+
+    expect(__testDecodeShellChunk(Buffer.from(clixml, "utf8"))).toBe("before\nafter\n");
+  });
+
+  it("preserves PowerShell CLIXML ErrorRecord text while filtering progress noise", () => {
+    const clixml = [
+      "before\n#< CLIXML\n",
+      '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">',
+      '<Obj S="progress"><MS><S N="Activity">下载模块</S></MS></Obj>',
+      '<S S="Error">找不到指定路径_x000D__x000A_请检查 &lt;目标&gt;</S>',
+      "</Objs>\nafter\n",
+    ].join("");
+
+    const output = __testDecodeShellChunk(Buffer.from(clixml, "utf8"));
+    expect(output).toBe("before\n找不到指定路径\n请检查 <目标>\nafter\n");
+    expect(output).not.toContain("下载模块");
+    expect(output).not.toContain("CLIXML");
+  });
+
+  it("preserves non-progress PowerShell CLIXML streams in order", () => {
+    const clixml = [
+      '#< CLIXML\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">',
+      '<S S="Output">普通输出</S>',
+      '<S S="Warning">警告正文</S>',
+      '<Obj S="Information"><MS><S N="MessageData">信息正文</S></MS></Obj>',
+      '<S S="Verbose">详细正文</S>',
+      '<Obj S="progress"><MS><S N="Activity">下载噪声</S></MS></Obj>',
+      '<S S="Debug">调试正文</S>',
+      "</Objs>",
+    ].join("");
+
+    const output = __testDecodeShellChunk(Buffer.from(clixml, "utf8"));
+    expect(output).toBe("普通输出\n警告正文\n信息正文\n详细正文\n调试正文\n");
+    expect(output).not.toContain("下载噪声");
+    expect(output).not.toContain("CLIXML");
+  });
+
+  it("preserves GB18030 PowerShell ErrorRecord text on Windows", () => {
+    if (process.platform !== "win32") return;
+    const prefix = Buffer.from(
+      '#< CLIXML\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><S S="Error">',
+      "ascii",
+    );
+    const bytes = Buffer.concat([
+      prefix,
+      Buffer.from([0xd5, 0xd2, 0xb2, 0xbb, 0xb5, 0xbd, 0xd6, 0xb8, 0xb6, 0xa8, 0xc2, 0xb7, 0xbe, 0xb6]),
+      Buffer.from("</S></Objs>", "ascii"),
+    ]);
+    const decoder = createShellChunkDecoder();
+    const output = decoder.push(bytes.subarray(0, prefix.length + 1))
+      + decoder.push(bytes.subarray(prefix.length + 1))
+      + decoder.flush();
+
+    expect(output).toBe("找不到指定路径\n");
+  });
+
+  it("preserves a four-byte GB18030 character split after its ASCII digit byte", () => {
+    if (process.platform !== "win32") return;
+    const prefix = Buffer.from(
+      '#< CLIXML\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><S S="Error">',
+      "ascii",
+    );
+    const character = Buffer.from([0x95, 0x32, 0x82, 0x36]);
+    const suffix = Buffer.from("</S></Objs>", "ascii");
+    const decoder = createShellChunkDecoder();
+    const output = decoder.push(Buffer.concat([prefix, character.subarray(0, 2)]))
+      + decoder.push(Buffer.concat([character.subarray(2), suffix]))
+      + decoder.flush();
+
+    expect(output).toBe("𠀀\n");
+    expect(output).not.toContain("�");
+  });
+
+  it("consumes an invalid byte before continued ASCII output without buffering the stream", () => {
+    const decoder = createShellChunkDecoder();
+    let output = decoder.push(Buffer.from([0xff]));
+    const asciiChunk = Buffer.alloc(4_096, 0x41);
+    for (let index = 0; index < 32; index += 1) {
+      const decoded = decoder.push(asciiChunk);
+      expect(decoded.length).toBeGreaterThan(4_000);
+      output += decoded;
+    }
+    output += decoder.flush();
+
+    expect(output.startsWith("�")).toBe(true);
+    expect(output.slice(1)).toBe("A".repeat(32 * asciiChunk.length));
+  });
+
+  it("preserves UTF-8 Chinese text split inside a multibyte code point", () => {
+    const bytes = Buffer.from(
+      '#< CLIXML\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><S S="Error">执行失败</S></Objs>',
+      "utf8",
+    );
+    const splitAt = bytes.indexOf(Buffer.from("执行", "utf8")) + 1;
+    const decoder = createShellChunkDecoder();
+    const output = decoder.push(bytes.subarray(0, splitAt))
+      + decoder.push(bytes.subarray(splitAt))
+      + decoder.flush();
+
+    expect(output).toBe("执行失败\n");
+    expect(output).not.toContain("�");
+  });
+
+  it("preserves split PowerShell ErrorRecord object text without raw CLIXML", () => {
+    const decoder = createShellChunkDecoder();
+    const chunks = [
+      "#< CLI",
+      'XML\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">',
+      '<Obj S="Error"><TN><T>System.Management.Automation.ErrorRecord</T></TN><To',
+      'String>执行失败：无法读取中文文件</ToString></Obj><S S="Warning">请检查路径</S>',
+      '<Obj S="progress">noise</Obj>',
+      "</Objs>tail",
+    ];
+    const output = chunks.map((chunk) => decoder.push(Buffer.from(chunk, "utf8"))).join("") + decoder.flush();
+
+    expect(output).toBe("执行失败：无法读取中文文件\n请检查路径\ntail");
+    expect(output).not.toContain("System.Management.Automation.ErrorRecord");
+    expect(output).not.toContain("progress");
+    expect(output).not.toContain("<Objs");
+  });
+
+  it("removes split PowerShell CLIXML without changing ANSI, OSC, or Markdown", () => {
+    const decoder = __testCreateShellChunkDecoder();
+    const visible = [
+      "\u001b[31mred\u001b[0m\n",
+      "\u001b]8;;https://example.com\u0007link\u001b]8;;\u0007\n",
+      "```ts\nconst value = 1;\n```\n",
+    ].join("");
+    const chunks = [
+      visible.slice(0, 11),
+      `${visible.slice(11)}#< CLI`,
+      "XML\n<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\"><Obj>",
+      "noise</Obj></Ob",
+      "js>tail",
+    ];
+    const output = chunks.map((chunk) => decoder.push(Buffer.from(chunk, "utf8"))).join("") + decoder.flush();
+
+    expect(output).toBe(`${visible}tail`);
+  });
+
+  it("preserves marker-only CLIXML text in Markdown and split streams", () => {
+    const markdown = "```text\n#< CLIXML\nnot an XML envelope\n```\nafter\n";
+    expect(__testDecodeShellChunk(Buffer.from(markdown, "utf8"))).toBe(markdown);
+
+    const decoder = __testCreateShellChunkDecoder();
+    const output = ["```text\n#< CLI", "XML\nnot an XML envelope\n", "```\nafter\n"]
+      .map((chunk) => decoder.push(Buffer.from(chunk, "utf8")))
+      .join("") + decoder.flush();
+    expect(output).toBe(markdown);
   });
 });
 

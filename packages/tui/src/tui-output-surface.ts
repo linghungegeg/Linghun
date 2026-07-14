@@ -202,6 +202,8 @@ export class ShellBlockOutput extends Writable {
       nextAction: hasVisibleDetails ? detailsHint : base.nextAction,
       ctrlOCollapsed: hasVisibleDetails || base.ctrlOCollapsed,
       messageKind: structured.block.kind,
+      failureDomain: isError ? "tool" : undefined,
+      failureRequestTurnId: isError ? this.context.currentRequestTurnId : undefined,
       displayBlock: {
         ...structured.block,
         summary: base.summary,
@@ -495,7 +497,7 @@ export class ShellBlockOutput extends Writable {
       retryMax: metadata?.retryMax ?? this.context.retryInfo?.max,
       failureDomain: metadata?.failureDomain,
       failureOutcome: metadata?.failureOutcome,
-      failureRequestTurnId: metadata?.failureRequestTurnId,
+      failureRequestTurnId: metadata?.failureRequestTurnId ?? this.context.currentRequestTurnId,
     };
     const last = this.blocks.at(-1);
     if (

@@ -7,8 +7,9 @@ import { SessionStore } from "@linghun/core";
 import type { ModelGateway, ModelMessage, ModelRequest, ModelToolCall } from "@linghun/providers";
 import { builtInTools, createToolContext, type ToolOutput } from "@linghun/tools";
 import { describe, expect, it, vi } from "vitest";
+import { interruptAllActiveWork } from "./background-control-runtime.js";
 import { createFailureLearningState } from "./failure-learning-runtime.js";
-import { evidenceMatchesRequestOwner } from "./evidence-runtime.js";
+import { evidenceMatchesRequestOwner, getToolResultBudgetState } from "./evidence-runtime.js";
 import { createIndexState } from "./index-runtime.js";
 import { INDEX_STATUS_INSPECT } from "./index-tool-runtime.js";
 import { configureMcpIndexRuntime } from "./mcp-index-runtime.js";
@@ -54,7 +55,11 @@ import {
   handleSlashCommand,
   recordAgentToolEvidence,
 } from "./slash-command-runtime.js";
-import type { PendingLocalApproval, TuiContext } from "./tui-context-runtime.js";
+import type {
+  PendingLocalApproval,
+  PendingModelContinuation,
+  TuiContext,
+} from "./tui-context-runtime.js";
 import type {
   AgentRun,
   BackgroundTaskState,
@@ -2168,6 +2173,455 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
     }
   });
 
+  it("does not execute an approval whose owner wall-clock deadline already expired", async () => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    const requestTurnId = "approval-deadline-expired";
+    context.currentRequestTurnId = requestTurnId;
+    const toolCall = call("Bash", { command: "echo must-not-run" });
+    const originalCall = builtInTools.Bash.call;
+    const execute = vi.fn(async () => ({ text: "must not run", data: { exitCode: 0 } }));
+    builtInTools.Bash.call = execute as typeof originalCall;
+    const stream = vi.fn(async function* () {
+      yield { type: "message_stop", chunkCount: 0, hadUsage: false } as const;
+    });
+
+    try {
+      await executePermissionApprove(
+        {
+          kind: "model_tool_use",
+          toolCall,
+          toolName: "Bash",
+          sessionId,
+          continuation: {
+            messages: [],
+            provider: "openai-compatible",
+            model: "gpt-test",
+            endpointProfile: "responses",
+            reasoningSent: false,
+            requestTurnId,
+            deadlineAtMs: Date.now() - 1,
+          },
+        },
+        context,
+        { stream } as unknown as ModelGateway,
+        new MemoryOutput(),
+      );
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(stream).not.toHaveBeenCalled();
+      expect(context.lastInterruptedTurn).toMatchObject({ requestTurnId, reason: "model_timeout" });
+    } finally {
+      builtInTools.Bash.call = originalCall;
+    }
+  });
+
+  it("aborts an approved tool that crosses its owner wall-clock deadline", async () => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    const requestTurnId = "approval-deadline-crossed";
+    context.currentRequestTurnId = requestTurnId;
+    const toolCall = call("Bash", { command: "wait-for-deadline" });
+    const originalCall = builtInTools.Bash.call;
+    let observedAbort = false;
+    builtInTools.Bash.call = (async (_input, toolContext) =>
+      await new Promise<ToolOutput>((resolve) => {
+        const finish = () => {
+          observedAbort = true;
+          resolve({ text: "cancelled by deadline", data: { exitCode: 130, outcome: "cancelled" } });
+        };
+        if (toolContext.abortSignal?.aborted) {
+          finish();
+          return;
+        }
+        toolContext.abortSignal?.addEventListener("abort", finish, { once: true });
+      })) as typeof originalCall;
+    const stream = vi.fn(async function* () {
+      yield { type: "message_stop", chunkCount: 0, hadUsage: false } as const;
+    });
+
+    try {
+      await executePermissionApprove(
+        {
+          kind: "model_tool_use",
+          toolCall,
+          toolName: "Bash",
+          sessionId,
+          continuation: {
+            messages: [],
+            provider: "openai-compatible",
+            model: "gpt-test",
+            endpointProfile: "responses",
+            reasoningSent: false,
+            requestTurnId,
+            deadlineAtMs: Date.now() + 250,
+          },
+        },
+        context,
+        { stream } as unknown as ModelGateway,
+        new MemoryOutput(),
+      );
+
+      expect(observedAbort).toBe(true);
+      expect(stream).not.toHaveBeenCalled();
+      expect(context.lastInterruptedTurn).toMatchObject({ requestTurnId, reason: "model_timeout" });
+    } finally {
+      builtInTools.Bash.call = originalCall;
+    }
+  });
+
+  it("terminalizes an approval whose deadline expires while budgeting the tool result", async () => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    const requestTurnId = "approval-budget-deadline";
+    context.currentRequestTurnId = requestTurnId;
+    context.sessionStoreVerifiedId = sessionId;
+    const toolCall = call("Bash", { command: "pnpm test" });
+    const continuation: PendingModelContinuation = {
+      messages: [] as ModelMessage[],
+      provider: "openai-compatible",
+      model: "gpt-test",
+      endpointProfile: "responses" as const,
+      reasoningSent: false,
+      requestTurnId,
+      deadlineAtMs: Date.now() + 250,
+    };
+    const originalCall = builtInTools.Bash.call;
+    builtInTools.Bash.call = (async () => ({
+      text: "x".repeat(20_000),
+      data: { exitCode: 0 },
+    })) as typeof originalCall;
+    const store = context.store as SessionStore;
+    const originalReadRecent = store.readRecentTranscriptEvents.bind(store);
+    const budgetReadEntered = deferred<void>();
+    const releaseBudgetRead = deferred<void>();
+    let blockedRead = false;
+    getToolResultBudgetState(context).hasLegacyArtifactPaths = true;
+    store.readRecentTranscriptEvents = async (requestedSessionId, options) => {
+      if (!blockedRead) {
+        blockedRead = true;
+        budgetReadEntered.resolve();
+        await releaseBudgetRead.promise;
+      }
+      return originalReadRecent(requestedSessionId, options);
+    };
+    const stream = vi.fn(async function* () {
+      yield { type: "message_stop", chunkCount: 0, hadUsage: false } as const;
+    });
+
+    try {
+      const approval = executePermissionApprove(
+        {
+          kind: "model_tool_use",
+          toolCall,
+          toolName: "Bash",
+          sessionId,
+          continuation,
+        },
+        context,
+        { stream } as unknown as ModelGateway,
+        new MemoryOutput(),
+      );
+      await budgetReadEntered.promise;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      releaseBudgetRead.resolve();
+      await approval;
+
+      const transcript = (await store.resume(sessionId)).transcript;
+      expect(stream).not.toHaveBeenCalled();
+      expect(continuation.messages).toEqual([]);
+      expect(context.lastInterruptedTurn).toMatchObject({ requestTurnId, reason: "model_timeout" });
+      expect(context.currentRequestTurnId).toBeUndefined();
+      expect(context.activeAbortController).toBeUndefined();
+      expect(context.interrupt).toEqual({ type: "idle" });
+      expect(
+        transcript.some(
+          (event) =>
+            event.type === "evidence_record" && event.supportsClaims.includes("tool_result_budget"),
+        ),
+      ).toBe(false);
+    } finally {
+      releaseBudgetRead.resolve();
+      store.readRecentTranscriptEvents = originalReadRecent;
+      builtInTools.Bash.call = originalCall;
+    }
+  });
+
+  it("drops architecture failure scheduling when the approval owner changes during persistence", async () => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    const requestTurnId = "architecture-failure-owner";
+    context.currentRequestTurnId = requestTurnId;
+    context.sessionStoreVerifiedId = sessionId;
+    const toolCall = call("Bash", { command: "exit 1" });
+    const originalCall = builtInTools.Bash.call;
+    builtInTools.Bash.call = (async () => ({
+      text: "command failed",
+      data: { exitCode: 1 },
+    })) as typeof originalCall;
+    const store = context.store as SessionStore;
+    const originalAppendEvent = store.appendEvent.bind(store);
+    const schedulerAppendEntered = deferred<void>();
+    const releaseSchedulerAppend = deferred<void>();
+    store.appendEvent = async (requestedSessionId, event, commitGuard) => {
+      if (
+        event.type === "system_event" &&
+        event.message.startsWith("meta scheduler tool failure:")
+      ) {
+        schedulerAppendEntered.resolve();
+        await releaseSchedulerAppend.promise;
+      }
+      return originalAppendEvent(requestedSessionId, event, commitGuard);
+    };
+    const replacementController = new AbortController();
+    const stream = vi.fn(async function* () {
+      yield { type: "message_stop", chunkCount: 0, hadUsage: false } as const;
+    });
+
+    try {
+      const approval = executePermissionApprove(
+        {
+          kind: "architecture_drift",
+          toolCall,
+          toolName: "Bash",
+          sessionId,
+          warnings: ["scope drift"],
+          continuation: {
+            messages: [],
+            provider: "openai-compatible",
+            model: "gpt-test",
+            endpointProfile: "responses",
+            reasoningSent: false,
+            requestTurnId,
+          },
+        },
+        context,
+        { stream } as unknown as ModelGateway,
+        new MemoryOutput(),
+      );
+      await schedulerAppendEntered.promise;
+      const failureCountBeforeOwnerChange = context.failureLearning.records.length;
+      context.currentRequestTurnId = "replacement-owner";
+      context.activeAbortController = replacementController;
+      context.tools.abortSignal = replacementController.signal;
+      context.interrupt = { type: "running", taskId: "replacement", canCancel: true };
+      releaseSchedulerAppend.resolve();
+      await approval;
+
+      const transcript = (await store.resume(sessionId)).transcript;
+      expect(stream).not.toHaveBeenCalled();
+      expect(context.currentRequestTurnId).toBe("replacement-owner");
+      expect(context.activeAbortController).toBe(replacementController);
+      expect(context.tools.abortSignal).toBe(replacementController.signal);
+      expect(
+        transcript.some(
+          (event) =>
+            event.type === "system_event" &&
+            event.message.startsWith("meta scheduler tool failure:"),
+        ),
+      ).toBe(false);
+      expect(context.failureLearning.records).toHaveLength(failureCountBeforeOwnerChange);
+    } finally {
+      releaseSchedulerAppend.resolve();
+      store.appendEvent = originalAppendEvent;
+      builtInTools.Bash.call = originalCall;
+    }
+  });
+
+  it("does not clear a replacement approval signal with the same request turn id", async () => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    const requestTurnId = "same-turn-approval-generation";
+    context.currentRequestTurnId = requestTurnId;
+    context.sessionStoreVerifiedId = sessionId;
+    const originalCall = builtInTools.Bash.call;
+    const toolCall = vi.fn(async () => ({ text: "must not run", data: { exitCode: 0 } }));
+    builtInTools.Bash.call = toolCall as typeof originalCall;
+    const store = context.store as SessionStore;
+    const originalAppendEvent = store.appendEvent.bind(store);
+    const persistenceEntered = deferred<void>();
+    const releasePersistence = deferred<void>();
+    store.appendEvent = async (requestedSessionId, event, commitGuard) => {
+      if (
+        event.type === "system_event" &&
+        event.message.startsWith("permission_user_decision: decision=approved")
+      ) {
+        persistenceEntered.resolve();
+        await releasePersistence.promise;
+      }
+      return originalAppendEvent(requestedSessionId, event, commitGuard);
+    };
+    const replacementController = new AbortController();
+    const stream = vi.fn(async function* () {
+      yield { type: "message_stop", chunkCount: 0, hadUsage: false } as const;
+    });
+
+    try {
+      const approval = executePermissionApprove(
+        {
+          kind: "model_tool_use",
+          toolCall: call("Bash", { command: "echo must-not-run" }),
+          toolName: "Bash",
+          sessionId,
+          continuation: {
+            messages: [],
+            provider: "openai-compatible",
+            model: "gpt-test",
+            endpointProfile: "responses",
+            reasoningSent: false,
+            requestTurnId,
+          },
+        },
+        context,
+        { stream } as unknown as ModelGateway,
+        new MemoryOutput(),
+      );
+      await persistenceEntered.promise;
+      context.activeAbortController = replacementController;
+      context.tools.abortSignal = replacementController.signal;
+      context.interrupt = { type: "running", taskId: "replacement-approval", canCancel: true };
+      releasePersistence.resolve();
+      await approval;
+
+      expect(toolCall).not.toHaveBeenCalled();
+      expect(stream).not.toHaveBeenCalled();
+      expect(context.currentRequestTurnId).toBe(requestTurnId);
+      expect(context.activeAbortController).toBe(replacementController);
+      expect(context.tools.abortSignal).toBe(replacementController.signal);
+      expect(context.interrupt).toEqual({
+        type: "running",
+        taskId: "replacement-approval",
+        canCancel: true,
+      });
+    } finally {
+      releasePersistence.resolve();
+      store.appendEvent = originalAppendEvent;
+      builtInTools.Bash.call = originalCall;
+    }
+  });
+
+  it("cleans the released approval owner after a cooperative interrupt", async () => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    const requestTurnId = "approval-cooperative-interrupt";
+    context.currentRequestTurnId = requestTurnId;
+    context.currentRequestUserMessageId = "approval-interrupt-user";
+    context.sessionStoreVerifiedId = sessionId;
+    const originalCall = builtInTools.Bash.call;
+    const toolStarted = deferred<void>();
+    const releaseTool = deferred<void>();
+    builtInTools.Bash.call = (async () => {
+      toolStarted.resolve();
+      await releaseTool.promise;
+      return { text: "late success", data: { exitCode: 0 } };
+    }) as typeof originalCall;
+    const stream = vi.fn(async function* () {
+      yield { type: "message_stop", chunkCount: 0, hadUsage: false } as const;
+    });
+
+    try {
+      const approval = executePermissionApprove(
+        {
+          kind: "model_tool_use",
+          toolCall: call("Bash", { command: "echo late" }),
+          toolName: "Bash",
+          sessionId,
+          continuation: {
+            messages: [],
+            provider: "openai-compatible",
+            model: "gpt-test",
+            endpointProfile: "responses",
+            reasoningSent: false,
+            requestTurnId,
+          },
+        },
+        context,
+        { stream } as unknown as ModelGateway,
+        new MemoryOutput(),
+      );
+      await toolStarted.promise;
+      context.preEngineFallbackPreference = {
+        projectPath: context.projectPath,
+        requestTurnId,
+        active: true,
+        activatedAt: new Date().toISOString(),
+        reason: "fallback_required",
+      };
+
+      const result = await interruptAllActiveWork(context);
+      releaseTool.resolve();
+      await approval;
+
+      expect(result.abortSignalsSent).toBe(1);
+      expect(stream).not.toHaveBeenCalled();
+      expect(context.lastInterruptedTurn).toMatchObject({ requestTurnId, reason: "user_interrupt" });
+      expect(context.currentRequestTurnId).toBeUndefined();
+      expect(context.currentRequestUserMessageId).toBeUndefined();
+      expect(context.activeAbortController).toBeUndefined();
+      expect(context.tools.abortSignal).toBeUndefined();
+      expect(context.preEngineFallbackPreference).toBeUndefined();
+      expect(context.foregroundAbortPendingUntilMs).toBeUndefined();
+      expect(context.interrupt).toEqual({ type: "idle" });
+    } finally {
+      releaseTool.resolve();
+      builtInTools.Bash.call = originalCall;
+    }
+  });
+
+  it("cleans up its foreground owner when approval persistence throws", async () => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    const requestTurnId = "approval-persistence-error";
+    context.currentRequestTurnId = requestTurnId;
+    context.sessionStoreVerifiedId = sessionId;
+    const store = context.store as SessionStore;
+    const originalAppendEvent = store.appendEvent.bind(store);
+    store.appendEvent = async (requestedSessionId, event, commitGuard) => {
+      if (
+        event.type === "system_event" &&
+        event.message.startsWith("permission_user_decision: decision=approved")
+      ) {
+        throw new Error("approval persistence failed");
+      }
+      return originalAppendEvent(requestedSessionId, event, commitGuard);
+    };
+    const stream = vi.fn(async function* () {
+      yield { type: "message_stop", chunkCount: 0, hadUsage: false } as const;
+    });
+
+    try {
+      await expect(
+        executePermissionApprove(
+          {
+            kind: "model_tool_use",
+            toolCall: call("Bash", { command: "echo must-not-run" }),
+            toolName: "Bash",
+            sessionId,
+            continuation: {
+              messages: [],
+              provider: "openai-compatible",
+              model: "gpt-test",
+              endpointProfile: "responses",
+              reasoningSent: false,
+              requestTurnId,
+            },
+          },
+          context,
+          { stream } as unknown as ModelGateway,
+          new MemoryOutput(),
+        ),
+      ).rejects.toThrow("approval persistence failed");
+
+      expect(stream).not.toHaveBeenCalled();
+      expect(context.currentRequestTurnId).toBeUndefined();
+      expect(context.activeAbortController).toBeUndefined();
+      expect(context.tools.abortSignal).toBeUndefined();
+      expect(context.interrupt).toEqual({ type: "idle" });
+    } finally {
+      store.appendEvent = originalAppendEvent;
+    }
+  });
+
   it("drops a denied foreground continuation after its request owner is replaced", async () => {
     const context = await createTestContext();
     const sessionId = context.sessionId ?? "session";
@@ -2200,6 +2654,167 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
     expect(stream).not.toHaveBeenCalled();
     expect(context.currentRequestTurnId).toBe("replacement-request");
     expect(context.evidence).toEqual([]);
+  });
+
+  it.each([
+    ["architecture_drift", false],
+    ["model_tool_use", true],
+    ["index_tool", false],
+    ["report_write_tool", true],
+  ] as const)("terminalizes %s deny/cancel without a second progress counter", async (kind, cancelled) => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    const requestTurnId = `deny-progress-${kind}`;
+    context.currentRequestTurnId = requestTurnId;
+    const continuation = {
+      messages: [] as ModelMessage[],
+      provider: "openai-compatible",
+      model: "gpt-test",
+      endpointProfile: "responses" as const,
+      reasoningSent: false,
+      requestTurnId,
+    };
+    let approval: PendingLocalApproval;
+    if (kind === "architecture_drift") {
+      approval = {
+        kind,
+        toolCall: call("Write", { path: "architecture.txt", content: "no" }),
+        toolName: "Write",
+        sessionId,
+        warnings: ["scope drift"],
+        continuation,
+      };
+    } else if (kind === "model_tool_use") {
+      approval = {
+        kind,
+        toolCall: call("Write", { path: "model.txt", content: "no" }),
+        toolName: "Write",
+        sessionId,
+        continuation,
+      };
+    } else if (kind === "index_tool") {
+      approval = {
+        kind,
+        indexAction: "refresh",
+        toolCall: call("IndexRefresh", { force: false }),
+        sessionId,
+        continuation,
+      };
+    } else {
+      approval = {
+        kind,
+        toolCall: call("WriteReport", { path: "report.md", content: "no" }),
+        sessionId,
+        continuation,
+      };
+    }
+
+    await executePermissionDeny(
+      approval,
+      context,
+      gateway([
+        { type: "assistant_text_delta", text: "Permission outcome recorded." },
+        { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+      ]),
+      new MemoryOutput(),
+      cancelled,
+    );
+
+    expect(context.currentRequestTurnId).toBeUndefined();
+  });
+
+  it("does not execute an approved continuation without a signal after owner replacement", async () => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    context.currentRequestTurnId = "replacement-request";
+    const toolCall = call("Bash", { command: "vitest --run" });
+    const originalCall = builtInTools.Bash.call;
+    const execute = vi.fn(async () => ({ text: "must not run", data: { exitCode: 0 } }));
+    builtInTools.Bash.call = execute as typeof originalCall;
+
+    try {
+      await executePermissionApprove(
+        {
+          kind: "model_tool_use",
+          toolCall,
+          toolName: "Bash",
+          sessionId,
+          continuation: {
+            messages: [],
+            provider: "openai-compatible",
+            model: "gpt-test",
+            endpointProfile: "responses",
+            reasoningSent: false,
+            requestTurnId: "invoking-request",
+          },
+        },
+        context,
+        gateway([]),
+        new MemoryOutput(),
+      );
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(context.currentRequestTurnId).toBe("replacement-request");
+      expect(context.evidence).toEqual([]);
+    } finally {
+      builtInTools.Bash.call = originalCall;
+    }
+  });
+
+  it("stops denial writes when the foreground owner changes during decision append", async () => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    const started = deferred<void>();
+    const release = deferred<void>();
+    const originalAppend = context.store.appendEvent.bind(context.store);
+    context.store.appendEvent = async (targetSessionId, event, commitGuard) => {
+      if (
+        event.type === "system_event" &&
+        event.message.includes("permission_user_decision")
+      ) {
+        started.resolve();
+        await release.promise;
+      }
+      await originalAppend(targetSessionId, event, commitGuard);
+    };
+    const stream = vi.fn(async function* () {
+      yield { type: "message_stop", chunkCount: 0, hadUsage: false } as const;
+    });
+    const denying = executePermissionDeny(
+      {
+        kind: "model_tool_use",
+        toolCall: call("Write", { path: "stale.txt", content: "stale" }),
+        toolName: "Write",
+        sessionId,
+        continuation: {
+          messages: [],
+          provider: "openai-compatible",
+          model: "gpt-test",
+          endpointProfile: "responses",
+          reasoningSent: false,
+          requestTurnId: "invoking-request",
+        },
+      },
+      context,
+      { stream } as unknown as ModelGateway,
+      new MemoryOutput(),
+      false,
+    );
+
+    await started.promise;
+    context.currentRequestTurnId = "replacement-request";
+    release.resolve();
+    await denying;
+
+    expect(stream).not.toHaveBeenCalled();
+    expect(context.currentRequestTurnId).toBe("replacement-request");
+    expect(context.evidence).toEqual([]);
+    const transcript = (await context.store.resume(sessionId)).transcript;
+    expect(transcript.some(
+      (event) =>
+        event.type === "tool_result" ||
+        (event.type === "evidence_record" && event.toolUseId !== undefined),
+    )).toBe(false);
   });
 
   it("scopes approved Bash verification evidence to the resumed foreground owner", async () => {

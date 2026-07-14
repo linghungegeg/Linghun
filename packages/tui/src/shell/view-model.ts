@@ -37,6 +37,8 @@ import {
   selectionLineRangesForBlock,
 } from "./models/transcript-selection-state.js";
 import {
+  findTranscriptSourceCell,
+  pruneTranscriptSourceCells,
   transcriptSourceToBlocks,
   type TranscriptSource,
 } from "./models/transcript-source.js";
@@ -231,10 +233,42 @@ export function createShellViewModel(
   );
   const setupNeeded = options.setupNeeded ?? false;
   const text = shellText[language];
+  const ctrlOExpandState = (
+    context as {
+      ctrlOExpandState?: { active?: boolean; blockId?: string };
+    }
+  ).ctrlOExpandState;
+  const nativeScrollback = shouldUseNativeScrollbackTaskFrame();
+  if (options.transcriptSource) {
+    options.transcriptSource.retainedCellId =
+      ctrlOExpandState?.active === true ? ctrlOExpandState.blockId : undefined;
+    pruneTranscriptSourceCells(options.transcriptSource);
+  }
+  const expandedSourceCell =
+    nativeScrollback &&
+    ctrlOExpandState?.active &&
+    ctrlOExpandState.blockId &&
+    options.transcriptSource
+      ? findTranscriptSourceCell(options.transcriptSource, ctrlOExpandState.blockId)
+      : undefined;
   const sourceOutputBlocks = options.transcriptSource?.cells.length
-    ? transcriptSourceToBlocks(options.transcriptSource)
+    ? nativeScrollback
+      ? expandedSourceCell
+        ? [expandedSourceCell.block]
+        : undefined
+      : transcriptSourceToBlocks(options.transcriptSource)
     : undefined;
-  const staticHistoryBlocks = sourceOutputBlocks ?? options.outputBlocks ?? [];
+  const liveOutputBlocks = options.outputBlocks ?? [];
+  const staticHistoryBlocks = nativeScrollback
+    ? sourceOutputBlocks?.length
+      ? [
+          ...liveOutputBlocks,
+          ...sourceOutputBlocks.filter(
+            (sourceBlock) => !liveOutputBlocks.some((block) => block.id === sourceBlock.id),
+          ),
+        ]
+      : liveOutputBlocks
+    : (sourceOutputBlocks ?? liveOutputBlocks);
 
   // Determine effective view mode early to decide block filtering and setupHint visibility.
   // Runtime no longer enters HomeLayout; an idle Ink shell is still a TaskLayout.
@@ -274,11 +308,6 @@ export function createShellViewModel(
   // setup 进行中时不显示 background blocks
   // setup 进行中时，background / 最近输出噪音被收敛，让用户专注配置流程
   const blocks: ProductBlockViewModel[] = [];
-  const ctrlOExpandState = (
-    context as {
-      ctrlOExpandState?: { active?: boolean; blockId?: string };
-    }
-  ).ctrlOExpandState;
   if (options.projectRouteProblem) {
     blocks.push(createProjectRouteBlock(language, options.projectRouteProblem));
   }
@@ -292,12 +321,7 @@ export function createShellViewModel(
     // terminal history would keep piling into the fixed-height frame and
     // compress after a few turns. transcriptSource stays canonical for the
     // non-native staticHistory replay path and Ctrl+O expansion.
-    const nativeScrollback = shouldUseNativeScrollbackTaskFrame();
-    const expandedSourceBlock =
-      nativeScrollback && ctrlOExpandState?.active && ctrlOExpandState.blockId
-        ? sourceOutputBlocks?.find((block) => block.id === ctrlOExpandState.blockId)
-        : undefined;
-    const liveOutputBlocks = options.outputBlocks ?? [];
+    const expandedSourceBlock = expandedSourceCell?.block;
     const allOutputBlocks = nativeScrollback
       ? expandedSourceBlock && !liveOutputBlocks.some((block) => block.id === expandedSourceBlock.id)
         ? [...liveOutputBlocks, expandedSourceBlock]
@@ -509,11 +533,25 @@ export function createShellViewModel(
   const hasProviderFailureOutputBlock = fullFittedBlocks.some((b) =>
     isProviderFailureOutputBlock(b, language),
   );
-  const failBlocksForSuggestions = fullFittedBlocks.filter(
-    (b) =>
-      (b.status === "fail" || b.status === "blocked") &&
-      !isProviderFailureOutputBlock(b, language),
-  );
+  const failBlocksForSuggestions: ProductBlockViewModel[] = [];
+  if (context.currentRequestTurnId) {
+    for (const block of fullFittedBlocks) {
+      if (
+        (block.status === "fail" || block.status === "blocked") &&
+        !isProviderFailureOutputBlock(block, language) &&
+        block.failureRequestTurnId === context.currentRequestTurnId
+      ) {
+        failBlocksForSuggestions.splice(0, failBlocksForSuggestions.length, block);
+        continue;
+      }
+      if (
+        failBlocksForSuggestions.length > 0 &&
+        (block.messageKind === "tool_result_success" || block.messageKind === "assistant_text")
+      ) {
+        failBlocksForSuggestions.length = 0;
+      }
+    }
+  }
   const taskSuggestions: TaskSuggestion[] | undefined = buildTaskSuggestions({
     language,
     setupHint,

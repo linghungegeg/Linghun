@@ -13,10 +13,12 @@ import {
 } from "@linghun/config";
 import type { CacheFreshness } from "@linghun/core";
 import { TOGGLE_DETAILS_KEYBIND } from "@linghun/shared";
-import { diffFreshness } from "./cache-freshness.js";
+import { diffFreshness, stableStringify } from "./cache-freshness.js";
 import { showCommandPanel } from "./command-panel-runtime.js";
+import { scopeEvidenceToContext } from "./evidence-runtime.js";
 import {
   findDeferredTool,
+  listPreEngineRuntimeTools,
   getCodebaseMemoryToolRisk,
   isCodebaseMemoryToolName,
   isLocalStdioMcpServer,
@@ -54,6 +56,12 @@ import {
   runMcpStdioToolCall,
   runMcpStdioToolList,
 } from "./mcp-stdio-runtime.js";
+import {
+  createPreContextInputSchema,
+  createPreImpactInputSchema,
+  createPrePlanInputSchema,
+  createPreVerifyInputSchema,
+} from "./model-loop-runtime.js";
 import {
   MCP_TRANSPORT_LIMITS,
   runMcpSseToolCall,
@@ -568,10 +576,14 @@ export function getCodebaseMemoryPlatformArch(): string {
 }
 
 const PRE_ENGINE_COMMAND = "linghun-pre-engine";
+const PRE_ENGINE_PROTOCOL_VERSION = "2025-06-18";
+const PRE_ENGINE_SERVER_NAME = "linghun-pre-engine";
+const PRE_ENGINE_SERVER_VERSION = "0.1.0";
 const PRE_ENGINE_INITIALIZE_TIMEOUT_MS = 30_000;
-const PRE_ENGINE_CALL_TIMEOUT_MS = 100_000_000;
+const PRE_ENGINE_CALL_TIMEOUT_MS = 150_000;
 const PRE_ENGINE_IDLE_TIMEOUT_MS = 30_000;
 const PRE_ENGINE_STDERR_LIMIT = 4_096;
+const PRE_ENGINE_TOOLS_LIST_REQUEST_ID = -1;
 
 type PreEngineCallResult = {
   ok: boolean;
@@ -591,6 +603,8 @@ class PreEngineDaemon {
   private proc: ReturnType<typeof spawn> | null = null;
   private queue: Promise<void> = Promise.resolve();
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private activeDispose: (() => void) | null = null;
+  private disposed = false;
   private msgId = 1;
   private pendingCalls = 0;
   private readonly processDiagnostics = new WeakMap<ReturnType<typeof spawn>, PreEngineProcessDiagnostics>();
@@ -607,6 +621,13 @@ class PreEngineDaemon {
     args: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<PreEngineCallResult> {
+    if (this.disposed) {
+      return Promise.resolve({
+        ok: false,
+        summary: "pre-engine runtime owner disposed",
+        errorCode: "OWNER_DISPOSED",
+      });
+    }
     if (signal?.aborted) {
       return Promise.resolve({
         ok: false,
@@ -618,6 +639,13 @@ class PreEngineDaemon {
     this._clearIdle();
     const operation = this.queue.then(async () => {
       try {
+        if (this.disposed) {
+          return {
+            ok: false,
+            summary: "pre-engine runtime owner disposed",
+            errorCode: "OWNER_DISPOSED",
+          };
+        }
         if (signal?.aborted) {
           return { ok: false, summary: "pre-engine request aborted", errorCode: "ABORTED" };
         }
@@ -642,7 +670,20 @@ class PreEngineDaemon {
     });
   }
 
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this._clearIdle();
+    this.activeDispose?.();
+    this.activeDispose = null;
+    const proc = this.proc;
+    this.proc = null;
+    if (proc && !proc.killed) proc.kill();
+    this.onIdle();
+  }
+
   private _ensureProc(signal?: AbortSignal): Promise<ReturnType<typeof spawn>> {
+    if (this.disposed) return Promise.reject(new Error("pre-engine runtime owner disposed"));
     if (this.proc) return Promise.resolve(this.proc);
     const proc = spawn(this.binary, [], { cwd: this.cwd, stdio: ["pipe", "pipe", "pipe"] });
     const diagnostics: PreEngineProcessDiagnostics = {
@@ -678,6 +719,7 @@ class PreEngineDaemon {
         proc.off("error", onError);
         proc.off("exit", onExit);
         signal?.removeEventListener("abort", onAbort);
+        if (this.activeDispose === onDispose) this.activeDispose = null;
       };
       const finish = (error?: Error) => {
         if (settled) return;
@@ -695,6 +737,7 @@ class PreEngineDaemon {
       const onExit = () =>
         finish(new Error(this._formatProcessFailure(proc, "pre-engine process exited during initialize")));
       const onAbort = () => finish(new Error("pre-engine request aborted"));
+      const onDispose = () => finish(new Error("pre-engine runtime owner disposed"));
       const onData = (chunk: Buffer | string) => {
         buf += chunk.toString();
         const lines = buf.split("\n");
@@ -716,14 +759,87 @@ class PreEngineDaemon {
                 finish(new Error(msg.error.message ?? String(msg.error)));
                 return;
               }
+              const result = msg.result;
+              if (result?.protocolVersion !== PRE_ENGINE_PROTOCOL_VERSION) {
+                finish(
+                  new Error(
+                    `pre-engine protocol mismatch: expected ${PRE_ENGINE_PROTOCOL_VERSION}, received ${String(result?.protocolVersion ?? "missing")}`,
+                  ),
+                );
+                return;
+              }
+              if (
+                result?.serverInfo?.name !== PRE_ENGINE_SERVER_NAME ||
+                result?.serverInfo?.version !== PRE_ENGINE_SERVER_VERSION
+              ) {
+                finish(
+                  new Error(
+                    `pre-engine server mismatch: expected ${PRE_ENGINE_SERVER_NAME}@${PRE_ENGINE_SERVER_VERSION}, received ${String(result?.serverInfo?.name ?? "missing")}@${String(result?.serverInfo?.version ?? "missing")}`,
+                  ),
+                );
+                return;
+              }
+              if (
+                result?.capabilities?.tools === null ||
+                typeof result?.capabilities?.tools !== "object" ||
+                Array.isArray(result?.capabilities?.tools)
+              ) {
+                finish(new Error("pre-engine capability mismatch: tools capability missing"));
+                return;
+              }
               if (!proc.stdin) {
                 finish(new Error("pre-engine stdin unavailable"));
                 return;
               }
               proc.stdin.write(
                 JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }) + "\n",
-                (error) => finish(error ?? undefined),
+                (error) => {
+                  if (error) {
+                    finish(error);
+                    return;
+                  }
+                  proc.stdin?.write(
+                    JSON.stringify({
+                      jsonrpc: "2.0",
+                      id: PRE_ENGINE_TOOLS_LIST_REQUEST_ID,
+                      method: "tools/list",
+                      params: {},
+                    }) + "\n",
+                    (listError) => listError && finish(listError),
+                  );
+                },
               );
+              continue;
+            }
+            if (msg.id === PRE_ENGINE_TOOLS_LIST_REQUEST_ID) {
+              if (msg.error) {
+                finish(new Error(msg.error.message ?? String(msg.error)));
+                return;
+              }
+              const tools = msg.result?.tools;
+              const expectedTools = [
+                { name: "pre_context", inputSchema: createPreContextInputSchema() },
+                { name: "pre_impact", inputSchema: createPreImpactInputSchema() },
+                { name: "pre_plan", inputSchema: createPrePlanInputSchema() },
+                { name: "pre_verify", inputSchema: createPreVerifyInputSchema() },
+              ];
+              if (
+                !Array.isArray(tools) ||
+                tools.length !== expectedTools.length ||
+                tools.some((tool: unknown, index: number) => {
+                  if (!tool || typeof tool !== "object" || Array.isArray(tool)) return true;
+                  const expected = expectedTools[index];
+                  const actual = tool as Record<string, unknown>;
+                  return (
+                    actual.name !== expected?.name ||
+                    stableStringify(actual.inputSchema) !== stableStringify(expected?.inputSchema)
+                  );
+                })
+              ) {
+                finish(new Error("pre-engine tools/list mismatch: expected canonical four-tool schema"));
+                return;
+              }
+              finish();
             }
           } catch {}
         }
@@ -732,6 +848,7 @@ class PreEngineDaemon {
       proc.once("error", onError);
       proc.once("exit", onExit);
       signal?.addEventListener("abort", onAbort, { once: true });
+      this.activeDispose = onDispose;
       if (signal?.aborted) {
         onAbort();
         return;
@@ -768,6 +885,7 @@ class PreEngineDaemon {
             proc.off("error", onError);
             proc.off("exit", onExit);
             signal?.removeEventListener("abort", onAbort);
+            if (this.activeDispose === onDispose) this.activeDispose = null;
           };
           const finish = (result: PreEngineCallResult, stopProcess = false) => {
             if (settled) return;
@@ -796,6 +914,13 @@ class PreEngineDaemon {
           };
           const onAbort = () => {
             finish({ ok: false, summary: "pre-engine request aborted", errorCode: "ABORTED" }, true);
+          };
+          const onDispose = () => {
+            finish({
+              ok: false,
+              summary: "pre-engine runtime owner disposed",
+              errorCode: "OWNER_DISPOSED",
+            }, true);
           };
           const onData = (chunk: Buffer | string) => {
             buf += chunk.toString();
@@ -839,6 +964,7 @@ class PreEngineDaemon {
           proc.once("error", onError);
           proc.once("exit", onExit);
           signal?.addEventListener("abort", onAbort, { once: true });
+          this.activeDispose = onDispose;
           if (signal?.aborted) {
             onAbort();
             return;
@@ -886,7 +1012,7 @@ class PreEngineDaemon {
   }
 
   private _scheduleIdleIfUnused(): void {
-    if (this.pendingCalls !== 0 || this.idleTimer) return;
+    if (this.disposed || this.pendingCalls !== 0 || this.idleTimer) return;
     this.idleTimer = setTimeout(() => {
       if (this.pendingCalls !== 0) return;
       this.proc?.kill();
@@ -901,7 +1027,7 @@ export function __testCreatePreEngineDaemon(
   binary: string,
   cwd: string,
   maxFrameBytes?: number,
-): Pick<PreEngineDaemon, "call"> {
+): Pick<PreEngineDaemon, "call" | "dispose"> {
   return new PreEngineDaemon(binary, cwd, () => undefined, maxFrameBytes);
 }
 
@@ -909,7 +1035,7 @@ export function __testGetOrCreatePreEngineDaemon(
   binary: string,
   cwd: string,
   runtimeOwnerId: string,
-): Pick<PreEngineDaemon, "call"> {
+): Pick<PreEngineDaemon, "call" | "dispose"> {
   return getOrCreatePreEngineDaemon(binary, cwd, runtimeOwnerId);
 }
 
@@ -925,6 +1051,16 @@ function getOrCreatePreEngineDaemon(binary: string, cwd: string, runtimeOwnerId:
     _preEngineDaemons.set(key, d);
   }
   return d;
+}
+
+export function disposePreEngineDaemonsForOwner(runtimeOwnerId: string | undefined): void {
+  if (!runtimeOwnerId) return;
+  const ownerPrefix = `${runtimeOwnerId}\0`;
+  for (const [key, daemon] of _preEngineDaemons) {
+    if (!key.startsWith(ownerPrefix)) continue;
+    _preEngineDaemons.delete(key);
+    daemon.dispose();
+  }
 }
 
 const PRE_ENGINE_FALLBACK_TOOLS = [
@@ -993,11 +1129,35 @@ function classifyPreEngineSemanticDegradation(
   }
 
   const answerPack = getAnswerPack(payload);
-  const confidence = typeof answerPack?.confidence === "string" ? answerPack.confidence : undefined;
+  const confidence =
+    typeof payload.confidence === "string"
+      ? payload.confidence
+      : typeof answerPack?.confidence === "string"
+        ? answerPack.confidence
+        : undefined;
   if (confidence === "low") {
     return {
       reason: "pre-engine-low-confidence",
       summary: "pre-engine returned low-confidence repository analysis",
+    };
+  }
+
+  const canonicalStatus = typeof payload.status === "string" ? payload.status : undefined;
+  if (
+    canonicalStatus &&
+    [
+      "partially_verified",
+      "fallback_used",
+      "tool_missing",
+      "not_covered",
+      "unavailable",
+      "disabled",
+      "degraded",
+    ].includes(canonicalStatus)
+  ) {
+    return {
+      reason: `pre-engine-status-${canonicalStatus.replaceAll("_", "-")}`,
+      summary: `pre-engine returned ${canonicalStatus}`,
     };
   }
 
@@ -1026,6 +1186,31 @@ function classifyPreEngineSemanticDegradation(
   }
 
   if (toolName === "pre_verify") {
+    const verification = isRecord(payload.verification) ? payload.verification : undefined;
+    const verificationStatus =
+      typeof verification?.status === "string" ? verification.status : undefined;
+    const fullyVerified =
+      typeof verification?.fully_verified === "boolean"
+        ? verification.fully_verified
+        : typeof payload.fully_verified === "boolean"
+          ? payload.fully_verified
+          : undefined;
+    if (verificationStatus && verificationStatus !== "verified") {
+      return {
+        reason: `pre-engine-verification-${verificationStatus.replaceAll("_", "-")}`,
+        summary: `pre-engine verification returned ${verificationStatus}`,
+      };
+    }
+    if (
+      fullyVerified === false ||
+      (verificationStatus === "verified" && fullyVerified !== true) ||
+      (fullyVerified === true && verificationStatus !== "verified")
+    ) {
+      return {
+        reason: "pre-engine-verification-incomplete",
+        summary: "pre-engine verification did not confirm fully_verified=true with verified status",
+      };
+    }
     const layerKeys = Object.keys(payload).filter((key) => key.endsWith("_layer"));
     const layerStatuses = layerKeys
       .map((key) => payload[key])
@@ -1929,12 +2114,13 @@ export async function recordIndexEvidence(
   summary: string,
   supportsClaims: string[] = [],
   commitGuard?: () => boolean,
-): Promise<void> {
-  if (commitGuard && !commitGuard()) return;
+  toolUseId?: string,
+): Promise<string | undefined> {
+  if (commitGuard && !commitGuard()) return undefined;
   const supportsIndexCodeFact = isSupportiveIndexEvidence(context, query, summary);
   const isSupplementalEvidence = supportsClaims.length > 0;
   if (!supportsIndexCodeFact && !isSupplementalEvidence) {
-    return;
+    return undefined;
   }
   const sessionId = await deps().ensureSession(context);
   if (commitGuard && !commitGuard()) return;
@@ -1950,13 +2136,16 @@ export async function recordIndexEvidence(
       ...supportsClaims,
     ],
     createdAt: new Date().toISOString(),
+    ...(toolUseId ? { toolUseId } : {}),
   };
+  scopeEvidenceToContext(context, evidence, { ownerSessionId: sessionId });
   await context.store.appendEvent(
     sessionId,
     { type: "evidence_record", ...evidence },
     commitGuard,
   );
   if (!commitGuard || commitGuard()) deps().rememberEvidence(context, evidence);
+  return evidence.id;
 }
 
 export function isSupportiveIndexEvidence(
@@ -2104,6 +2293,65 @@ type DeferredToolRecommendation = {
   reason: string;
 };
 
+type RuntimeInputSchema = {
+  type?: string;
+  additionalProperties?: boolean;
+  properties?: Record<string, RuntimeInputSchema>;
+  required?: unknown[];
+  items?: RuntimeInputSchema;
+};
+
+function validateRuntimeInputSchema(
+  value: unknown,
+  schema: RuntimeInputSchema,
+  path = "params",
+): string | undefined {
+  if (schema.type === "object") {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      return `${path} 必须是对象`;
+    }
+    const record = value as Record<string, unknown>;
+    for (const required of schema.required ?? []) {
+      if (typeof required === "string" && !(required in record)) {
+        return `${path}.${required} 缺失`;
+      }
+    }
+    if (schema.additionalProperties === false) {
+      const allowed = new Set(Object.keys(schema.properties ?? {}));
+      const extra = Object.keys(record).find((key) => !allowed.has(key));
+      if (extra) return `${path}.${extra} 不在工具 schema 中`;
+    }
+    for (const [key, childSchema] of Object.entries(schema.properties ?? {})) {
+      if (!(key in record)) continue;
+      const problem = validateRuntimeInputSchema(record[key], childSchema, `${path}.${key}`);
+      if (problem) return problem;
+    }
+    return undefined;
+  }
+  if (schema.type === "array") {
+    if (!Array.isArray(value)) return `${path} 必须是数组`;
+    if (schema.items) {
+      for (const [index, item] of value.entries()) {
+        const problem = validateRuntimeInputSchema(item, schema.items, `${path}[${index}]`);
+        if (problem) return problem;
+      }
+    }
+    return undefined;
+  }
+  if (schema.type === "string" && typeof value !== "string") return `${path} 必须是字符串`;
+  if (schema.type === "number" && typeof value !== "number") return `${path} 必须是数字`;
+  if (schema.type === "boolean" && typeof value !== "boolean") return `${path} 必须是布尔值`;
+  return undefined;
+}
+
+function preEngineRuntimeInputSchema(toolName: string): RuntimeInputSchema | undefined {
+  if (toolName === "pre_context") return createPreContextInputSchema() as RuntimeInputSchema;
+  if (toolName === "pre_impact") return createPreImpactInputSchema() as RuntimeInputSchema;
+  if (toolName === "pre_plan") return createPrePlanInputSchema() as RuntimeInputSchema;
+  if (toolName === "pre_verify") return createPreVerifyInputSchema() as RuntimeInputSchema;
+  return undefined;
+}
+
 function recommendDeferredToolCall(
   query: string,
   context: TuiContext,
@@ -2134,13 +2382,6 @@ function recommendDeferredToolCall(
       };
     }
   }
-  if (task && has("pre_plan")) {
-    return {
-      tool_name: "pre_plan",
-      params: { task },
-      reason: "the codebase index is not ready, so pre-engine should provide the first structured repository-analysis pass",
-    };
-  }
   return undefined;
 }
 
@@ -2150,6 +2391,7 @@ export async function executeExtraTool(
   options: {
     signal?: AbortSignal;
     onProgress?: (progress: McpRuntimeProgress) => void;
+    firstClassPreEngine?: boolean;
   } = {},
 ): Promise<ExecuteExtraToolResult> {
   if (typeof args.tool_name !== "string" || args.tool_name.trim() === "") {
@@ -2161,14 +2403,16 @@ export async function executeExtraTool(
   // D.13I tail fix — gating: 必须先看本 session 的"已发现"集合。
   // listDeferredTools 等价于"白名单存在"，不能等同于"模型已通过 SearchExtraTools 发现过"。
   // Set 命中 → 才允许进入白名单/适配器/必填参数检查。
-  if (!context.discoveredDeferredToolNames.has(args.tool_name)) {
+  const firstClassPreEngine = options.firstClassPreEngine
+    ? findDeferredTool(args.tool_name, listPreEngineRuntimeTools())
+    : undefined;
+  if (!firstClassPreEngine && !context.discoveredDeferredToolNames.has(args.tool_name)) {
     return {
       ok: false,
       text: `ExecuteExtraTool: 工具 ${args.tool_name} 未在本 session 通过 SearchExtraTools 发现过。请先运行 SearchExtraTools 发现该工具。`,
     };
   }
-  const all = listDeferredTools(context);
-  const target = findDeferredTool(args.tool_name, all);
+  const target = firstClassPreEngine ?? findDeferredTool(args.tool_name, listDeferredTools(context));
   if (!target) {
     return {
       ok: false,
@@ -2181,9 +2425,41 @@ export async function executeExtraTool(
       text: `ExecuteExtraTool: 工具 ${target.name} (${target.kind}) 已发现但当前没有安全执行适配器：${target.reason}`,
     };
   }
-  const params = (
-    args.params && typeof args.params === "object" && !Array.isArray(args.params) ? args.params : {}
-  ) as Record<string, unknown>;
+  if (
+    args.params !== undefined &&
+    (args.params === null || typeof args.params !== "object" || Array.isArray(args.params))
+  ) {
+    return {
+      ok: false,
+      text: `${firstClassPreEngine ? target.name : `ExecuteExtraTool: ${target.name}`} params 必须是对象。`,
+    };
+  }
+  const params = (args.params ?? {}) as Record<string, unknown>;
+  const missingArgs = target.requiredArgs.filter((key) => {
+    const value = params[key];
+    return (
+      value === undefined ||
+      value === null ||
+      (typeof value === "string" && value.trim() === "") ||
+      (Array.isArray(value) && value.length === 0)
+    );
+  });
+  if (missingArgs.length > 0) {
+    return {
+      ok: false,
+      text: `${firstClassPreEngine ? target.name : `ExecuteExtraTool: ${target.name}`} 缺少或为空的 required args：${missingArgs.join(", ")}。`,
+    };
+  }
+  if (target.kind === "pre-engine") {
+    const schema = preEngineRuntimeInputSchema(target.name);
+    const schemaProblem = schema ? validateRuntimeInputSchema(params, schema) : "未找到工具 schema";
+    if (schemaProblem) {
+      return {
+        ok: false,
+        text: `${target.name} params 不符合已发布的工具 schema：${schemaProblem}。`,
+      };
+    }
+  }
   if (target.kind === "codebase-memory") {
     if (!isCodebaseMemoryToolName(target.name)) {
       return {
@@ -2219,14 +2495,14 @@ export async function executeExtraTool(
   }
   if (target.kind === "pre-engine") {
     if (options.signal?.aborted) {
-      return { ok: false, text: "ExecuteExtraTool(pre-engine) cancelled: request aborted." };
+      return { ok: false, text: "pre-engine cancelled: request aborted." };
     }
     const binary = await (runtimeDeps?.resolvePreEngineBinary ?? resolvePreEngineBinary)();
     if (!binary) {
       return {
         ok: true,
         degraded: true,
-        text: `ExecuteExtraTool(pre-engine:${target.name}) 降级：当前环境找不到 linghun-pre-engine 二进制文件，已跳过 AST 预分析。请继续使用 index-backed tools、SourcePack、Grep、Glob、Read/ReadSnippets 做仓库定位。`,
+        text: `pre-engine(${target.name}) 降级：当前环境找不到 linghun-pre-engine 二进制文件，已跳过 AST 预分析。请继续使用 index-backed tools、SourcePack、Grep、Glob、Read/ReadSnippets 做仓库定位。`,
         data: {
           degraded: true,
           reason: "pre-engine-binary-missing",
@@ -2254,7 +2530,7 @@ export async function executeExtraTool(
       return {
         ok: true,
         degraded: true,
-        text: `ExecuteExtraTool(pre-engine:${target.name}) 降级：${result.summary}。请继续使用 index-backed tools、SourcePack、Grep、Glob、Read/ReadSnippets 做仓库定位。`,
+        text: `pre-engine(${target.name}) 降级：${result.summary}。请继续使用 index-backed tools、SourcePack、Grep、Glob、Read/ReadSnippets 做仓库定位。`,
         data: {
           degraded: true,
           reason: "pre-engine-runtime-unavailable",
@@ -2268,7 +2544,7 @@ export async function executeExtraTool(
       return {
         ok: true,
         degraded: true,
-        text: `ExecuteExtraTool(pre-engine:${target.name}) 降级：${semanticDegradation.summary}。请继续使用 index-backed tools、SourcePack、Grep、Glob、Read/ReadSnippets 做仓库定位。`,
+        text: `pre-engine(${target.name}) 降级：${semanticDegradation.summary}。请继续使用 index-backed tools、SourcePack、Grep、Glob、Read/ReadSnippets 做仓库定位。`,
         data: {
           degraded: true,
           reason: semanticDegradation.reason,
@@ -2280,7 +2556,7 @@ export async function executeExtraTool(
     }
     return {
       ok: true,
-      text: `ExecuteExtraTool(pre-engine:${target.name}) 完成。`,
+      text: `pre-engine(${target.name}) 完成。`,
       data: result.data,
     };
   }

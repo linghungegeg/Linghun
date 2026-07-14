@@ -11,7 +11,10 @@ import {
   type ToolOutput,
   type ToolProgressEvent,
 } from "@linghun/tools";
+import { defaultConfig } from "@linghun/config";
 
+import { createIndexState } from "./index-runtime.js";
+import { configureMcpIndexRuntime } from "./mcp-index-runtime.js";
 import { createModelToolDefinitions } from "./model-loop-runtime.js";
 import { createFailureLearningState } from "./failure-learning-runtime.js";
 import { withMemoryDirectoryLock } from "./memory-extraction-runtime.js";
@@ -24,6 +27,8 @@ import {
   __testParseRunWorkflowToolInput,
   __testParseStartAgentToolInput,
   executeApprovedModelToolUse,
+  executeDeferredDispatchToolUse,
+  executePreEngineToolUse,
   rememberSourcePackCandidatesFromToolData,
   rememberToolFiles,
 } from "./model-tool-runtime.js";
@@ -164,6 +169,39 @@ describe("model-tool-runtime Web terminal output", () => {
       builtInTools.WebSearch.call = originalCall;
     }
   });
+
+  it.each(["timeout", "cancelled"] as const)(
+    "routes Bash outcome=%s through the existing failure lifecycle",
+    async (outcome) => {
+      const originalCall = builtInTools.Bash.call;
+      builtInTools.Bash.call = (async () => ({
+        text: "stopped",
+        data: { outcome },
+      })) as typeof originalCall;
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-bash-outcome-"));
+      const context = createWebToolTestContext([], projectPath);
+      context.failureLearning = createFailureLearningState(projectPath);
+      const output = new WebToolOutput();
+
+      try {
+        const result = await executeApprovedModelToolUse(
+          { id: `bash-${outcome}`, name: "Bash", input: { command: "pnpm test" } },
+          "Bash",
+          context,
+          "session-web",
+          output,
+        );
+
+        expect(result.ok).toBe(false);
+        expect(context.lastToolFailure?.summary).toContain(
+          outcome === "timeout" ? "Bash timed out" : "Bash cancelled",
+        );
+        expect(context.lastToolFailure?.summary).not.toContain("exited non-zero");
+      } finally {
+        builtInTools.Bash.call = originalCall;
+      }
+    },
+  );
 
   it("keeps new-owner evidence when a stale request reuses the same tool use id", async () => {
     const originalCall = builtInTools.WebSearch.call;
@@ -567,6 +605,214 @@ describe("model-tool-runtime ReadSnippets and SourcePack integration", () => {
       reason: "pre-engine-verifier-unavailable",
       required_next_action: expect.stringContaining("ReadSnippets"),
     });
+  });
+
+  it("keeps pre fallback on the first-class path and rejects the deferred alias", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-pre-evidence-"));
+    const makeContext = () => {
+      const events: unknown[] = [];
+      const context = createWebToolTestContext(events, projectPath);
+      context.config = defaultConfig;
+      context.index = createIndexState(defaultConfig);
+      context.discoveredDeferredToolNames = new Set(["pre_verify"]);
+      context.mcp = { enabled: false, servers: [], tools: [] };
+      context.skills = {
+        enabled: false,
+        skills: [],
+        trustedIds: [],
+        disabledIds: [],
+        projectDir: join(projectPath, ".linghun", "skills"),
+        userDir: join(projectPath, ".linghun-user", "skills"),
+        evolutionCandidates: [],
+        rejectedEvolutionCandidates: [],
+      };
+      context.plugins = {
+        enabled: false,
+        plugins: [],
+        trustedIds: [],
+        disabledIds: [],
+        projectDir: join(projectPath, ".linghun", "plugins"),
+        userDir: join(projectPath, ".linghun-user", "plugins"),
+      };
+      return { context, events };
+    };
+    let payload: Record<string, unknown> = {
+      status: "pass",
+      verification: { status: "partially_verified", fully_verified: false },
+    };
+    configureMcpIndexRuntime({
+      getCurrentFreshness: () => ({} as never),
+      writeStatus: () => undefined,
+      checkBackgroundStartGuard: () => null,
+      ensureSession: async () => "session-web",
+      rememberBackgroundTask: () => undefined,
+      appendBackgroundTaskEvent: async () => undefined,
+      rememberEvidence: () => undefined,
+      resolvePreEngineBinary: async () => "mock-pre-engine",
+      callPreEngineTool: async () => ({
+        ok: true,
+        summary: "ok",
+        data: { content: [{ type: "text", text: JSON.stringify(payload) }] },
+      }),
+    });
+    const directContext = makeContext().context;
+    const deferredContext = makeContext().context;
+
+    const direct = await executePreEngineToolUse(
+      { id: "direct-pre", name: "pre_verify", input: { changed_files: ["src/a.ts"] } },
+      directContext,
+      "session-web",
+      new WebToolOutput(),
+    );
+    const deferredResult = await executeDeferredDispatchToolUse(
+      {
+        id: "deferred-pre",
+        name: "ExecuteExtraTool",
+        input: { tool_name: "pre_verify", params: { changed_files: ["src/a.ts"] } },
+      },
+      deferredContext,
+      "session-web",
+      new WebToolOutput(),
+    );
+
+    expect(direct.data).toMatchObject({
+      degraded: true,
+      fallback_required: true,
+      required_next_action: expect.any(String),
+    });
+    expect(deferredResult.ok).toBe(false);
+    expect(deferredResult.text).toContain("不在当前可用 deferred 工具清单");
+    expect(directContext.evidence).toHaveLength(1);
+    expect(directContext.evidence[0]).toMatchObject({ kind: "command_output" });
+    expect(directContext.evidence[0]?.supportsClaims).not.toContain("Read");
+    expect(directContext.evidence[0]?.supportsClaims).not.toContain("local_read");
+    expect(directContext.evidence[0]?.supportsClaims).not.toContain("readonly_low_noise_evidence");
+    expect(deferredContext.evidence).toHaveLength(1);
+    expect(deferredContext.evidence[0]).toMatchObject({ kind: "command_output" });
+
+    payload = { status: "pass", verification: { status: "verified", fully_verified: true } };
+    const normalContext = makeContext().context;
+    const normal = await executePreEngineToolUse(
+      { id: "direct-pre-normal", name: "pre_verify", input: { changed_files: ["src/a.ts"] } },
+      normalContext,
+      "session-web",
+      new WebToolOutput(),
+    );
+    expect(normal.data).not.toMatchObject({ fallback_required: true });
+    expect(normalContext.evidence[0]).toMatchObject({ kind: "command_output" });
+
+    const searchContext = makeContext().context;
+    await executeDeferredDispatchToolUse(
+      { id: "search-extra", name: "SearchExtraTools", input: { query: "pre" } },
+      searchContext,
+      "session-web",
+      new WebToolOutput(),
+    );
+    expect(searchContext.evidence[0]).toMatchObject({ kind: "command_output" });
+    expect(searchContext.evidence[0]?.supportsClaims).not.toContain("Read");
+  });
+
+  it("validates first-class pre parameters before daemon execution and rejects deferred aliases", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-pre-params-"));
+    const calls = vi.fn(async () => ({
+      ok: true,
+      summary: "ok",
+      data: { content: [{ type: "text", text: JSON.stringify({ status: "pass" }) }] },
+    }));
+    const resolveBinary = vi.fn(async () => "mock-pre-engine");
+    configureMcpIndexRuntime({
+      getCurrentFreshness: () => ({} as never),
+      writeStatus: () => undefined,
+      checkBackgroundStartGuard: () => null,
+      ensureSession: async () => "session-web",
+      rememberBackgroundTask: () => undefined,
+      appendBackgroundTaskEvent: async () => undefined,
+      rememberEvidence: () => undefined,
+      resolvePreEngineBinary: resolveBinary,
+      callPreEngineTool: calls,
+    });
+    const makeContext = () => {
+      const context = createWebToolTestContext([], projectPath);
+      context.config = defaultConfig;
+      context.index = createIndexState(defaultConfig);
+      context.discoveredDeferredToolNames = new Set(["pre_context", "pre_impact", "pre_plan", "pre_verify"]);
+      context.mcp = { enabled: false, servers: [], tools: [] };
+      context.skills = { enabled: false, skills: [], trustedIds: [], disabledIds: [] } as never;
+      context.plugins = { enabled: false, plugins: [], trustedIds: [], disabledIds: [] } as never;
+      return context;
+    };
+    const parameterCases = [
+      { tool: "pre_context", empty: { symbol: "" }, valid: { symbol: "run" } },
+      {
+        tool: "pre_impact",
+        empty: { changes: [] },
+        valid: { changes: [{ path: "src/a.ts", symbols: ["run"] }] },
+      },
+      { tool: "pre_plan", empty: { task: "" }, valid: { task: "inspect" } },
+      {
+        tool: "pre_verify",
+        empty: { changed_files: [] },
+        valid: { changed_files: ["src/a.ts"] },
+      },
+    ];
+    const invalidCases = parameterCases.flatMap((testCase) => [
+      { tool: testCase.tool, params: {} },
+      { tool: testCase.tool, params: testCase.empty },
+      { tool: testCase.tool, params: [] },
+    ]);
+
+    for (const [index, testCase] of invalidCases.entries()) {
+      const direct = await executePreEngineToolUse(
+        { id: `direct-invalid-${index}`, name: testCase.tool, input: testCase.params },
+        makeContext(),
+        "session-web",
+        new WebToolOutput(),
+      );
+      const deferred = await executeDeferredDispatchToolUse(
+        {
+          id: `deferred-invalid-${index}`,
+          name: "ExecuteExtraTool",
+          input: { tool_name: testCase.tool, params: testCase.params },
+        },
+        makeContext(),
+        "session-web",
+        new WebToolOutput(),
+      );
+      expect(deferred.ok).toBe(false);
+      expect(direct.ok).toBe(false);
+      expect(direct.text).toMatch(/params|缺少或为空/u);
+      expect(deferred.text).toContain("不在当前可用 deferred 工具清单");
+    }
+    expect(resolveBinary).not.toHaveBeenCalled();
+    expect(calls).not.toHaveBeenCalled();
+
+    const validCases = parameterCases.map((testCase) => ({
+      tool: testCase.tool,
+      params: testCase.valid,
+    }));
+    for (const [index, testCase] of validCases.entries()) {
+      const direct = await executePreEngineToolUse(
+        { id: `direct-valid-${index}`, name: testCase.tool, input: testCase.params },
+        makeContext(),
+        "session-web",
+        new WebToolOutput(),
+      );
+      const deferred = await executeDeferredDispatchToolUse(
+        {
+          id: `deferred-valid-${index}`,
+          name: "ExecuteExtraTool",
+          input: { tool_name: testCase.tool, params: testCase.params },
+        },
+        makeContext(),
+        "session-web",
+        new WebToolOutput(),
+      );
+      expect(direct.ok).toBe(true);
+      expect(deferred.ok).toBe(false);
+      expect(deferred.text).toContain("不在当前可用 deferred 工具清单");
+    }
+    expect(resolveBinary).toHaveBeenCalledTimes(validCases.length);
+    expect(calls).toHaveBeenCalledTimes(validCases.length);
   });
 
   it("does not pass cwd to slash fork when StartAgent requests managed worktree isolation", () => {

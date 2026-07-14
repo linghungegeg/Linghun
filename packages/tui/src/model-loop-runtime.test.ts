@@ -188,33 +188,35 @@ describe("model-loop-runtime", () => {
       expect(names).toContain("IndexOperation");
     });
 
-    it("can hard-cut pre-engine tools out of the report-guard provider schema", () => {
-      const names = createModelToolDefinitionsForReportGuard(undefined, {
-        excludePreEngineTools: true,
-      }).map((d) => d.name);
+    it("keeps pre-engine tools in the report-guard provider schema", () => {
+      const names = createModelToolDefinitionsForReportGuard(undefined).map((d) => d.name);
 
-      expect(names).not.toContain("pre_context");
-      expect(names).not.toContain("pre_impact");
-      expect(names).not.toContain("pre_plan");
-      expect(names).not.toContain("pre_verify");
+      expect(names).toContain("pre_context");
+      expect(names).toContain("pre_impact");
+      expect(names).toContain("pre_plan");
+      expect(names).toContain("pre_verify");
       expect(names).toContain("Read");
       expect(names).toContain("Grep");
       expect(names).toContain("RunVerification");
       expect(names).toContain("ExecuteExtraTool");
     });
 
-    it("can switch pre-engine fallback recovery to direct real workspace tools", () => {
-      const names = createModelToolDefinitionsForReportGuard(undefined, {
-        excludePreEngineTools: true,
-        excludeDeferredToolDispatch: true,
-      }).map((d) => d.name);
+    it("keeps provider tool names, order, and schemas stable across request-local recovery", () => {
+      const snapshot = () =>
+        createModelToolDefinitionsForReportGuard(undefined).map((definition) => ({
+          name: definition.name,
+          inputSchema: definition.inputSchema,
+          schemaHash: definition.schemaHash,
+        }));
+      const baseline = snapshot();
+      const names = baseline.map((definition) => definition.name);
 
-      expect(names).not.toContain("pre_context");
-      expect(names).not.toContain("pre_impact");
-      expect(names).not.toContain("pre_plan");
-      expect(names).not.toContain("pre_verify");
-      expect(names).not.toContain("SearchExtraTools");
-      expect(names).not.toContain("ExecuteExtraTool");
+      expect(names).toContain("pre_context");
+      expect(names).toContain("pre_impact");
+      expect(names).toContain("pre_plan");
+      expect(names).toContain("pre_verify");
+      expect(names).toContain("SearchExtraTools");
+      expect(names).toContain("ExecuteExtraTool");
       expect(names).toContain("Read");
       expect(names).toContain("ReadSnippets");
       expect(names).toContain("SourcePack");
@@ -223,6 +225,9 @@ describe("model-loop-runtime", () => {
       expect(names).toContain("Bash");
       expect(names).toContain("Diff");
       expect(names).toContain("RunVerification");
+      for (const _requestShape of ["fallback", "cancel", "resume", "new-request"]) {
+        expect(snapshot()).toEqual(baseline);
+      }
     });
 
     it("exposes real agent workflow verification and report tools before CommandProposal fallback", () => {
@@ -334,19 +339,14 @@ describe("model-loop-runtime", () => {
       expect(workflowSchema.properties?.inputs?.additionalProperties).toBe(true);
     });
 
-    it("describes repository analysis affordance on SearchExtraTools", () => {
+    it("keeps pre-engine first-class instead of advertising it as deferred", () => {
       const searchExtraTools = createModelToolDefinitions().find(
         (d) => d.name === "SearchExtraTools",
       );
 
       expect(searchExtraTools?.description).toContain("pre-engine repository analysis");
-      expect(searchExtraTools?.description).toContain("repository code understanding");
-      expect(searchExtraTools?.description).toContain("impact analysis");
-      expect(searchExtraTools?.description).toContain("edit planning");
-      expect(searchExtraTools?.description).toContain("quick verification");
-      expect(searchExtraTools?.description).toContain("codebase-memory index is ready");
-      expect(searchExtraTools?.description).toContain("index-backed search/graph/architecture");
-      expect(searchExtraTools?.description).toContain("pre-engine for AST precision");
+      expect(searchExtraTools?.description).toContain("must be called directly");
+      expect(searchExtraTools?.description).not.toContain("discover pre-engine");
     });
 
     it("exposes pre-engine repository tools as first-class model tools", () => {
@@ -1254,6 +1254,30 @@ describe("model-loop-runtime", () => {
       expect(verdict.status).toBe("passed");
     });
 
+    it("does not let generic command output or Edit file tags support code facts", () => {
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("代码里已经实现 X，调用链是 A→B。", [
+          { kind: "code_fact", phrase: "调用链是 A→B" },
+        ]),
+        [
+          makeEvidence({
+            kind: "command_output",
+            source: "deferred-tool:echo",
+            summary: "file:src/a.ts local_read synthetic output",
+            supportsClaims: ["deferred_tool_output", "local_read"],
+          }),
+          makeEvidence({
+            kind: "command_output",
+            source: "Edit",
+            supportsClaims: ["Edit", "file_written", "file:src/a.ts"],
+          }),
+        ],
+      );
+
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("code_fact");
+    });
+
     it("does not let index status/missing/stale records support code facts", () => {
       const verdict = evaluateFinalAnswerClaims(
         withClaims("代码里已经实现 X，调用链是 A→B。", [
@@ -1636,6 +1660,29 @@ describe("model-loop-runtime", () => {
   });
 
   describe("D.13U deriveToolSupportsClaims", () => {
+    it("distinguishes Bash timeout, cancellation, and completed nonzero outcomes", () => {
+      const timeout = deriveToolSupportsClaims(
+        "Bash",
+        { command: "pnpm test" },
+        { text: "", data: { outcome: "timeout" } },
+      );
+      const cancelled = deriveToolSupportsClaims(
+        "Bash",
+        { command: "pnpm test" },
+        { text: "", data: { outcome: "cancelled" } },
+      );
+      const nonzero = deriveToolSupportsClaims(
+        "Bash",
+        { command: "pnpm test" },
+        { text: "", data: { outcome: "completed", exitCode: 2 } },
+      );
+
+      expect(timeout).toContain("bash_outcome_timeout");
+      expect(timeout).not.toContain("bash_exit_nonzero");
+      expect(cancelled).toContain("bash_outcome_cancelled");
+      expect(cancelled).not.toContain("bash_exit_nonzero");
+      expect(nonzero).toEqual(expect.arrayContaining(["bash_outcome_completed", "bash_exit_nonzero"]));
+    });
     it("Read derives local_read + file path", () => {
       const claims = deriveToolSupportsClaims("Read", { file_path: "src/index.ts" }, { text: "" });
       expect(claims).toContain("Read");
@@ -1738,7 +1785,100 @@ describe("model-loop-runtime", () => {
         { text: "fails", data: { exitCode: 1 } },
       );
       expect(claims).not.toContain("test_passed");
+      expect(claims).toContain("test_attempted");
+      expect(claims).toContain("verification_attempted");
       expect(claims).toContain("bash_exit_nonzero");
+    });
+
+    it.each([
+      ["corepack pnpm --filter @linghun/tui test", "test_attempted", "test_passed"],
+      ["pnpm -w test", "test_attempted", "test_passed"],
+      ["pnpm --workspace-root test", "test_attempted", "test_passed"],
+      ["pnpm -r typecheck", "typecheck_attempted", "typecheck_passed"],
+      ["corepack pnpm build", "build_attempted", "build_passed"],
+      ["pnpm -C packages/tui build", "build_attempted", "build_passed"],
+      ["npm --prefix packages/tui run build", "build_attempted", "build_passed"],
+      ["npm run --if-present build", "build_attempted", "build_passed"],
+      ["npm run lint", "lint_attempted", "lint_passed"],
+      ["yarn smoke", "smoke_attempted", "smoke_passed"],
+      ["yarn workspace tui test", "test_attempted", "test_passed"],
+      ["bun run test", "test_attempted", "test_passed"],
+      ["corepack pnpm smoke:tui-stdin", "smoke_attempted", "smoke_passed"],
+      ["corepack pnpm smoke:live-provider", "smoke_attempted", "smoke_passed"],
+      ["pnpm -r --if-present test", "test_attempted", "test_passed"],
+      ["npm run -w @linghun/tui test", "test_attempted", "test_passed"],
+      ["pnpm.cmd test", "test_attempted", "test_passed"],
+      ['vitest run "packages/tui/src/a test.ts"', "test_attempted", "test_passed"],
+      ["vitest run > test.log", "test_attempted", "test_passed"],
+      ["vitest run 2>&1", "test_attempted", "test_passed"],
+    ])("classifies package-manager verification command %s", (command, attempted, passed) => {
+      const claims = deriveToolSupportsClaims(
+        "Bash",
+        { command },
+        { text: "ok", data: { exitCode: 0 } },
+      );
+
+      expect(claims).toContain(attempted);
+      expect(claims).toContain(passed);
+      expect(claims).toContain("verification_attempted");
+    });
+
+    it("does not classify unrelated Bash as a verification attempt", () => {
+      const claims = deriveToolSupportsClaims(
+        "Bash",
+        { command: "pwd" },
+        { text: "/test", data: { exitCode: 0 } },
+      );
+
+      expect(claims).not.toContain("verification_attempted");
+      expect(claims.some((claim) => claim.endsWith("_attempted"))).toBe(false);
+    });
+
+    it.each([
+      "pnpm --dir test",
+      "npm --prefix test",
+      "yarn --cwd test",
+      "pnpm --unknown test",
+      "echo vitest",
+      "which vitest",
+      "echo tsc",
+      "true || pnpm test",
+      "pnpm test || true",
+      "pnpm test | tee out.txt",
+      'echo "noop; pnpm test; noop"',
+      "vitest --help",
+      "vitest list",
+      "tsc --version",
+      "tsc --init",
+      "pytest --collect-only",
+      "cargo test --no-run",
+    ])("does not mistake an option value for a verification script: %s", (command) => {
+      const claims = deriveToolSupportsClaims(
+        "Bash",
+        { command },
+        { text: "ok", data: { exitCode: 0 } },
+      );
+
+      expect(claims).not.toContain("test_attempted");
+      expect(claims).not.toContain("test_passed");
+      expect(claims).not.toContain("typecheck_attempted");
+      expect(claims).not.toContain("typecheck_passed");
+      expect(claims).not.toContain("verification_attempted");
+    });
+
+    it.each([
+      "echo git diff --check",
+      "echo git status",
+    ])("does not derive git evidence from echoed command text: %s", (command) => {
+      const claims = deriveToolSupportsClaims(
+        "Bash",
+        { command },
+        { text: "ok", data: { exitCode: 0 } },
+      );
+
+      expect(claims).not.toContain("diff_check_passed");
+      expect(claims).not.toContain("git_local_fact");
+      expect(claims).not.toContain("git_status");
     });
 
     it("Bash background start without a terminal exit derives no exit claim", () => {

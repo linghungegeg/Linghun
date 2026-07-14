@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { resolveStoragePaths } from "@linghun/config";
 import type { Language, PermissionMode } from "@linghun/shared";
+import { createShellChunkDecoder } from "@linghun/tools";
 import type { TuiContext } from "./index.js";
 import { formatBackgroundTask } from "./job-runner-presenter.js";
 import {
@@ -30,6 +31,8 @@ import {
   type UserActionConstraints,
   verificationStepConstraintReason,
 } from "./user-action-constraints.js";
+
+const VERIFICATION_PROCESS_STOP_TIMEOUT_MS = 3_000;
 
 export async function createVerificationPlan(
   projectPath: string,
@@ -510,6 +513,7 @@ export async function runVerificationPlan(
     context: TuiContext,
     sessionId: string,
     task: BackgroundTaskState,
+    commitGuard?: () => boolean,
   ) => Promise<void>,
   options: {
     cwd?: string;
@@ -727,7 +731,8 @@ export async function runVerificationPlan(
       );
       const durationMs = Date.now() - stepStarted;
       const runnerErrorLine = result.runnerError ? `runner error ${result.runnerError}\n` : "";
-      const fullLog = `$ ${step.command}\nexit code ${result.exitCode}\noutcome ${result.outcome}\n${runnerErrorLine}duration ${durationMs}ms\n\n${result.output}`;
+      const exitCodeLine = result.exitCode !== undefined ? `exit code ${result.exitCode}\n` : "";
+      const fullLog = `$ ${step.command}\n${exitCodeLine}outcome ${result.outcome}\n${runnerErrorLine}duration ${durationMs}ms\n\n${result.output}`;
       await writeFile(logPath, fullLog, "utf8");
       const summary = summarizeVerificationOutput(
         result.output,
@@ -766,7 +771,7 @@ export async function runVerificationPlan(
       results.push({
         ...step,
         status: commandStatus,
-        exitCode: result.exitCode,
+        ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
         durationMs,
         logPath,
         summary,
@@ -924,7 +929,12 @@ export async function runVerificationPlan(
     task.nextAction = report.nextAction;
     task.userVisibleSummary = report.summary;
     let terminalTaskPersisted = true;
-    await appendBackgroundTaskEvent(context, sessionId, task).catch((error) => {
+    await appendBackgroundTaskEvent(
+      context,
+      sessionId,
+      task,
+      report.status === "pass" ? passCommitStillValid : undefined,
+    ).catch((error) => {
       terminalTaskPersisted = false;
       report!.risk.push(`verification task terminal persist failed: ${error instanceof Error ? error.message : String(error)}`);
     });
@@ -1012,14 +1022,13 @@ export async function runVerificationCommand(
   signal?: AbortSignal,
   timeoutMs = LINGHUN_VERIFICATION_COMMAND_TIMEOUT_MS,
 ): Promise<{
-  exitCode: number;
+  exitCode?: number;
   output: string;
   outcome: "completed" | "timeout" | "cancelled";
   runnerError?: string;
 }> {
   if (signal?.aborted) {
     return {
-      exitCode: 1,
       output: "",
       outcome: "cancelled",
       runnerError: "runner cancelled before spawn",
@@ -1029,15 +1038,18 @@ export async function runVerificationCommand(
     const detached = process.platform !== "win32";
     const child = spawn(command, { cwd, shell: true, detached, windowsHide: true });
     const guard = createProcessGuard();
-    guard.track(child, { detached, label: "verification" });
+    guard.track(child, { detached, cwd, label: "verification" });
+    const stdoutDecoder = createShellChunkDecoder();
+    const stderrDecoder = createShellChunkDecoder();
     let output = "";
     let settled = false;
-    let forceTimer: NodeJS.Timeout | undefined;
-    const scheduleForceStop = () => {
-      forceTimer = setTimeout(() => guard.requestStop(true), 1_000);
+    let stoppingOutcome: "timeout" | "cancelled" | undefined;
+    const flushOutput = (): void => {
+      output += stdoutDecoder.flush();
+      output += stderrDecoder.flush();
     };
     const settle = (result: {
-      exitCode: number;
+      exitCode?: number;
       output: string;
       outcome?: "completed" | "timeout" | "cancelled";
       runnerError?: string;
@@ -1046,26 +1058,30 @@ export async function runVerificationCommand(
         return;
       }
       settled = true;
+      flushOutput();
       clearTimeout(timeout);
-      if (forceTimer && result.outcome === undefined) {
-        clearTimeout(forceTimer);
-      }
       signal?.removeEventListener("abort", onAbort);
-      resolveCommand({ ...result, outcome: result.outcome ?? "completed" });
+      resolveCommand({ ...result, output, outcome: result.outcome ?? "completed" });
     };
-    const onAbort = () => {
-      const runnerError = "runner cancelled by interrupt";
+    const stopAndSettle = async (outcome: "timeout" | "cancelled", reason: string) => {
+      if (settled || stoppingOutcome) return;
+      stoppingOutcome = outcome;
+      let runnerError = reason;
+      const graceful = process.platform === "win32"
+        ? undefined
+        : await guard.requestStopAndConfirm(false, VERIFICATION_PROCESS_STOP_TIMEOUT_MS);
+      const confirmed = graceful?.ok
+        ? graceful
+        : await guard.requestStopAndConfirm(true, VERIFICATION_PROCESS_STOP_TIMEOUT_MS);
+      if (!confirmed.ok) {
+        runnerError = `${runnerError}; service_stop_failed: ${confirmed.reason || "stop unconfirmed"}`;
+      }
       output = output ? `${output}\n${runnerError}` : runnerError;
-      guard.requestStop(false);
-      scheduleForceStop();
-      settle({ exitCode: 1, output, outcome: "cancelled", runnerError });
+      settle({ output, outcome, runnerError });
     };
+    const onAbort = () => void stopAndSettle("cancelled", "runner cancelled by interrupt");
     const timeout = setTimeout(() => {
-      const runnerError = `runner timeout after ${timeoutMs}ms`;
-      output = output ? `${output}\n${runnerError}` : runnerError;
-      guard.requestStop(false);
-      scheduleForceStop();
-      settle({ exitCode: 1, output, outcome: "timeout", runnerError });
+      void stopAndSettle("timeout", `runner timeout after ${timeoutMs}ms`);
     }, timeoutMs);
     if (signal?.aborted) {
       onAbort();
@@ -1073,30 +1089,28 @@ export async function runVerificationCommand(
     }
     signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout.on("data", (chunk: Buffer) => {
-      output += chunk.toString("utf8");
+      output += stdoutDecoder.push(chunk);
     });
     child.stderr.on("data", (chunk: Buffer) => {
-      output += chunk.toString("utf8");
+      output += stderrDecoder.push(chunk);
     });
     child.on("error", (error) => {
       const runnerError = `runner error: ${error.message}`;
-      settle({
-        exitCode: 1,
-        output: output ? `${output}\n${runnerError}` : runnerError,
-        runnerError,
-      });
+      output = output ? `${output}\n${runnerError}` : runnerError;
+      settle({ output, runnerError });
     });
     child.on("close", (code, childSignal) => {
-      const exitCode = code ?? 1;
+      if (stoppingOutcome) return;
+      const exitCode = code ?? undefined;
       const runnerError = detectRunnerCompatibilityError(output, exitCode, childSignal);
-      settle({ exitCode, output, runnerError });
+      settle({ ...(exitCode !== undefined ? { exitCode } : {}), output, runnerError });
     });
   });
 }
 
 export function detectRunnerCompatibilityError(
   output: string,
-  exitCode: number,
+  exitCode: number | undefined,
   signal: NodeJS.Signals | null,
 ): string | undefined {
   if (signal) {
@@ -1247,7 +1261,7 @@ export function formatVerificationLast(
 
 export function summarizeVerificationOutput(
   output: string,
-  exitCode: number,
+  exitCode: number | undefined,
   runnerError?: string,
 ): string {
   const lines = output
@@ -1256,9 +1270,11 @@ export function summarizeVerificationOutput(
     .filter(Boolean);
   const tail = lines.slice(-6).join(" | ");
   const summary = tail ? truncateDisplay(tail, 240) : "无输出";
-  return runnerError
-    ? `exit code ${exitCode}; runner error ${runnerError}; ${summary}`
-    : `exit code ${exitCode}; ${summary}`;
+  return [
+    ...(exitCode !== undefined ? [`exit code ${exitCode}`] : []),
+    ...(runnerError ? [`runner error ${runnerError}`] : []),
+    summary,
+  ].join("; ");
 }
 
 export async function safeReadJson(path: string): Promise<Record<string, unknown> | null> {

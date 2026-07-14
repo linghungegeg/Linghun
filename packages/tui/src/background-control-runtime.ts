@@ -484,6 +484,7 @@ export async function interruptAllActiveWork(
   let abortSignalsSent = 0;
   let markedOnly = 0;
   let confirmedExited = 0;
+  let interruptedForegroundController: AbortController | undefined;
   const appendInterruptEvent = async (message: string) => {
     await context.store.appendEvent(sessionId, {
       type: "interrupt",
@@ -514,6 +515,7 @@ export async function interruptAllActiveWork(
     return task.kind !== "agent" && task.kind !== "verification" && task.kind !== "job";
   };
 
+  try {
   const verificationTasks = context.backgroundTasks.filter(
     (task) =>
       task.kind === "verification" &&
@@ -547,13 +549,8 @@ export async function interruptAllActiveWork(
   if (context.activeAbortController) {
     const requestTurnId = context.currentRequestTurnId;
     const userMessageId = context.currentRequestUserMessageId;
-    context.activeAbortController.abort();
-    await recordInterruptedForegroundTurn(context, sessionId, {
-      requestTurnId,
-      reason: "user_interrupt",
-      userMessageId,
-    });
-    context.activeAbortController = undefined;
+    interruptedForegroundController = context.activeAbortController;
+    interruptedForegroundController.abort();
     context.foregroundAbortPendingUntilMs = Date.now() + FOREGROUND_ABORT_CONFIRMATION_GRACE_MS;
     if (requestTurnId) {
       clearRequestActivity(context, { kind: "foreground", requestTurnId });
@@ -561,6 +558,11 @@ export async function interruptAllActiveWork(
       clearRequestActivity(context);
     }
     markAbortSignalSent();
+    await recordInterruptedForegroundTurn(context, sessionId, {
+      requestTurnId,
+      reason: "user_interrupt",
+      userMessageId,
+    });
   }
 
   const activeRemoteCommand = context.remote?.activeCommand;
@@ -673,4 +675,12 @@ export async function interruptAllActiveWork(
     pauseActiveTodosForInterrupt();
   }
   return { cancelled, abortSignalsSent, markedOnly };
+  } finally {
+    if (
+      interruptedForegroundController &&
+      context.activeAbortController === interruptedForegroundController
+    ) {
+      context.activeAbortController = undefined;
+    }
+  }
 }

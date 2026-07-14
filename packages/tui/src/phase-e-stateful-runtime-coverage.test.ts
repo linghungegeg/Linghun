@@ -1,4 +1,5 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -66,7 +67,11 @@ import {
   createMemoryState,
   createRemoteState,
 } from "./tui-state-runtime.js";
-import { applyToolResultBudgetToMessages } from "./tool-result-budget.js";
+import {
+  applyToolResultBudgetToMessages,
+  createToolResultBudgetFingerprint,
+  createToolResultBudgetLedgerData,
+} from "./tool-result-budget.js";
 
 const SMALL_MCP_LIMITS: McpTransportLimits = {
   maxFrameBytes: 256,
@@ -539,6 +544,202 @@ describe("Phase E MCP SSE bounded transport coverage", () => {
 });
 
 describe("Phase E provider payload budgeting", () => {
+  it("keeps the pre-compact provider prefix stable as new small tool results arrive", async () => {
+    const context = await createTestContext();
+    setExecutorMaxInputTokens(context, 1_000_000);
+    const pair = (index: number): ModelMessage[] => {
+      const id = `call-prefix-${index}`;
+      return [
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id, name: "Read", input: { path: `${index}.txt` } }],
+        },
+        { role: "tool", tool_call_id: id, content: `PREFIX_${index}:${"x".repeat(10_000)}` },
+      ];
+    };
+    const firstInput = Array.from({ length: 7 }, (_, index) => pair(index)).flat();
+    const first = await prepareMessagesForProviderPreflight({
+      messages: firstInput,
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps: compactDeps(),
+    });
+    expect(first.blocked).toBe(false);
+    if (first.blocked) throw new Error("provider preflight unexpectedly blocked");
+
+    const second = await prepareMessagesForProviderPreflight({
+      messages: [
+        ...firstInput,
+        ...Array.from({ length: 6 }, (_, offset) => pair(offset + 7)).flat(),
+      ],
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps: compactDeps(),
+    });
+    expect(second.blocked).toBe(false);
+    if (second.blocked) throw new Error("provider preflight unexpectedly blocked");
+    const secondPrefix = second.messages.slice(0, first.messages.length);
+    expect(secondPrefix).toEqual(first.messages);
+    expect(stableHash(secondPrefix)).toBe(stableHash(first.messages));
+    expect(context.cache.compactBoundaries).toHaveLength(0);
+  });
+
+  it("compacts persisted tool summaries once when provider-visible results exceed 200k", async () => {
+    const context = await createTestContext();
+    setExecutorMaxInputTokens(context, 1_000_000);
+    const messages: ModelMessage[] = Array.from({ length: 100 }, (_, index) => {
+      const id = `call-summary-cap-${index}`;
+      return [
+        {
+          role: "assistant" as const,
+          content: "",
+          toolCalls: [{ id, name: "Bash", input: { command: `large-${index}` } }],
+        },
+        {
+          role: "tool" as const,
+          tool_call_id: id,
+          content: `SUMMARY_CAP_${index}:${"x".repeat(20_000)}`,
+        },
+      ];
+    }).flat();
+    const first = await prepareMessagesForProviderPreflight({
+      messages,
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps: compactDeps(),
+    });
+    expect(first.blocked).toBe(false);
+    if (first.blocked) throw new Error("provider preflight unexpectedly blocked");
+    const visibleToolChars = first.messages.reduce(
+      (total, message) => (message.role === "tool" ? total + message.content.length : total),
+      0,
+    );
+    expect(visibleToolChars).toBeLessThanOrEqual(200_000);
+    expect(context.cache.compactBoundaries).toHaveLength(1);
+    const boundaryId = context.cache.compactBoundaries[0]?.id;
+    const projectionHash = stableHash(
+      first.messages.filter((message) => message.content.startsWith("Context compact projection\n")),
+    );
+
+    const second = await prepareMessagesForProviderPreflight({
+      messages: [...first.messages, { role: "user", content: "small follow-up" }],
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps: compactDeps(),
+    });
+    const third = await prepareMessagesForProviderPreflight({
+      messages: [...second.messages, { role: "user", content: "another small follow-up" }],
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps: compactDeps(),
+    });
+    expect(second.blocked).toBe(false);
+    expect(third.blocked).toBe(false);
+    expect(context.cache.compactBoundaries).toHaveLength(1);
+    expect(context.cache.compactBoundaries[0]?.id).toBe(boundaryId);
+    expect(
+      stableHash(
+        third.messages.filter((message) =>
+          message.content.startsWith("Context compact projection\n"),
+        ),
+      ),
+    ).toBe(projectionHash);
+  });
+
+  it("replays a validated legacy ledger replacement unchanged after hot state loss", async () => {
+    const context = await createTestContext();
+    const sessionId = context.sessionId ?? "session";
+    const toolUseId = "call-legacy-provider-prefix";
+    const raw = `LEGACY_PREFIX:${"l".repeat(20_000)}`;
+    const sha256 = createHash("sha256").update(raw).digest("hex");
+    const relativePath = `.linghun/session/tool-results/${sessionId}/${sha256}.txt`;
+    const artifactPath = join(context.projectPath, relativePath);
+    await mkdir(join(artifactPath, ".."), { recursive: true });
+    await writeFile(artifactPath, raw, "utf8");
+    const ledger = createToolResultBudgetLedgerData({
+      toolUseId,
+      originalChars: raw.length,
+      replacementChars: 0,
+      reason: "pressure_age",
+      artifact: {
+        id: sha256,
+        toolUseId,
+        path: artifactPath,
+        relativePath,
+        bytes: Buffer.byteLength(raw, "utf8"),
+        chars: raw.length,
+        sha256,
+        previewChars: 2_000,
+        preview: raw.slice(0, 2_000),
+        hasMore: true,
+      },
+    });
+    ledger.replacement = ledger.replacement.replace(
+      "<persisted-tool-result>\n",
+      "<persisted-tool-result>\nreason: pressure_age\n",
+    );
+    ledger.replacementSha256 = createHash("sha256").update(ledger.replacement).digest("hex");
+    ledger.record.replacementChars = ledger.replacement.length;
+    context.evidence.push({
+      id: "evidence-legacy-provider-prefix",
+      kind: "command_output",
+      summary: "legacy tool result replacement",
+      source: relativePath,
+      supportsClaims: ["tool_result_budget", `toolUseId:${toolUseId}`],
+      createdAt: new Date().toISOString(),
+      toolUseId,
+      fullOutputPath: artifactPath,
+      outputPath: artifactPath,
+      ownerScope: { ownerSessionId: sessionId },
+      data: ledger,
+    });
+    const messages: ModelMessage[] = [
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: toolUseId, name: "Read", input: { path: "legacy.txt" } }],
+      },
+      { role: "tool", tool_call_id: toolUseId, content: raw },
+    ];
+
+    const first = await prepareMessagesForProviderPreflight({
+      messages,
+      context,
+      sessionId,
+      runtime: runtime(),
+      trigger: "request",
+      deps: compactDeps(),
+    });
+    context.toolResultBudgetState = undefined;
+    const resumed = await prepareMessagesForProviderPreflight({
+      messages,
+      context,
+      sessionId,
+      runtime: runtime(),
+      trigger: "request",
+      deps: compactDeps(),
+    });
+
+    expect(first.blocked).toBe(false);
+    expect(resumed.blocked).toBe(false);
+    expect(first.messages[1]?.content).toBe(ledger.replacement);
+    expect(resumed.messages[1]?.content).toBe(ledger.replacement);
+    expect(createHash("sha256").update(resumed.messages[1]?.content ?? "").digest("hex")).toBe(
+      ledger.replacementSha256,
+    );
+  });
+
   it("persists medium-large tool outputs before provider requests", async () => {
     const context = await createTestContext();
     const records: Array<{ artifact: { path: string }; reason: string }> = [];
@@ -781,8 +982,8 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     if (!compacted.blocked) {
       const compactMessage = compacted.messages.map((message) => message.content).join("\n");
       expect(compactMessage).toContain("[Context restore metadata]");
-      expect(compactMessage).toContain('"currentTask":"keep the latest request"');
-      expect(compactMessage).toContain('"keyFiles":["src/mentioned.ts","src/changed.ts"]');
+      expect(compactMessage).toContain("current task: keep the latest request");
+      expect(compactMessage).toContain("key files: src/mentioned.ts, src/changed.ts");
     }
     const projection = context.cache.compactProjection;
     expect(projection).toBeDefined();
@@ -899,6 +1100,203 @@ describe("Phase E compact preflight and deep compact coverage", () => {
       "requestHash",
       "latestMessageHash",
     ]);
+  });
+
+  it("keeps one real compact boundary and a stable provider prefix across three preflights", async () => {
+    const context = await createTestContext();
+    setExecutorMaxInputTokens(context, 13_100);
+    const evidenceId = "11111111-2222-4333-8444-555555555555";
+    const agentId = "agent-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    context.evidence.push({
+      id: evidenceId,
+      kind: "file_read",
+      summary: "stable source evidence",
+      source: "src/stable.ts",
+      supportsClaims: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    context.agents.push(stressAgent(agentId, "running"));
+    const triggerChars = getAutoCompactTriggerChars(context, runtime());
+    const stableTail = `STABLE_ACTIVE_TAIL:${"t".repeat(Math.max(1, triggerChars - 2_000))}`;
+    const staleContext = "REAL_PREFLIGHT_STALE_CONTEXT".repeat(3_000);
+    const deps = compactDeps();
+    const first = await prepareMessagesForProviderPreflight({
+      messages: [
+        { role: "system", content: "stable system guard" },
+        { role: "user", content: staleContext },
+        { role: "assistant", content: staleContext },
+        { role: "user", content: stableTail },
+      ],
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps,
+    });
+    expect(first.blocked).toBe(false);
+    if (first.blocked) throw new Error("first provider preflight unexpectedly blocked");
+    const firstBoundaryId = context.cache.compactProjection?.boundaryId;
+    const firstBoundaryCount = context.cache.compactBoundaries.length;
+    const firstPrefix = providerPrefixThroughCompactProjection(first.messages);
+    const firstPrefixHash = hashProviderMessages(firstPrefix);
+    const firstPrefixChars = estimateModelMessageChars(firstPrefix);
+    expect(context.cache.compactProjection?.retriggerGuard?.baselineChars).toBeGreaterThan(0);
+
+    const second = await prepareMessagesForProviderPreflight({
+      messages: [...first.messages, { role: "user", content: "small follow-up two" }],
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "continuation",
+      deps,
+    });
+    expect(second.blocked).toBe(false);
+    if (second.blocked) throw new Error("second provider preflight unexpectedly blocked");
+    const third = await prepareMessagesForProviderPreflight({
+      messages: [...second.messages, { role: "user", content: "small follow-up three" }],
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "continuation",
+      deps,
+    });
+    expect(third.blocked).toBe(false);
+    if (third.blocked) throw new Error("third provider preflight unexpectedly blocked");
+
+    const secondPrefix = providerPrefixThroughCompactProjection(second.messages);
+    const thirdPrefix = providerPrefixThroughCompactProjection(third.messages);
+    const secondObservation = observeCacheSafeRequest({
+      kind: "continuation",
+      provider: "anthropic",
+      request: makeProviderCacheRequest(second.messages),
+      now: new Date("2026-01-01T00:00:01.000Z"),
+    });
+    const thirdObservation = observeCacheSafeRequest({
+      previous: secondObservation,
+      kind: "continuation",
+      provider: "anthropic",
+      request: makeProviderCacheRequest(third.messages),
+      now: new Date("2026-01-01T00:00:02.000Z"),
+    });
+
+    expect(context.cache.compactBoundaries).toHaveLength(firstBoundaryCount);
+    expect(context.cache.compactProjection?.boundaryId).toBe(firstBoundaryId);
+    expect(hashProviderMessages(secondPrefix)).toBe(firstPrefixHash);
+    expect(hashProviderMessages(thirdPrefix)).toBe(firstPrefixHash);
+    expect(estimateModelMessageChars(secondPrefix)).toBe(firstPrefixChars);
+    expect(estimateModelMessageChars(thirdPrefix)).toBe(firstPrefixChars);
+    expect(thirdObservation.fingerprint.messagePrefixHash).toBe(
+      secondObservation.fingerprint.messagePrefixHash,
+    );
+    expect(thirdObservation.fingerprint.systemPrefixHash).toBe(
+      secondObservation.fingerprint.systemPrefixHash,
+    );
+    expect(thirdObservation.fingerprint.conversationPrefixHash).toBe(
+      secondObservation.fingerprint.conversationPrefixHash,
+    );
+    expect(thirdObservation.fingerprint.toolSchemaHash).toBe(
+      secondObservation.fingerprint.toolSchemaHash,
+    );
+    expect(stableHash(makeProviderCacheRequest(third.messages).tools)).toBe(
+      stableHash(makeProviderCacheRequest(second.messages).tools),
+    );
+    const providerPrefixText = thirdPrefix.map((message) => message.content).join("\n");
+    expect(providerPrefixText).not.toContain(evidenceId);
+    expect(providerPrefixText).not.toContain(agentId);
+    expect(context.cache.compactProjection?.restoreContext?.evidenceRefs).toContain(evidenceId);
+    expect(context.cache.compactProjection?.restoreContext?.activeAgentsWorkflows.join("\n")).toContain(
+      agentId,
+    );
+  });
+
+  it("compacts 100 provider-seen 20k tool results once and keeps later preflight prefixes stable", async () => {
+    const context = await createTestContext();
+    setExecutorMaxInputTokens(context, 250_000);
+    context.modelGateway = gateway([
+      { type: "tool_use", id: "stable-pressure-deep-fail", name: "Read", input: {} },
+    ]);
+    const state = { seenIds: new Set<string>(), replacements: new Map() };
+    context.toolResultBudgetState = state;
+    const toolPairs: ModelMessage[] = Array.from({ length: 100 }).flatMap((_, index) => {
+      const id = `stable-pressure-${index}`;
+      return [
+        {
+          role: "assistant" as const,
+          content: "",
+          toolCalls: [{ id, name: "Bash", input: { command: `pressure-${index}` } }],
+        },
+        {
+          role: "tool" as const,
+          tool_call_id: id,
+          content: `STABLE_PRESSURE_${index}:${"x".repeat(20_000)}`,
+        },
+      ];
+    });
+    for (const message of toolPairs) {
+      if (message.role !== "tool") continue;
+      state.seenIds.add(
+        createToolResultBudgetFingerprint(
+          context.sessionId ?? "session",
+          message.tool_call_id,
+          message.content,
+        ),
+      );
+    }
+
+    const deps = { ...compactDeps(), runDeepCompact: deepDeps() };
+    const first = await prepareMessagesForProviderPreflight({
+      messages: [
+        { role: "system", content: "stable pressure system" },
+        ...toolPairs,
+        { role: "user", content: "compact the bounded tool history" },
+      ],
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "request",
+      deps,
+    });
+    expect(first.blocked).toBe(false);
+    if (first.blocked) throw new Error("first provider preflight unexpectedly blocked");
+    const visibleToolChars = first.messages.reduce(
+      (total, message) => (message.role === "tool" ? total + message.content.length : total),
+      0,
+    );
+    expect(visibleToolChars).toBeLessThanOrEqual(200_000);
+    expect(context.cache.compactBoundaries).toHaveLength(1);
+    const boundaryId = context.cache.compactProjection?.boundaryId;
+    const stablePrefix = providerPrefixThroughCompactProjection(first.messages);
+    const stablePrefixHash = hashProviderMessages(stablePrefix);
+
+    const second = await prepareMessagesForProviderPreflight({
+      messages: [...first.messages, { role: "user", content: "second stable follow-up" }],
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "continuation",
+      deps,
+    });
+    expect(second.blocked).toBe(false);
+    if (second.blocked) throw new Error("second provider preflight unexpectedly blocked");
+    const third = await prepareMessagesForProviderPreflight({
+      messages: [...second.messages, { role: "user", content: "third stable follow-up" }],
+      context,
+      sessionId: context.sessionId ?? "session",
+      runtime: runtime(),
+      trigger: "continuation",
+      deps,
+    });
+    expect(third.blocked).toBe(false);
+    if (third.blocked) throw new Error("third provider preflight unexpectedly blocked");
+
+    const secondPrefix = providerPrefixThroughCompactProjection(second.messages);
+    const thirdPrefix = providerPrefixThroughCompactProjection(third.messages);
+    expect(secondPrefix).toEqual(stablePrefix);
+    expect(thirdPrefix).toEqual(stablePrefix);
+    expect(hashProviderMessages(secondPrefix)).toBe(stablePrefixHash);
+    expect(hashProviderMessages(thirdPrefix)).toBe(stablePrefixHash);
+    expect(context.cache.compactBoundaries).toHaveLength(1);
+    expect(context.cache.compactProjection?.boundaryId).toBe(boundaryId);
   });
 
   it("marks post-compact retrigger risk and suppresses consecutive full summaries", async () => {
@@ -1023,10 +1421,11 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(first.blocked).toBe(false);
     if (first.blocked) throw new Error("provider preflight unexpectedly blocked");
     const projection = context.cache.compactProjection;
-    expect(projection?.retriggerGuard).toEqual({
-      baselineChars: 0,
+    expect(projection?.retriggerGuard).toMatchObject({
+      baselineChars: expect.any(Number),
       tailGrowthThreshold: expect.any(Number),
     });
+    expect(projection?.retriggerGuard?.baselineChars).toBeGreaterThan(0);
 
     const resumed = await createTestContext();
     setExecutorMaxInputTokens(resumed, 13_100);

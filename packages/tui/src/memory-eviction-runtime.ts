@@ -1,6 +1,7 @@
 import type { TuiContext } from "./index.js";
 import type { AgentRun } from "./tui-data-types.js";
 import type { ProductBlockViewModel } from "./shell/types.js";
+import { pruneToolResultBudgetStateEntries } from "./tool-result-budget.js";
 import {
   transcriptSourceKindForBlock,
   transcriptSourceRawTextForBlock,
@@ -11,7 +12,6 @@ const AGENT_KEEP_RECENT = 5;
 const AGENT_FULL_REPORT_MAX_CHARS = 400;
 const BLOCK_KEEP_RECENT = 60;
 const BLOCK_FULLTEXT_EVICT_CHARS = 200;
-const TOOL_BUDGET_STATE_MAX_ENTRIES = 200;
 
 export function evictCompletedAgents(context: TuiContext): void {
   const agents: AgentRun[] = context.agents;
@@ -68,29 +68,7 @@ function syncEvictedBlockToTranscriptSource(
 export function pruneToolResultBudgetState(context: TuiContext): void {
   const state = context.toolResultBudgetState;
   if (!state) return;
-  if (state.seenIds.size <= TOOL_BUDGET_STATE_MAX_ENTRIES) return;
-  const idsArray = Array.from(state.seenIds);
-  const removeCount = idsArray.length - TOOL_BUDGET_STATE_MAX_ENTRIES;
-  for (let i = 0; i < removeCount; i++) {
-    const id = idsArray[i];
-    if (id) {
-      state.seenIds.delete(id);
-      const replacement = state.replacements.get(id);
-      state.replacements.delete(id);
-      if (replacement) {
-        state.contentReplacements?.delete(buildContentReplacementKey(replacement));
-      }
-    }
-  }
-}
-
-function buildContentReplacementKey(replacement: {
-  record: { artifact: { chars: number; bytes: number; sha256: string } };
-  fingerprint: string;
-}): string {
-  const sessionId = replacement.fingerprint.split("\0")[0] ?? "";
-  const artifact = replacement.record.artifact;
-  return [sessionId, artifact.chars, artifact.bytes, artifact.sha256].join("\0");
+  pruneToolResultBudgetStateEntries(state);
 }
 
 export function runMemoryEviction(context: TuiContext, blocks: ProductBlockViewModel[]): void {

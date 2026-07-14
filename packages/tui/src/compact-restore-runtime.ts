@@ -3,6 +3,7 @@ import { relative, resolve } from "node:path";
 import type { ModelMessage } from "@linghun/providers";
 import { redactCommonSecrets } from "@linghun/shared";
 import type { TuiContext } from "./index.js";
+import { sanitizeProviderStableCompactText } from "./deep-compact-runtime.js";
 import {
   sanitizeDiagnosticText,
   sanitizeDisplayPaths,
@@ -152,11 +153,15 @@ function uniqueFiles(files: string[]): string[] {
 function formatActivePlan(context: TuiContext): string | undefined {
   const plan = context.activePlan;
   if (!plan) return undefined;
-  const lines = [`PlanProposal ${plan.id}: ${plan.title}`];
+  const lines = [`PlanProposal: ${sanitizeRestoreMetadataText(context, plan.title, 320)}`];
   for (const option of plan.options.slice(0, 3)) {
-    lines.push(`option ${option.id}: ${option.title}`);
-    lines.push(...option.steps.slice(0, 8).map((step, index) => `${index + 1}. ${step}`));
-    lines.push(...option.risks.slice(0, 4).map((risk) => `risk: ${risk}`));
+    lines.push(`option: ${sanitizeRestoreMetadataText(context, option.title, 320)}`);
+    lines.push(...option.steps.slice(0, 8).map(
+      (step, index) => `${index + 1}. ${sanitizeRestoreMetadataText(context, step, 320)}`,
+    ));
+    lines.push(...option.risks.slice(0, 4).map(
+      (risk) => `risk: ${sanitizeRestoreMetadataText(context, risk, 320)}`,
+    ));
   }
   return sanitizeRestoreText(context, lines.join("\n"), RESTORE_PLAN_MAX_CHARS);
 }
@@ -165,10 +170,9 @@ function collectRuntimeStatus(context: TuiContext): string[] {
   const agents = context.agents
     .filter((agent) => ["running", "idle", "blocked", "stale"].includes(agent.status))
     .slice(0, 6)
-    .map((agent) => {
-      const name = agent.addressableName || agent.displayName || agent.id;
-      return `agent ${name}: ${agent.status}; task ${agent.task}; activity ${agent.activitySummary || agent.activityStatus || "unknown"}`;
-    });
+    .map((agent) =>
+      `agent: ${agent.status}; task ${sanitizeRestoreMetadataText(context, agent.task, 160)}; activity ${sanitizeRestoreMetadataText(context, agent.activitySummary || agent.activityStatus || "unknown", 160)}`
+    );
 
   const workflowRuns = [
     ...(context.workflows.activeRuns ?? []),
@@ -177,7 +181,9 @@ function collectRuntimeStatus(context: TuiContext): string[] {
   const workflows = workflowRuns
     .filter((run) => ["running", "partial", "blocked", "stale"].includes(run.status))
     .slice(0, 4)
-    .map((run) => `workflow ${run.id}: ${run.status}; goal ${run.goal}`);
+    .map((run) =>
+      `workflow: ${run.status}; goal ${sanitizeRestoreMetadataText(context, run.goal, 220)}`
+    );
 
   return [...agents, ...workflows]
     .map((line) => sanitizeRestoreText(context, line, 320))
@@ -193,4 +199,12 @@ function sanitizeRestoreText(
   const redacted = redactCommonSecrets(value);
   const sanitized = sanitizeDiagnosticText(sanitizeDisplayPaths(redacted, context.projectPath));
   return truncateDisplay(sanitized, Math.max(0, maxChars - 1)).trim();
+}
+
+function sanitizeRestoreMetadataText(
+  context: Pick<TuiContext, "projectPath">,
+  value: string,
+  maxChars: number,
+): string {
+  return sanitizeProviderStableCompactText(sanitizeRestoreText(context, value, maxChars));
 }

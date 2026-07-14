@@ -44,6 +44,7 @@ import { detectTerminalCapability, resetTerminalCapabilityCache } from "./termin
 import { displayWidth } from "./text-utils.js";
 import type { ProductBlockViewModel } from "./types.js";
 import {
+  TRANSCRIPT_SOURCE_RECENT_CELL_LIMIT,
   createTranscriptSource,
   upsertTranscriptSourceCell,
 } from "./models/transcript-source.js";
@@ -6199,6 +6200,7 @@ describe("ShellBlockOutput — assistant streaming block", () => {
   });
 
   it("source-backed Ink projection matches the current block projection without changing styles", () => {
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "0");
     const ctx = makeFakeContext();
     const source = createTranscriptSource();
     const blocks: ProductBlockViewModel[] = [
@@ -6247,13 +6249,12 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     const fromSource = createShellViewModel(ctx, { transcriptSource: source, viewMode: "task" });
     const inferredFromSource = createShellViewModel(ctx, { transcriptSource: source });
 
-    // Plan A: in native scrollback mode the source feeds the canonical
-    // staticHistory projection (non-native replay path / Ctrl+O), not the live
-    // Ink frame. Its projection must still match the block-derived projection
-    // 1:1 without changing styles or order.
+    // Alternate-screen replay still projects the bounded source 1:1 without
+    // changing block styles or append order.
     expect(fromSource.staticHistoryBlocks).toEqual(fromBlocks.blocks);
     expect(fromSource.viewMode).toBe("task");
     expect(inferredFromSource.viewMode).toBe("task");
+    vi.unstubAllEnvs();
   });
 
   it("empty TranscriptSource falls back to current output blocks", () => {
@@ -6302,15 +6303,16 @@ describe("ShellBlockOutput — assistant streaming block", () => {
 
     const view = createShellViewModel(ctx, { transcriptSource: source, viewMode: "task" });
 
-    // Plan A: a committed (terminal-owned) source cell is preserved in the
-    // canonical staticHistory projection for replay / Ctrl+O, but is NOT
-    // rendered into the live native Ink frame.
-    expect(view.staticHistoryBlocks?.find((candidate) => candidate.id === block.id)).toBeDefined();
+    // Terminal history owns committed rows. Native renders materialize only
+    // live rows or one explicit Ctrl+O target from the bounded source.
+    expect(source.cells.map((cell) => cell.id)).toEqual([block.id]);
+    expect(view.staticHistoryBlocks?.find((candidate) => candidate.id === block.id)).toBeUndefined();
     expect(view.blocks.find((candidate) => candidate.id === block.id)).toBeUndefined();
     vi.unstubAllEnvs();
   });
 
   it("source-backed Static history keeps the append-only transcript beyond visible block clipping", () => {
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "0");
     const ctx = makeFakeContext();
     const source = createTranscriptSource();
     for (let index = 0; index < 25; index++) {
@@ -6335,6 +6337,7 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     expect(view.blocks.length).toBeLessThan(view.staticHistoryBlocks?.length ?? 0);
     expect(view.staticHistoryBlocks?.at(0)?.id).toBe("assistant-0");
     expect(view.staticHistoryBlocks?.at(-1)?.id).toBe("assistant-24");
+    vi.unstubAllEnvs();
   });
 
   it("passes Static history replay generation from context for normal-screen resize reflow", () => {
@@ -6415,11 +6418,8 @@ describe("ShellBlockOutput — assistant streaming block", () => {
       "submit-1-assistant",
       "submit-2-user",
     ]);
-    expect(view.staticHistoryBlocks?.map((block) => block.id)).toEqual([
-      "submit-1-user",
-      "submit-1-assistant",
-      "submit-2-user",
-    ]);
+    expect(view.staticHistoryBlocks).toEqual([]);
+    vi.unstubAllEnvs();
   });
 
   it("keeps only the unflushed submitted turn in Ink while flushed history is terminal-owned", () => {
@@ -6501,16 +6501,40 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     // already committed to terminal history) and no live outputBlocks. In
     // native scrollback mode the Ink frame must render NOTHING from the source —
     // committed rows live in the terminal's own scrollback, not the fixed
-    // bottom frame. The canonical order stays in staticHistoryBlocks for the
-    // non-native replay path and Ctrl+O.
+    // bottom frame. The terminal remains the history owner until Ctrl+O pins
+    // one bounded source cell for expansion.
     expect(view.blocks.map((block) => block.id)).toEqual([]);
-    expect(view.staticHistoryBlocks?.map((block) => block.id)).toEqual([
-      "turn-1-user",
-      "turn-1-assistant",
-      "turn-2-user",
-      "turn-2-assistant",
-      "turn-3-user",
-    ]);
+    expect(view.staticHistoryBlocks).toEqual([]);
+    vi.unstubAllEnvs();
+  });
+
+  it("native scrollback bounds 2000 source cells and materializes only the expanded target", () => {
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const ctx = makeFakeContext();
+    ctx.ctrlOExpandState = { active: true, blockId: "assistant-5" };
+    const source = createTranscriptSource();
+    source.cells = Array.from({ length: 2_000 }, (_, index) => ({
+      id: `assistant-${index}`,
+      kind: "assistant" as const,
+      block: {
+        id: `assistant-${index}`,
+        kind: "details" as const,
+        status: "info" as const,
+        title: "",
+        summary: `answer ${index}`,
+        fullText: `answer ${index}`,
+        messageKind: "assistant_text" as const,
+        terminalOwned: true,
+      },
+    }));
+
+    const view = createShellViewModel(ctx, { transcriptSource: source, viewMode: "task" });
+
+    expect(source.cells).toHaveLength(81);
+    expect(source.cells.some((cell) => cell.id === "assistant-5")).toBe(true);
+    expect(view.staticHistoryBlocks?.map((block) => block.id)).toEqual(["assistant-5"]);
+    expect(view.blocks.map((block) => block.id)).toEqual(["assistant-5"]);
+    vi.unstubAllEnvs();
   });
 
   // Plan B single ownership: the sink writes history to terminal scrollback
@@ -7031,6 +7055,26 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     expect(expanded).toContain("const DETAIL_SENTINEL = true;");
   });
 
+  it("structured tool failures inherit the active request owner", () => {
+    const ctx = makeFakeContext();
+    ctx.currentRequestTurnId = "turn-structured-error";
+    const blocks: ProductBlockViewModel[] = [];
+    const output = createShellBlockOutputForTest(ctx, blocks);
+    const structured = createStructuredToolOutput(
+      "Bash",
+      { text: "timed out", data: { outcome: "timeout" } },
+      "zh-CN",
+    );
+
+    output.writeStructuredToolOutput(structured);
+
+    expect(blocks[0]).toMatchObject({
+      messageKind: "tool_result_error",
+      failureDomain: "tool",
+      failureRequestTurnId: "turn-structured-error",
+    });
+  });
+
   it("native scrollback commits only structured preview and reprojects canonical details", () => {
     vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
     const { output: ttyOutput, read } = makeTtyCapture();
@@ -7497,6 +7541,37 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
+  });
+
+  it("keeps retained transcript text bounded after 2000 maximum-preview output blocks", async () => {
+    vi.useFakeTimers();
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks);
+
+    for (let index = 0; index < 2_000; index += 1) {
+      vi.setSystemTime(index + 1);
+      output.write(`${index}:`.padEnd(12_000, "x"));
+    }
+    await output.compactOutputMemory();
+
+    const cells = ctx.transcriptSource?.cells ?? [];
+    const retainedFullTextChars = cells.reduce(
+      (total, cell) => total + (cell.block.fullText?.length ?? 0),
+      0,
+    );
+    const retainedRawTextChars = cells.reduce(
+      (total, cell) => total + (cell.rawText?.length ?? 0),
+      0,
+    );
+    expect(blocks.length).toBeLessThanOrEqual(80);
+    expect(cells.length).toBeLessThanOrEqual(TRANSCRIPT_SOURCE_RECENT_CELL_LIMIT);
+    expect(retainedFullTextChars).toBeLessThanOrEqual(
+      TRANSCRIPT_SOURCE_RECENT_CELL_LIMIT * 12_000,
+    );
+    expect(retainedRawTextChars).toBeLessThanOrEqual(
+      TRANSCRIPT_SOURCE_RECENT_CELL_LIMIT * 12_000,
+    );
   });
 
   it("output memory compact serializes concurrent cleanup requests", async () => {
@@ -8475,6 +8550,7 @@ describe("D.13Q-UX Real Smoke Fix v2 — F. permission 主屏降噪", () => {
 describe("TaskSuggestionBar executable state", () => {
   it("filters handled suggestions and clamps cursor", () => {
     const ctx = createContext({
+      currentRequestTurnId: "turn-current",
       handledTaskSuggestionIds: new Set(["tool_error:details:out-fail"]),
       taskSuggestionCursor: 9,
     } as Partial<TuiContext>);
@@ -8489,6 +8565,8 @@ describe("TaskSuggestionBar executable state", () => {
           status: "fail",
           title: "Bash 失败",
           summary: "exit 1",
+          failureDomain: "tool",
+          failureRequestTurnId: "turn-current",
         },
       ],
       setupNeeded: true,
@@ -8499,6 +8577,51 @@ describe("TaskSuggestionBar executable state", () => {
     );
     expect(view.taskSuggestions?.[0]?.id).toBe("setup:resume");
     expect(view.taskSuggestionCursor).toBe(0);
+  });
+
+  it("shows full-error action only for the active owner until success or terminal", () => {
+    const failure: ProductBlockViewModel = {
+      id: "owned-failure",
+      kind: "error",
+      status: "fail",
+      title: "Bash 失败",
+      summary: "timeout",
+      messageKind: "tool_result_error",
+      failureDomain: "tool",
+      failureRequestTurnId: "turn-current",
+    };
+    const active = createShellViewModel(
+      createContext({ currentRequestTurnId: "turn-current" } as Partial<TuiContext>),
+      { outputBlocks: [failure], viewMode: "task" },
+    );
+    const recovered = createShellViewModel(
+      createContext({ currentRequestTurnId: "turn-current" } as Partial<TuiContext>),
+      {
+        outputBlocks: [
+          failure,
+          {
+            id: "owned-success",
+            kind: "details",
+            status: "info",
+            title: "Read",
+            summary: "ok",
+            messageKind: "tool_result_success",
+          },
+        ],
+        viewMode: "task",
+      },
+    );
+    const terminal = createShellViewModel(createContext(), {
+      outputBlocks: [failure],
+      viewMode: "task",
+    });
+
+    expect(active.taskSuggestions?.some((item) => item.id === "tool_error:details:owned-failure"))
+      .toBe(true);
+    expect(recovered.taskSuggestions?.some((item) => item.source === "tool_error") ?? false)
+      .toBe(false);
+    expect(terminal.taskSuggestions?.some((item) => item.source === "tool_error") ?? false)
+      .toBe(false);
   });
 
   it("keeps provider request failure to a single visible prompt", () => {
@@ -9115,6 +9238,7 @@ describe("D.13Q-UX Real Smoke Fix v3 — diagnostic 不被关键词误伤", () =
       language: "zh-CN",
       lastFullOutput: undefined,
       suppressLastFullOutputCapture: false,
+      currentRequestTurnId: "turn-error",
     } as unknown as TuiContext;
     const blocks: ProductBlockViewModel[] = [];
     const output = __testCreateShellBlockOutput(ctx, blocks) as unknown as {
@@ -9130,6 +9254,7 @@ describe("D.13Q-UX Real Smoke Fix v3 — diagnostic 不被关键词误伤", () =
     expect(blocks[0]?.kind).toBe("error");
     expect(blocks[0]?.status).toBe("fail");
     expect(blocks[0]?.title).toBe("provider 失败");
+    expect(blocks[0]?.failureRequestTurnId).toBe("turn-error");
     // 单行短错误不挂 Ctrl+O hint
     expect(blocks[0]?.nextAction).toBeUndefined();
     // fullText 累计到 lastFullOutput，让 /details 仍能展开

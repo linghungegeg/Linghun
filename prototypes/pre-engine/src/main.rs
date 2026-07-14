@@ -19,7 +19,7 @@ mod symbols;
 mod ts_deep_layer;
 
 use serde_json::{json, Value};
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
@@ -149,10 +149,11 @@ fn tool_definitions() -> Vec<Value> {
             "language_capabilities": language_capability_summary("pre_context"),
             "inputSchema": {
                 "type": "object",
+                "additionalProperties": false,
                 "properties": {
-                    "symbol": { "type": "string", "description": "目标符号名" },
-                    "path": { "type": "string", "description": "限定搜索范围的文件路径（可选）" },
-                    "depth": { "type": "number", "description": "调用链展开深度（默认 1）" }
+                    "symbol": { "type": "string" },
+                    "path": { "type": "string" },
+                    "depth": { "type": "number" }
                 },
                 "required": ["symbol"]
             }
@@ -163,11 +164,13 @@ fn tool_definitions() -> Vec<Value> {
             "language_capabilities": language_capability_summary("pre_impact"),
             "inputSchema": {
                 "type": "object",
+                "additionalProperties": false,
                 "properties": {
                     "changes": {
                         "type": "array",
                         "items": {
                             "type": "object",
+                            "additionalProperties": false,
                             "properties": {
                                 "path": { "type": "string" },
                                 "symbols": { "type": "array", "items": { "type": "string" } }
@@ -185,8 +188,9 @@ fn tool_definitions() -> Vec<Value> {
             "language_capabilities": language_capability_summary("pre_plan"),
             "inputSchema": {
                 "type": "object",
+                "additionalProperties": false,
                 "properties": {
-                    "task": { "type": "string", "description": "任务描述" },
+                    "task": { "type": "string" },
                     "target_symbols": { "type": "array", "items": { "type": "string" } },
                     "target_files": { "type": "array", "items": { "type": "string" } }
                 },
@@ -199,6 +203,7 @@ fn tool_definitions() -> Vec<Value> {
             "language_capabilities": language_capability_summary("pre_verify"),
             "inputSchema": {
                 "type": "object",
+                "additionalProperties": false,
                 "properties": {
                     "changed_files": {
                         "type": "array",
@@ -229,7 +234,9 @@ fn language_capability_summary(tool_name: &str) -> Value {
 }
 
 fn capability_supports_tool(capability: &language::LanguageCapability, tool_name: &str) -> bool {
-    if capability.current_status != language::CurrentStatus::ProductGrade {
+    if tool_name != "pre_verify"
+        && capability.current_status != language::CurrentStatus::ProductGrade
+    {
         return false;
     }
     match tool_name {
@@ -387,21 +394,31 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
             }
             if let Some(idx) = index.as_mut() {
                 let root_str = idx.root.to_string_lossy().to_string();
-                let requested_path = requested_paths
-                    .first()
-                    .map(|path| make_relative(path, &root_str));
+                let (accepted_requested_paths, mut outside_workspace_files, index_consistency) = if requested_paths.is_empty() {
+                    (
+                        Vec::new(),
+                        Vec::new(),
+                        if idx.refresh() {
+                            "full"
+                        } else {
+                            "bounded_stale"
+                        },
+                    )
+                } else {
+                    let (accepted, rejected) = idx.refresh_paths(&requested_paths);
+                    (accepted, rejected, "targeted")
+                };
+                if !requested_paths.is_empty() && accepted_requested_paths.is_empty() {
+                    return tool_success("pre_context", json!({
+                        "status": "not_covered",
+                        "reason": "outside_workspace",
+                        "outside_workspace_files": outside_workspace_files,
+                        "not_covered_files": outside_workspace_files,
+                    }));
+                }
+                let requested_path = accepted_requested_paths.first().cloned();
                 let preferred_files: HashSet<String> =
                     requested_path.iter().cloned().collect();
-                let index_consistency = if requested_paths.is_empty() {
-                    if idx.refresh() {
-                        "full"
-                    } else {
-                        "bounded_stale"
-                    }
-                } else {
-                    idx.refresh_paths(&requested_paths);
-                    "targeted"
-                };
                 let ts_files: Vec<String> = idx
                     .files()
                     .filter(|entry| matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx))
@@ -430,7 +447,7 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                 let structure_files = if requested_paths.is_empty() {
                     ts_files
                 } else {
-                    requested_paths
+                    accepted_requested_paths
                         .iter()
                         .filter(|path| {
                             idx.files().any(|entry| {
@@ -442,17 +459,62 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                         .cloned()
                         .collect()
                 };
-                let structure = ts_deep_layer::run_structure(
-                    deep_layer,
-                    &idx.root,
-                    &structure_files,
-                    &[symbol.to_string()],
-                    &preferred_files.iter().cloned().collect::<Vec<_>>(),
-                );
+                let mut structure = if requested_paths.is_empty() {
+                    ts_deep_layer::run_structure(
+                        deep_layer,
+                        &idx.root,
+                        &structure_files,
+                        &[symbol.to_string()],
+                        &preferred_files.iter().cloned().collect::<Vec<_>>(),
+                    )
+                } else if structure_files.is_empty() {
+                    ts_deep_layer::disabled_structure(&[symbol.to_string()])
+                } else {
+                    let mut scoped_results = Vec::new();
+                    for scope in group_files_by_config_root(
+                        &idx.root,
+                        &structure_files,
+                        &["tsconfig.json"],
+                    ) {
+                        let mut result = ts_deep_layer::run_structure(
+                            deep_layer,
+                            &scope.root,
+                            &scope.helper_files,
+                            &[symbol.to_string()],
+                            &scope.helper_files,
+                        );
+                        result.snapshot_id = scoped_snapshot_id(
+                            &idx.root,
+                            &scope.root,
+                            &scope.helper_files,
+                            &["tsconfig.json"],
+                            &result.snapshot_id,
+                        );
+                        let scope_name = config_scope_name(&idx.root, &scope.root);
+                        retain_scoped_structure_paths(
+                            idx,
+                            &scope_name,
+                            &mut result,
+                            &mut outside_workspace_files,
+                        );
+                        scoped_results.push((scope_name, result));
+                    }
+                    aggregate_scoped_structure_results(scoped_results)
+                };
+                if requested_paths.is_empty() || structure_files.is_empty() {
+                    let input_snapshot_id = scoped_snapshot_id(
+                        &idx.root,
+                        &idx.root,
+                        &structure_files,
+                        &["tsconfig.json"],
+                        &structure.snapshot_id,
+                    );
+                    structure.snapshot_id = structure_snapshot_id(&input_snapshot_id, &structure);
+                }
                 let py_structure_files = if requested_paths.is_empty() {
                     py_files
                 } else {
-                    requested_paths
+                    accepted_requested_paths
                         .iter()
                         .filter(|path| {
                             idx.files().any(|entry| {
@@ -467,7 +529,7 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                 let (py_symbol_positions, _) = python_lsp_inputs(
                     idx,
                     &root_str,
-                    &requested_paths,
+                    &accepted_requested_paths,
                     &[symbol.to_string()],
                 );
                 let (_, py_import_tokens) = python_lsp_inputs(
@@ -476,9 +538,9 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                     &py_structure_files,
                     &[],
                 );
-                let py_structure = if py_structure_files.is_empty() {
+                let mut py_structure = if py_structure_files.is_empty() {
                     py_deep_layer::disabled_structure(&[symbol.to_string()])
-                } else {
+                } else if requested_paths.is_empty() {
                     py_deep_layer::run_structure(
                         py_layer,
                         &idx.root,
@@ -487,11 +549,60 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                         &py_symbol_positions,
                         &py_import_tokens,
                     )
+                } else {
+                    let mut scoped_results = Vec::new();
+                    for scope in group_files_by_config_root(
+                        &idx.root,
+                        &py_structure_files,
+                        &["pyrightconfig.json", "pyproject.toml"],
+                    ) {
+                        let scope_root = scope.root.to_string_lossy().to_string();
+                        let (symbol_positions, import_tokens) = python_lsp_inputs(
+                            idx,
+                            &scope_root,
+                            &scope.helper_files,
+                            &[symbol.to_string()],
+                        );
+                        let mut result = py_deep_layer::run_structure(
+                            py_layer,
+                            &scope.root,
+                            &scope.helper_files,
+                            &[symbol.to_string()],
+                            &symbol_positions,
+                            &import_tokens,
+                        );
+                        result.snapshot_id = scoped_snapshot_id(
+                            &idx.root,
+                            &scope.root,
+                            &scope.helper_files,
+                            &["pyrightconfig.json", "pyproject.toml"],
+                            &result.snapshot_id,
+                        );
+                        let scope_name = config_scope_name(&idx.root, &scope.root);
+                        retain_scoped_structure_paths(
+                            idx,
+                            &scope_name,
+                            &mut result,
+                            &mut outside_workspace_files,
+                        );
+                        scoped_results.push((scope_name, result));
+                    }
+                    aggregate_scoped_structure_results(scoped_results)
                 };
+                if requested_paths.is_empty() && !py_structure_files.is_empty() {
+                    let input_snapshot_id = scoped_snapshot_id(
+                        &idx.root,
+                        &idx.root,
+                        &py_structure_files,
+                        &["pyrightconfig.json", "pyproject.toml"],
+                        &py_structure.snapshot_id,
+                    );
+                    py_structure.snapshot_id = structure_snapshot_id(&input_snapshot_id, &py_structure);
+                }
                 let rust_structure_files = if requested_paths.is_empty() {
                     Vec::new()
                 } else {
-                    requested_paths.iter().filter(|path| {
+                    accepted_requested_paths.iter().filter(|path| {
                         idx.files().any(|entry| {
                             entry.lang == language::Lang::Rust
                                 && make_relative(&entry.path.to_string_lossy(), &root_str)
@@ -502,21 +613,71 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                 let (rust_symbol_positions, rust_import_tokens) = rust_lsp_inputs(
                     idx, &root_str, &rust_structure_files, &[symbol.to_string()],
                 );
-                let rust_structure = if rust_files.is_empty()
+                let mut rust_structure = if rust_files.is_empty()
                     || (!requested_paths.is_empty() && rust_structure_files.is_empty())
                 {
                     rust_deep_layer::disabled_structure(&[symbol.to_string()])
-                } else {
+                } else if requested_paths.is_empty() {
                     rust_deep_layer::run_structure(
                         rust_layer, &idx.root, &rust_structure_files, &[symbol.to_string()],
                         &rust_symbol_positions, &rust_import_tokens,
-                        requested_paths.is_empty(),
+                        true,
                     )
+                } else {
+                    let mut scoped_results = Vec::new();
+                    for scope in group_files_by_config_root(
+                        &idx.root,
+                        &rust_structure_files,
+                        &["Cargo.toml", "rust-project.json"],
+                    ) {
+                        let scope_root = scope.root.to_string_lossy().to_string();
+                        let (symbol_positions, import_tokens) = rust_lsp_inputs(
+                            idx,
+                            &scope_root,
+                            &scope.helper_files,
+                            &[symbol.to_string()],
+                        );
+                        let mut result = rust_deep_layer::run_structure(
+                            rust_layer,
+                            &scope.root,
+                            &scope.helper_files,
+                            &[symbol.to_string()],
+                            &symbol_positions,
+                            &import_tokens,
+                            false,
+                        );
+                        result.snapshot_id = scoped_snapshot_id(
+                            &idx.root,
+                            &scope.root,
+                            &scope.helper_files,
+                            &["Cargo.toml", "rust-project.json"],
+                            &result.snapshot_id,
+                        );
+                        let scope_name = config_scope_name(&idx.root, &scope.root);
+                        retain_scoped_structure_paths(
+                            idx,
+                            &scope_name,
+                            &mut result,
+                            &mut outside_workspace_files,
+                        );
+                        scoped_results.push((scope_name, result));
+                    }
+                    aggregate_scoped_structure_results(scoped_results)
                 };
+                if requested_paths.is_empty() && !rust_files.is_empty() {
+                    let input_snapshot_id = scoped_snapshot_id(
+                        &idx.root,
+                        &idx.root,
+                        &rust_files,
+                        &["Cargo.toml", "rust-project.json"],
+                        &rust_structure.snapshot_id,
+                    );
+                    rust_structure.snapshot_id = structure_snapshot_id(&input_snapshot_id, &rust_structure);
+                }
                 let go_structure_files = if requested_paths.is_empty() {
                     Vec::new()
                 } else {
-                    requested_paths
+                    accepted_requested_paths
                         .iter()
                         .filter(|path| {
                             idx.files().any(|entry| {
@@ -530,7 +691,7 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                 };
                 let (go_symbol_positions, go_import_tokens) =
                     go_lsp_inputs(idx, &root_str, &go_structure_files, &[symbol.to_string()]);
-                let go_structure = if go_files.is_empty()
+                let mut go_structure = if go_files.is_empty()
                     || (!requested_paths.is_empty() && go_structure_files.is_empty())
                 {
                     go_deep_layer::disabled_structure(&[symbol.to_string()])
@@ -548,17 +709,32 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                         true,
                     )
                 };
+                if !go_files.is_empty() && (requested_paths.is_empty() || !go_structure_files.is_empty()) {
+                    let snapshot_files = if requested_paths.is_empty() {
+                        &go_files
+                    } else {
+                        &go_structure_files
+                    };
+                    let input_snapshot_id = scoped_snapshot_id(
+                        &idx.root,
+                        &idx.root,
+                        snapshot_files,
+                        &["go.mod", "go.work"],
+                        &go_structure.snapshot_id,
+                    );
+                    go_structure.snapshot_id = structure_snapshot_id(&input_snapshot_id, &go_structure);
+                }
                 let java_structure_files = if requested_paths.is_empty() {
                     Vec::new()
                 } else {
-                    requested_paths.iter()
+                    accepted_requested_paths.iter()
                         .filter(|path| language::Lang::from_path(Path::new(path)) == Some(language::Lang::Java))
                         .cloned().collect()
                 };
                 let (java_symbol_positions, java_import_tokens, java_dependency_tokens) = java_lsp_inputs(
                     idx, &root_str, &java_structure_files, &[symbol.to_string()],
                 );
-                let java_structure = if (requested_paths.is_empty() && java_files.is_empty())
+                let mut java_structure = if (requested_paths.is_empty() && java_files.is_empty())
                     || (!requested_paths.is_empty() && java_structure_files.is_empty())
                 {
                     java_deep_layer::disabled_structure(&[symbol.to_string()])
@@ -569,6 +745,28 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                         requested_paths.is_empty(),
                     )
                 };
+                if !java_files.is_empty() && (requested_paths.is_empty() || !java_structure_files.is_empty()) {
+                    let snapshot_files = if requested_paths.is_empty() {
+                        &java_files
+                    } else {
+                        &java_structure_files
+                    };
+                    let input_snapshot_id = scoped_snapshot_id(
+                        &idx.root,
+                        &idx.root,
+                        snapshot_files,
+                        &["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"],
+                        &java_structure.snapshot_id,
+                    );
+                    java_structure.snapshot_id = structure_snapshot_id(&input_snapshot_id, &java_structure);
+                }
+                retain_workspace_structure_paths(idx, &mut structure, &mut outside_workspace_files);
+                retain_workspace_structure_paths(idx, &mut py_structure, &mut outside_workspace_files);
+                retain_workspace_structure_paths(idx, &mut rust_structure, &mut outside_workspace_files);
+                retain_workspace_structure_paths(idx, &mut go_structure, &mut outside_workspace_files);
+                retain_workspace_structure_paths(idx, &mut java_structure, &mut outside_workspace_files);
+                outside_workspace_files.sort();
+                outside_workspace_files.dedup();
                 let ts_relations = if structure_files.is_empty() {
                     Default::default()
                 } else {
@@ -594,11 +792,6 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                 let java_structure_verified = java_structure.status == "verified";
                 let java_structure_available = matches!(java_structure.status, "verified" | "partially_verified");
                 let use_ts_program = structure_available;
-                idx.refresh_paths(&ts_relations.related_files);
-                idx.refresh_paths(&py_relations.related_files);
-                idx.refresh_paths(&rust_relations.related_files);
-                idx.refresh_paths(&go_relations.related_files);
-                idx.refresh_paths(&java_relations.related_files);
                 let mut definitions = Vec::new();
                 let mut references = Vec::new();
                 let mut callees = Vec::new();
@@ -1032,6 +1225,9 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                 if index_consistency == "bounded_stale" {
                     missing_evidence.push("index_snapshot_staleness");
                 }
+                if !outside_workspace_files.is_empty() {
+                    missing_evidence.push("outside_workspace");
+                }
                 if !structure_files.is_empty() && !structure_verified {
                     missing_evidence.push("typescript_program");
                 }
@@ -1052,6 +1248,8 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                 }
                 let confidence = if definitions.is_empty() {
                     "low"
+                } else if !outside_workspace_files.is_empty() {
+                    "medium"
                 } else if definitions.len() > 1 {
                     "low"
                 } else if !ts_relations.blocked_module_specifiers.is_empty()
@@ -1164,6 +1362,8 @@ fn handle_tool_call(tool_name: &str, arguments: &Value, index: &mut Option<Index
                 result["go_program_build_count"] = json!(go_structure.program_build_count);
                 result["go_program_rebuilt"] = json!(go_structure.program_rebuilt);
                 result["go_semantic_elapsed_ms"] = json!(go_structure.elapsed_ms);
+                result["outside_workspace_files"] = json!(outside_workspace_files);
+                result["not_covered_files"] = json!(outside_workspace_files);
                 if java_relations.targets.len() > 1 {
                     result["status"] = json!("ambiguous");
                 }
@@ -1217,6 +1417,9 @@ fn handle_pre_impact(
         Some(arr) => arr,
         None => return tool_error("changes array is required"),
     };
+    if changes.is_empty() {
+        return tool_error("changes array must not be empty");
+    }
     let change_paths: Vec<String> = changes
         .iter()
         .filter_map(|change| change.get("path").and_then(Value::as_str))
@@ -1229,8 +1432,20 @@ fn handle_pre_impact(
         Some(i) => i,
         None => return tool_error("index not initialized — send initialize with rootUri first"),
     };
-    idx.refresh_paths(&change_paths);
+    let (accepted_change_paths, mut outside_workspace_files) = idx.refresh_paths(&change_paths);
+    if !change_paths.is_empty() && accepted_change_paths.is_empty() {
+        return tool_success("pre_impact", json!({
+            "status": "not_covered",
+            "reason": "outside_workspace",
+            "outside_workspace_files": outside_workspace_files,
+            "not_covered_files": outside_workspace_files,
+        }));
+    }
     let root_str = idx.root.to_string_lossy().to_string();
+    let outside_workspace_path_set: HashSet<&str> = outside_workspace_files
+        .iter()
+        .map(String::as_str)
+        .collect();
     let mut seed_symbols: Vec<String> = Vec::new();
     let mut seen_seed_symbols = HashSet::new();
     let mut ts_seed_symbols = HashSet::new();
@@ -1240,15 +1455,19 @@ fn handle_pre_impact(
     let mut java_seed_symbols = HashSet::new();
     let mut non_ts_seed_symbols = HashSet::new();
     let mut seed_symbols_truncated = false;
-    let mut changed_files: HashSet<String> = HashSet::new();
+    let changed_files: HashSet<String> = accepted_change_paths.iter().cloned().collect();
 
     for change in changes {
         let change_path = change
             .get("path")
             .and_then(|p| p.as_str())
             .map(|path| make_relative(path, &root_str));
-        if let Some(path) = &change_path {
-            changed_files.insert(path.clone());
+        if change
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| outside_workspace_path_set.contains(path))
+        {
+            continue;
         }
         if let Some(syms) = change.get("symbols").and_then(|s| s.as_array()) {
             for s in syms {
@@ -1340,7 +1559,7 @@ fn handle_pre_impact(
     let structure_files = if change_paths.is_empty() {
         ts_files
     } else {
-        change_paths
+        accepted_change_paths
             .iter()
             .filter(|path| {
                 idx.files().any(|entry| {
@@ -1353,15 +1572,48 @@ fn handle_pre_impact(
             .collect()
     };
     let ts_symbols_requested: Vec<String> = ts_seed_symbols.iter().cloned().collect();
-    let structure = ts_deep_layer::run_structure(
-        deep_layer,
-        &idx.root,
-        &structure_files,
-        &ts_symbols_requested,
-        &changed_files.iter().cloned().collect::<Vec<_>>(),
-    );
+    let mut structure = if structure_files.is_empty() {
+        ts_deep_layer::disabled_structure(&ts_symbols_requested)
+    } else {
+        let mut scoped_results = Vec::new();
+        for scope in group_files_by_config_root(&idx.root, &structure_files, &["tsconfig.json"]) {
+            let mut result = ts_deep_layer::run_structure(
+                deep_layer,
+                &scope.root,
+                &scope.helper_files,
+                &ts_symbols_requested,
+                &scope.helper_files,
+            );
+            result.snapshot_id = scoped_snapshot_id(
+                &idx.root,
+                &scope.root,
+                &scope.helper_files,
+                &["tsconfig.json"],
+                &result.snapshot_id,
+            );
+            let scope_name = config_scope_name(&idx.root, &scope.root);
+            retain_scoped_structure_paths(
+                idx,
+                &scope_name,
+                &mut result,
+                &mut outside_workspace_files,
+            );
+            scoped_results.push((scope_name, result));
+        }
+        aggregate_scoped_structure_results(scoped_results)
+    };
+    if structure_files.is_empty() {
+        let input_snapshot_id = scoped_snapshot_id(
+            &idx.root,
+            &idx.root,
+            &structure_files,
+            &["tsconfig.json"],
+            &structure.snapshot_id,
+        );
+        structure.snapshot_id = structure_snapshot_id(&input_snapshot_id, &structure);
+    }
     let py_symbols_requested: Vec<String> = py_seed_symbols.iter().cloned().collect();
-    let py_change_files: Vec<String> = change_paths
+    let py_change_files: Vec<String> = accepted_change_paths
         .iter()
         .filter(|path| {
             idx.files().any(|entry| {
@@ -1372,46 +1624,98 @@ fn handle_pre_impact(
         })
         .cloned()
         .collect();
-    let (py_symbol_positions, py_import_tokens) =
-        python_lsp_inputs(idx, &root_str, &py_change_files, &py_symbols_requested);
-    let py_structure = if py_change_files.is_empty() {
+    let mut py_structure = if py_change_files.is_empty() {
         py_deep_layer::disabled_structure(&py_symbols_requested)
     } else {
-        py_deep_layer::run_structure(
-            py_layer,
+        let mut scoped_results = Vec::new();
+        for scope in group_files_by_config_root(
             &idx.root,
             &py_change_files,
-            &py_symbols_requested,
-            &py_symbol_positions,
-            &py_import_tokens,
-        )
+            &["pyrightconfig.json", "pyproject.toml"],
+        ) {
+            let scope_root = scope.root.to_string_lossy().to_string();
+            let (symbol_positions, import_tokens) =
+                python_lsp_inputs(idx, &scope_root, &scope.helper_files, &py_symbols_requested);
+            let mut result = py_deep_layer::run_structure(
+                py_layer,
+                &scope.root,
+                &scope.helper_files,
+                &py_symbols_requested,
+                &symbol_positions,
+                &import_tokens,
+            );
+            result.snapshot_id = scoped_snapshot_id(
+                &idx.root,
+                &scope.root,
+                &scope.helper_files,
+                &["pyrightconfig.json", "pyproject.toml"],
+                &result.snapshot_id,
+            );
+            let scope_name = config_scope_name(&idx.root, &scope.root);
+            retain_scoped_structure_paths(
+                idx,
+                &scope_name,
+                &mut result,
+                &mut outside_workspace_files,
+            );
+            scoped_results.push((scope_name, result));
+        }
+        aggregate_scoped_structure_results(scoped_results)
     };
     let rust_symbols_requested: Vec<String> = rust_seed_symbols.iter().cloned().collect();
-    let rust_change_files: Vec<String> = change_paths
+    let rust_change_files: Vec<String> = accepted_change_paths
         .iter()
         .filter(|path| language::Lang::from_path(Path::new(path)) == Some(language::Lang::Rust))
         .cloned()
         .collect();
-    let (rust_symbol_positions, rust_import_tokens) =
-        rust_lsp_inputs(idx, &root_str, &rust_change_files, &rust_symbols_requested);
-    let rust_structure = if rust_change_files.is_empty() {
+    let mut rust_structure = if rust_change_files.is_empty() {
         rust_deep_layer::disabled_structure(&rust_symbols_requested)
     } else {
-        rust_deep_layer::run_structure(
-            rust_layer, &idx.root, &rust_change_files, &rust_symbols_requested,
-            &rust_symbol_positions, &rust_import_tokens,
-            false,
-        )
+        let mut scoped_results = Vec::new();
+        for scope in group_files_by_config_root(
+            &idx.root,
+            &rust_change_files,
+            &["Cargo.toml", "rust-project.json"],
+        ) {
+            let scope_root = scope.root.to_string_lossy().to_string();
+            let (symbol_positions, import_tokens) =
+                rust_lsp_inputs(idx, &scope_root, &scope.helper_files, &rust_symbols_requested);
+            let mut result = rust_deep_layer::run_structure(
+                rust_layer,
+                &scope.root,
+                &scope.helper_files,
+                &rust_symbols_requested,
+                &symbol_positions,
+                &import_tokens,
+                false,
+            );
+            result.snapshot_id = scoped_snapshot_id(
+                &idx.root,
+                &scope.root,
+                &scope.helper_files,
+                &["Cargo.toml", "rust-project.json"],
+                &result.snapshot_id,
+            );
+            let scope_name = config_scope_name(&idx.root, &scope.root);
+            retain_scoped_structure_paths(
+                idx,
+                &scope_name,
+                &mut result,
+                &mut outside_workspace_files,
+            );
+            scoped_results.push((scope_name, result));
+        }
+        aggregate_scoped_structure_results(scoped_results)
     };
     let go_symbols_requested: Vec<String> = go_seed_symbols.iter().cloned().collect();
-    let go_change_files: Vec<String> = change_paths
+    let go_change_files: Vec<String> = accepted_change_paths
         .iter()
         .filter(|path| language::Lang::from_path(Path::new(path)) == Some(language::Lang::Go))
         .cloned()
         .collect();
     let (go_symbol_positions, go_import_tokens) =
         go_lsp_inputs(idx, &root_str, &go_change_files, &go_symbols_requested);
-    let go_structure = if go_change_files.is_empty() {
+    let mut go_structure = if go_change_files.is_empty() {
         go_deep_layer::disabled_structure(&go_symbols_requested)
     } else {
         go_deep_layer::run_structure(
@@ -1427,15 +1731,25 @@ fn handle_pre_impact(
             false,
         )
     };
+    if !go_change_files.is_empty() {
+        let input_snapshot_id = scoped_snapshot_id(
+            &idx.root,
+            &idx.root,
+            &go_change_files,
+            &["go.mod", "go.work"],
+            &go_structure.snapshot_id,
+        );
+        go_structure.snapshot_id = structure_snapshot_id(&input_snapshot_id, &go_structure);
+    }
     let java_symbols_requested: Vec<String> = java_seed_symbols.iter().cloned().collect();
-    let java_change_files: Vec<String> = change_paths
+    let java_change_files: Vec<String> = accepted_change_paths
         .iter()
         .filter(|path| language::Lang::from_path(Path::new(path)) == Some(language::Lang::Java))
         .cloned()
         .collect();
     let (java_symbol_positions, java_import_tokens, java_dependency_tokens) =
         java_lsp_inputs(idx, &root_str, &java_change_files, &java_symbols_requested);
-    let java_structure = if java_change_files.is_empty() {
+    let mut java_structure = if java_change_files.is_empty() {
         java_deep_layer::disabled_structure(&java_symbols_requested)
     } else {
         java_deep_layer::run_structure(
@@ -1443,6 +1757,23 @@ fn handle_pre_impact(
             &java_symbol_positions, &java_import_tokens, &java_dependency_tokens, false,
         )
     };
+    if !java_change_files.is_empty() {
+        let input_snapshot_id = scoped_snapshot_id(
+            &idx.root,
+            &idx.root,
+            &java_change_files,
+            &["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"],
+            &java_structure.snapshot_id,
+        );
+        java_structure.snapshot_id = structure_snapshot_id(&input_snapshot_id, &java_structure);
+    }
+    retain_workspace_structure_paths(idx, &mut structure, &mut outside_workspace_files);
+    retain_workspace_structure_paths(idx, &mut py_structure, &mut outside_workspace_files);
+    retain_workspace_structure_paths(idx, &mut rust_structure, &mut outside_workspace_files);
+    retain_workspace_structure_paths(idx, &mut go_structure, &mut outside_workspace_files);
+    retain_workspace_structure_paths(idx, &mut java_structure, &mut outside_workspace_files);
+    outside_workspace_files.sort();
+    outside_workspace_files.dedup();
     let ts_relations = structure.relations.clone();
     let py_relations = py_structure.relations.clone();
     let rust_relations = rust_structure.relations.clone();
@@ -1458,27 +1789,6 @@ fn handle_pre_impact(
     let go_structure_available = matches!(go_structure.status, "verified" | "partially_verified");
     let java_structure_verified = java_structure.status == "verified";
     let java_structure_available = matches!(java_structure.status, "verified" | "partially_verified");
-    let related_ts_files: Vec<String> = ts_relations
-        .values()
-        .flat_map(|relations| relations.related_files.iter().cloned())
-        .collect();
-    idx.refresh_paths(&related_ts_files);
-    let related_py_files: Vec<String> = py_relations
-        .values()
-        .flat_map(|relations| relations.related_files.iter().cloned())
-        .collect();
-    idx.refresh_paths(&related_py_files);
-    let related_rust_files: Vec<String> = rust_relations.values()
-        .flat_map(|relations| relations.related_files.iter().cloned()).collect();
-    idx.refresh_paths(&related_rust_files);
-    let related_go_files: Vec<String> = go_relations
-        .values()
-        .flat_map(|relations| relations.related_files.iter().cloned())
-        .collect();
-    idx.refresh_paths(&related_go_files);
-    let related_java_files: Vec<String> = java_relations.values()
-        .flat_map(|relations| relations.related_files.iter().cloned()).collect();
-    idx.refresh_paths(&related_java_files);
     let ts_symbols: HashSet<String> = ts_relations
         .iter()
         .filter_map(|(symbol, relations)| {
@@ -1805,6 +2115,8 @@ fn handle_pre_impact(
     ambiguous_symbols.dedup();
     let confidence = if seed_symbols.is_empty() {
         "low"
+    } else if !outside_workspace_files.is_empty() {
+        "medium"
     } else if !parse_errors.is_empty()
         || !unresolved_module_specifiers.is_empty()
         || !ambiguous_symbols.is_empty()
@@ -1888,6 +2200,9 @@ fn handle_pre_impact(
     if minimal_reads_truncated {
         missing_evidence.push("minimal_reads_truncated");
     }
+    if !outside_workspace_files.is_empty() {
+        missing_evidence.push("outside_workspace");
+    }
 
     let mut result = json!({
         "affected_files": affected_files_sorted,
@@ -1961,6 +2276,8 @@ fn handle_pre_impact(
     result["go_program_build_count"] = json!(go_structure.program_build_count);
     result["go_program_rebuilt"] = json!(go_structure.program_rebuilt);
     result["go_semantic_elapsed_ms"] = json!(go_structure.elapsed_ms);
+    result["outside_workspace_files"] = json!(outside_workspace_files);
+    result["not_covered_files"] = json!(outside_workspace_files);
 
     tool_success("pre_impact", result)
 }
@@ -2320,12 +2637,13 @@ fn handle_pre_plan(
     };
     let root_str = idx.root.to_string_lossy().to_string();
 
-    let target_files: Vec<String> = arguments
+    let requested_target_files: Vec<String> = arguments
         .get("target_files")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|s| s.as_str().map(|x| make_relative(x, &root_str))).collect())
+        .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
         .unwrap_or_default();
-    if let Some(result) = reject_non_structural_paths("pre_plan", &target_files) {
+    let has_target_files = !requested_target_files.is_empty();
+    if let Some(result) = reject_non_structural_paths("pre_plan", &requested_target_files) {
         return result;
     }
     let target_symbols: Vec<String> = arguments
@@ -2333,23 +2651,36 @@ fn handle_pre_plan(
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
         .unwrap_or_default();
-    let index_consistency = if target_files.is_empty() {
-        if idx.refresh() {
-            "full"
-        } else {
-            "bounded_stale"
-        }
+    let (target_files, mut outside_workspace_files, index_consistency) = if !has_target_files {
+        (
+            Vec::new(),
+            Vec::new(),
+            if idx.refresh() {
+                "full"
+            } else {
+                "bounded_stale"
+            },
+        )
     } else {
-        idx.refresh_paths(&target_files);
-        "targeted"
+        let (accepted, rejected) = idx.refresh_paths(&requested_target_files);
+        (accepted, rejected, "targeted")
     };
+    if has_target_files && target_files.is_empty() {
+        return tool_success("pre_plan", json!({
+            "status": "not_covered",
+            "reason": "outside_workspace",
+            "outside_workspace_files": outside_workspace_files,
+            "not_covered_files": outside_workspace_files,
+            "task": arguments.get("task").and_then(Value::as_str).unwrap_or(""),
+        }));
+    }
 
     let ts_files: Vec<String> = idx
         .files()
         .filter(|entry| matches!(entry.lang, language::Lang::TypeScript | language::Lang::Tsx))
         .map(|entry| make_relative(&entry.path.to_string_lossy(), &root_str))
         .collect();
-    let structure_files = if target_files.is_empty() {
+    let structure_files = if !has_target_files {
         ts_files
     } else {
         target_files
@@ -2363,19 +2694,60 @@ fn handle_pre_plan(
             .cloned()
             .collect()
     };
-    let ts_symbols_requested = if target_files.is_empty() || !structure_files.is_empty() {
+    let ts_symbols_requested = if !has_target_files || !structure_files.is_empty() {
         target_symbols.clone()
     } else {
         Vec::new()
     };
-    let structure = ts_deep_layer::run_structure(
-        deep_layer,
-        &idx.root,
-        &structure_files,
-        &ts_symbols_requested,
-        &target_files,
-    );
-    let mut py_structure_files: Vec<String> = if target_files.is_empty() {
+    let mut structure = if !has_target_files {
+        ts_deep_layer::run_structure(
+            deep_layer,
+            &idx.root,
+            &structure_files,
+            &ts_symbols_requested,
+            &target_files,
+        )
+    } else if structure_files.is_empty() {
+        ts_deep_layer::disabled_structure(&ts_symbols_requested)
+    } else {
+        let mut scoped_results = Vec::new();
+        for scope in group_files_by_config_root(&idx.root, &structure_files, &["tsconfig.json"]) {
+            let mut result = ts_deep_layer::run_structure(
+                deep_layer,
+                &scope.root,
+                &scope.helper_files,
+                &ts_symbols_requested,
+                &scope.helper_files,
+            );
+            result.snapshot_id = scoped_snapshot_id(
+                &idx.root,
+                &scope.root,
+                &scope.helper_files,
+                &["tsconfig.json"],
+                &result.snapshot_id,
+            );
+            let scope_name = config_scope_name(&idx.root, &scope.root);
+            retain_scoped_structure_paths(
+                idx,
+                &scope_name,
+                &mut result,
+                &mut outside_workspace_files,
+            );
+            scoped_results.push((scope_name, result));
+        }
+        aggregate_scoped_structure_results(scoped_results)
+    };
+    if !has_target_files || structure_files.is_empty() {
+        let input_snapshot_id = scoped_snapshot_id(
+            &idx.root,
+            &idx.root,
+            &structure_files,
+            &["tsconfig.json"],
+            &structure.snapshot_id,
+        );
+        structure.snapshot_id = structure_snapshot_id(&input_snapshot_id, &structure);
+    }
+    let py_structure_files: Vec<String> = if !has_target_files {
         idx.files()
             .filter(|entry| entry.lang == language::Lang::Python)
             .map(|entry| make_relative(&entry.path.to_string_lossy(), &root_str))
@@ -2392,75 +2764,104 @@ fn handle_pre_plan(
             .cloned()
             .collect()
     };
-    let (py_symbol_positions, _) =
-        python_lsp_inputs(idx, &root_str, &target_files, &target_symbols);
-    let (_, py_import_tokens) =
-        python_lsp_inputs(idx, &root_str, &py_structure_files, &[]);
     let mut py_structure = if py_structure_files.is_empty() {
         py_deep_layer::disabled_structure(&target_symbols)
     } else {
-        py_deep_layer::run_structure(
-            py_layer,
-            &idx.root,
-            &py_structure_files,
-            &target_symbols,
-            &py_symbol_positions,
-            &py_import_tokens,
-        )
+        let scopes = if !has_target_files {
+            vec![ConfigScope {
+                root: idx.root.clone(),
+                workspace_files: py_structure_files.clone(),
+                helper_files: py_structure_files.clone(),
+            }]
+        } else {
+            group_files_by_config_root(
+                &idx.root,
+                &py_structure_files,
+                &["pyrightconfig.json", "pyproject.toml"],
+            )
+        };
+        let mut scoped_results = Vec::new();
+        for scope in scopes {
+            let scope_name = config_scope_name(&idx.root, &scope.root);
+            let scope_root = scope.root.to_string_lossy().to_string();
+            let mut files = scope.helper_files;
+            let (symbol_positions, _) =
+                python_lsp_inputs(idx, &scope_root, &files, &target_symbols);
+            let (_, import_tokens) = python_lsp_inputs(idx, &scope_root, &files, &[]);
+            let mut result = py_deep_layer::run_structure(
+                py_layer,
+                &scope.root,
+                &files,
+                &target_symbols,
+                &symbol_positions,
+                &import_tokens,
+            );
+            for _ in 0..16 {
+                let mut expanded: HashSet<String> = files.iter().cloned().collect();
+                expanded.extend(result.module_dependencies.values().flatten().cloned());
+                expanded.extend(
+                    result
+                        .relations
+                        .values()
+                        .flat_map(|relations| relations.related_files.iter().cloned()),
+                );
+                if expanded.len() == files.len() {
+                    break;
+                }
+                let candidates: Vec<String> = expanded.into_iter().collect();
+                let accepted = refresh_scoped_helper_paths(
+                    idx,
+                    &scope_name,
+                    &candidates,
+                    &mut outside_workspace_files,
+                );
+                if accepted == files {
+                    break;
+                }
+                files = accepted;
+                let (symbol_positions, import_tokens) =
+                    python_lsp_inputs(idx, &scope_root, &files, &target_symbols);
+                result = py_deep_layer::run_structure(
+                    py_layer,
+                    &scope.root,
+                    &files,
+                    &target_symbols,
+                    &symbol_positions,
+                    &import_tokens,
+                );
+            }
+            let mut final_closure: HashSet<String> = files.iter().cloned().collect();
+            final_closure.extend(result.module_dependencies.values().flatten().cloned());
+            final_closure.extend(
+                result
+                    .relations
+                    .values()
+                    .flat_map(|relations| relations.related_files.iter().cloned()),
+            );
+            if final_closure.len() > files.len() {
+                for relations in result.relations.values_mut() {
+                    relations.graph_truncated = true;
+                }
+            }
+            result.snapshot_id = scoped_snapshot_id(
+                &idx.root,
+                &scope.root,
+                &files,
+                &["pyrightconfig.json", "pyproject.toml"],
+                &result.snapshot_id,
+            );
+            retain_scoped_structure_paths(
+                idx,
+                &scope_name,
+                &mut result,
+                &mut outside_workspace_files,
+            );
+            scoped_results.push((scope_name, result));
+        }
+        aggregate_scoped_structure_results(scoped_results)
     };
-    for _ in 0..16 {
-        let mut expanded: HashSet<String> = py_structure_files.iter().cloned().collect();
-        expanded.extend(
-            py_structure
-                .module_dependencies
-                .values()
-                .flatten()
-                .cloned(),
-        );
-        expanded.extend(
-            py_structure
-                .relations
-                .values()
-                .flat_map(|relations| relations.related_files.iter().cloned()),
-        );
-        if expanded.len() == py_structure_files.len() {
-            break;
-        }
-        py_structure_files = expanded.into_iter().collect();
-        py_structure_files.sort();
-        idx.refresh_paths(&py_structure_files);
-        let (_, expanded_import_tokens) =
-            python_lsp_inputs(idx, &root_str, &py_structure_files, &[]);
-        py_structure = py_deep_layer::run_structure(
-            py_layer,
-            &idx.root,
-            &py_structure_files,
-            &target_symbols,
-            &py_symbol_positions,
-            &expanded_import_tokens,
-        );
-    }
-    let mut final_py_closure: HashSet<String> = py_structure_files.iter().cloned().collect();
-    final_py_closure.extend(
-        py_structure
-            .module_dependencies
-            .values()
-            .flatten()
-            .cloned(),
-    );
-    final_py_closure.extend(
-        py_structure
-            .relations
-            .values()
-            .flat_map(|relations| relations.related_files.iter().cloned()),
-    );
-    if final_py_closure.len() > py_structure_files.len() {
-        for relations in py_structure.relations.values_mut() {
-            relations.graph_truncated = true;
-        }
-    }
     let has_rust_files = idx.files().any(|entry| entry.lang == language::Lang::Rust);
-    let mut rust_structure_files: Vec<String> = if target_files.is_empty() {
+    let rust_structure_files: Vec<String> = if !has_target_files {
         Vec::new()
     } else {
         target_files.iter().filter(|file| {
@@ -2468,62 +2869,111 @@ fn handle_pre_plan(
                 && make_relative(&entry.path.to_string_lossy(), &root_str) == **file)
         }).cloned().collect()
     };
-    let (rust_symbol_positions, _) = rust_lsp_inputs(idx, &root_str, &rust_structure_files, &target_symbols);
-    let (_, rust_import_tokens) = rust_lsp_inputs(idx, &root_str, &rust_structure_files, &[]);
     let mut rust_structure = if !has_rust_files
-        || (!target_files.is_empty() && rust_structure_files.is_empty())
+        || (has_target_files && rust_structure_files.is_empty())
     {
-            rust_deep_layer::disabled_structure(&target_symbols)
+        rust_deep_layer::disabled_structure(&target_symbols)
+    } else {
+        let scopes = if !has_target_files {
+            vec![ConfigScope {
+                root: idx.root.clone(),
+                workspace_files: rust_structure_files.clone(),
+                helper_files: rust_structure_files.clone(),
+            }]
         } else {
-            rust_deep_layer::run_structure(
-            rust_layer, &idx.root, &rust_structure_files, &target_symbols,
-            &rust_symbol_positions, &rust_import_tokens,
-                target_files.is_empty(),
+            group_files_by_config_root(
+                &idx.root,
+                &rust_structure_files,
+                &["Cargo.toml", "rust-project.json"],
             )
         };
-    for _ in 0..15 {
-        let mut expanded: HashSet<String> = rust_structure_files.iter().cloned().collect();
-        expanded.extend(rust_structure.module_dependencies.values().flatten().cloned());
-        expanded.extend(
-            rust_structure
-            .relations
-            .values()
-            .flat_map(|relations| relations.related_files.iter().cloned()),
-    );
-        if expanded.len() == rust_structure_files.len() {
-            break;
+        let mut scoped_results = Vec::new();
+        for scope in scopes {
+            let scope_name = config_scope_name(&idx.root, &scope.root);
+            let scope_root = scope.root.to_string_lossy().to_string();
+            let mut files = scope.helper_files;
+            let (mut symbol_positions, mut import_tokens) =
+                rust_lsp_inputs(idx, &scope_root, &files, &target_symbols);
+            let mut result = rust_deep_layer::run_structure(
+                rust_layer,
+                &scope.root,
+                &files,
+                &target_symbols,
+                &symbol_positions,
+                &import_tokens,
+                !has_target_files,
+            );
+            for _ in 0..15 {
+                let mut expanded: HashSet<String> = files.iter().cloned().collect();
+                expanded.extend(result.module_dependencies.values().flatten().cloned());
+                expanded.extend(
+                    result
+                        .relations
+                        .values()
+                        .flat_map(|relations| relations.related_files.iter().cloned()),
+                );
+                if expanded.len() == files.len() {
+                    break;
+                }
+                let candidates: Vec<String> = expanded.into_iter().collect();
+                let accepted = refresh_scoped_helper_paths(
+                    idx,
+                    &scope_name,
+                    &candidates,
+                    &mut outside_workspace_files,
+                );
+                if accepted == files {
+                    break;
+                }
+                files = accepted;
+                (symbol_positions, import_tokens) =
+                    rust_lsp_inputs(idx, &scope_root, &files, &target_symbols);
+                result = rust_deep_layer::run_structure(
+                    rust_layer,
+                    &scope.root,
+                    &files,
+                    &target_symbols,
+                    &symbol_positions,
+                    &import_tokens,
+                    false,
+                );
+            }
+            let mut final_closure: HashSet<String> = files.iter().cloned().collect();
+            final_closure.extend(result.module_dependencies.values().flatten().cloned());
+            final_closure.extend(
+                result
+                    .relations
+                    .values()
+                    .flat_map(|relations| relations.related_files.iter().cloned()),
+            );
+            if final_closure.len() > files.len() {
+                for relations in result.relations.values_mut() {
+                    relations.graph_truncated = true;
+                }
+            }
+            result.snapshot_id = scoped_snapshot_id(
+                &idx.root,
+                &scope.root,
+                &files,
+                &["Cargo.toml", "rust-project.json"],
+                &result.snapshot_id,
+            );
+            retain_scoped_structure_paths(
+                idx,
+                &scope_name,
+                &mut result,
+                &mut outside_workspace_files,
+            );
+            scoped_results.push((scope_name, result));
         }
-        rust_structure_files = expanded.into_iter().collect();
-        rust_structure_files.sort();
-        idx.refresh_paths(&rust_structure_files);
-        let (expanded_symbol_positions, expanded_import_tokens) =
-            rust_lsp_inputs(idx, &root_str, &rust_structure_files, &target_symbols);
-        rust_structure = rust_deep_layer::run_structure(
-            rust_layer,
-            &idx.root,
-            &rust_structure_files,
-            &target_symbols,
-            &expanded_symbol_positions,
-            &expanded_import_tokens,
-            false,
-        );
-    }
-    let mut final_rust_closure: HashSet<String> = rust_structure_files.iter().cloned().collect();
-    final_rust_closure.extend(rust_structure.module_dependencies.values().flatten().cloned());
-    final_rust_closure.extend(
-        rust_structure
-            .relations
-            .values()
-            .flat_map(|relations| relations.related_files.iter().cloned()),
-    );
-    let rust_graph_truncated = final_rust_closure.len() > rust_structure_files.len();
-    if rust_graph_truncated {
-        for relations in rust_structure.relations.values_mut() {
-            relations.graph_truncated = true;
-        }
-    }
+        aggregate_scoped_structure_results(scoped_results)
+    };
+    let rust_graph_truncated = rust_structure
+        .relations
+        .values()
+        .any(|relations| relations.graph_truncated);
     let has_go_files = idx.files().any(|entry| entry.lang == language::Lang::Go);
-    let mut go_structure_files: Vec<String> = if target_files.is_empty() {
+    let mut go_structure_files: Vec<String> = if !has_target_files {
         Vec::new()
     } else {
         target_files
@@ -2541,7 +2991,7 @@ fn handle_pre_plan(
         go_lsp_inputs(idx, &root_str, &go_structure_files, &target_symbols);
     let (_, go_import_tokens) = go_lsp_inputs(idx, &root_str, &go_structure_files, &[]);
     let mut go_structure = if !has_go_files
-        || (!target_files.is_empty() && go_structure_files.is_empty())
+        || (has_target_files && go_structure_files.is_empty())
     {
         go_deep_layer::disabled_structure(&target_symbols)
     } else {
@@ -2552,7 +3002,7 @@ fn handle_pre_plan(
             &target_symbols,
             &go_symbol_positions,
             &go_import_tokens,
-            target_files.is_empty(),
+            !has_target_files,
             "full",
             false,
             true,
@@ -2571,11 +3021,16 @@ fn handle_pre_plan(
             break;
         }
         let current_files: HashSet<String> = go_structure_files.iter().cloned().collect();
-        let mut new_files: Vec<String> = expanded.difference(&current_files).cloned().collect();
-        new_files.sort();
-        go_structure_files = expanded.into_iter().collect();
+        let mut candidates: Vec<String> = expanded.difference(&current_files).cloned().collect();
+        candidates.sort();
+        let (new_files, rejected) = idx.refresh_paths(&candidates);
+        outside_workspace_files.extend(rejected);
+        if new_files.is_empty() {
+            break;
+        }
+        go_structure_files.extend(new_files.iter().cloned());
         go_structure_files.sort();
-        idx.refresh_paths(&new_files);
+        go_structure_files.dedup();
         let (_, expanded_import_tokens) = go_lsp_inputs(idx, &root_str, &new_files, &[]);
         let expansion = go_deep_layer::run_structure(
             go_layer,
@@ -2601,6 +3056,7 @@ fn handle_pre_plan(
         }
         go_structure.elapsed_ms += expansion.elapsed_ms;
     }
+    retain_workspace_structure_paths(idx, &mut go_structure, &mut outside_workspace_files);
     let mut final_go_closure: HashSet<String> = go_structure_files.iter().cloned().collect();
     final_go_closure.extend(go_structure.module_dependencies.values().flatten().cloned());
     final_go_closure.extend(
@@ -2615,9 +3071,29 @@ fn handle_pre_plan(
             relations.graph_truncated = true;
         }
     }
+    if has_go_files && (!has_target_files || !go_structure_files.is_empty()) {
+        let mut snapshot_files: Vec<String> = if has_target_files {
+            final_go_closure.iter().cloned().collect()
+        } else {
+            idx.files()
+                .filter(|entry| entry.lang == language::Lang::Go)
+                .map(|entry| make_relative(&entry.path.to_string_lossy(), &root_str))
+                .collect()
+        };
+        snapshot_files.sort();
+        snapshot_files.dedup();
+        let input_snapshot_id = scoped_snapshot_id(
+            &idx.root,
+            &idx.root,
+            &snapshot_files,
+            &["go.mod", "go.work"],
+            &go_structure.snapshot_id,
+        );
+        go_structure.snapshot_id = structure_snapshot_id(&input_snapshot_id, &go_structure);
+    }
 
     let has_java_files = idx.files().any(|entry| entry.lang == language::Lang::Java);
-    let mut java_structure_files: Vec<String> = if target_files.is_empty() {
+    let mut java_structure_files: Vec<String> = if !has_target_files {
         Vec::new()
     } else {
         target_files.iter()
@@ -2626,15 +3102,15 @@ fn handle_pre_plan(
     };
     let (java_symbol_positions, java_import_tokens, java_dependency_tokens) =
         java_lsp_inputs(idx, &root_str, &java_structure_files, &target_symbols);
-    let mut java_structure = if (!has_java_files && target_files.is_empty())
-        || (!target_files.is_empty() && java_structure_files.is_empty())
+    let mut java_structure = if (!has_java_files && !has_target_files)
+        || (has_target_files && java_structure_files.is_empty())
     {
         java_deep_layer::disabled_structure(&target_symbols)
     } else {
         java_deep_layer::run_structure(
             java_layer, &idx.root, &java_structure_files, &target_symbols,
             &java_symbol_positions, &java_import_tokens, &java_dependency_tokens,
-            target_files.is_empty(),
+            !has_target_files,
         )
     };
     for _ in 0..MAX_JAVA_PLAN_CLOSURE_ROUNDS {
@@ -2649,9 +3125,17 @@ fn handle_pre_plan(
         if expanded.len() == java_structure_files.len() {
             break;
         }
-        java_structure_files = expanded.into_iter().collect();
+        let current_files: HashSet<String> = java_structure_files.iter().cloned().collect();
+        let mut candidates: Vec<String> = expanded.difference(&current_files).cloned().collect();
+        candidates.sort();
+        let (new_files, rejected) = idx.refresh_paths(&candidates);
+        outside_workspace_files.extend(rejected);
+        if new_files.is_empty() {
+            break;
+        }
+        java_structure_files.extend(new_files);
         java_structure_files.sort();
-        idx.refresh_paths(&java_structure_files);
+        java_structure_files.dedup();
         let (_, expanded_import_tokens, expanded_dependency_tokens) =
             java_lsp_inputs(idx, &root_str, &java_structure_files, &[]);
         java_structure = java_deep_layer::run_structure(
@@ -2662,9 +3146,10 @@ fn handle_pre_plan(
             &java_symbol_positions,
             &expanded_import_tokens,
             &expanded_dependency_tokens,
-            target_files.is_empty(),
+            !has_target_files,
         );
     }
+    retain_workspace_structure_paths(idx, &mut java_structure, &mut outside_workspace_files);
     let mut final_java_closure: HashSet<String> = java_structure_files.iter().cloned().collect();
     final_java_closure.extend(java_structure.module_dependencies.values().flatten().cloned());
     final_java_closure.extend(
@@ -2679,6 +3164,31 @@ fn handle_pre_plan(
             relations.graph_truncated = true;
         }
     }
+    if has_java_files && (!has_target_files || !java_structure_files.is_empty()) {
+        let mut snapshot_files: Vec<String> = if has_target_files {
+            final_java_closure.iter().cloned().collect()
+        } else {
+            idx.files()
+                .filter(|entry| entry.lang == language::Lang::Java)
+                .map(|entry| make_relative(&entry.path.to_string_lossy(), &root_str))
+                .collect()
+        };
+        snapshot_files.sort();
+        snapshot_files.dedup();
+        let input_snapshot_id = scoped_snapshot_id(
+            &idx.root,
+            &idx.root,
+            &snapshot_files,
+            &["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"],
+            &java_structure.snapshot_id,
+        );
+        java_structure.snapshot_id = structure_snapshot_id(&input_snapshot_id, &java_structure);
+    }
+    retain_workspace_structure_paths(idx, &mut structure, &mut outside_workspace_files);
+    retain_workspace_structure_paths(idx, &mut py_structure, &mut outside_workspace_files);
+    retain_workspace_structure_paths(idx, &mut rust_structure, &mut outside_workspace_files);
+    outside_workspace_files.sort();
+    outside_workspace_files.dedup();
     let ts_relations = structure.relations.clone();
     let py_relations = py_structure.relations.clone();
     let rust_relations = rust_structure.relations.clone();
@@ -2694,27 +3204,6 @@ fn handle_pre_plan(
     let go_structure_available = matches!(go_structure.status, "verified" | "partially_verified");
     let java_structure_verified = java_structure.status == "verified";
     let java_structure_available = matches!(java_structure.status, "verified" | "partially_verified");
-    let related_ts_files: Vec<String> = ts_relations
-        .values()
-        .flat_map(|relations| relations.related_files.iter().cloned())
-        .collect();
-    idx.refresh_paths(&related_ts_files);
-    let related_py_files: Vec<String> = py_relations
-        .values()
-        .flat_map(|relations| relations.related_files.iter().cloned())
-        .collect();
-    idx.refresh_paths(&related_py_files);
-    let related_rust_files: Vec<String> = rust_relations.values()
-        .flat_map(|relations| relations.related_files.iter().cloned()).collect();
-    idx.refresh_paths(&related_rust_files);
-    let related_go_files: Vec<String> = go_relations
-        .values()
-        .flat_map(|relations| relations.related_files.iter().cloned())
-        .collect();
-    idx.refresh_paths(&related_go_files);
-    let related_java_files: Vec<String> = java_relations.values()
-        .flat_map(|relations| relations.related_files.iter().cloned()).collect();
-    idx.refresh_paths(&related_java_files);
     let ts_target_files: HashSet<String> = target_files
         .iter()
         .filter(|file| {
@@ -3147,7 +3636,9 @@ fn handle_pre_plan(
 
     let task = arguments.get("task").and_then(|s| s.as_str()).unwrap_or("");
     let parse_errors = parse_errors_for_paths(idx, &scope_files, &root_str);
-    let confidence = if !parse_errors.is_empty()
+    let confidence = if !outside_workspace_files.is_empty() {
+        "medium"
+    } else if !parse_errors.is_empty()
         || !unresolved_module_specifiers.is_empty()
         || !ambiguous_symbols.is_empty()
         || unresolved_external_modules
@@ -3222,6 +3713,9 @@ fn handle_pre_plan(
     }
     if !java_structure_files.is_empty() && !java_structure_verified {
         missing_evidence.push("jdtls_program");
+    }
+    if !outside_workspace_files.is_empty() {
+        missing_evidence.push("outside_workspace");
     }
     let mut suggested_minimal_reads: Vec<Value> = candidate_order
         .iter()
@@ -3298,6 +3792,8 @@ fn handle_pre_plan(
     result["go_program_build_count"] = json!(go_structure.program_build_count);
     result["go_program_rebuilt"] = json!(go_structure.program_rebuilt);
     result["go_semantic_elapsed_ms"] = json!(go_structure.elapsed_ms);
+    result["outside_workspace_files"] = json!(outside_workspace_files);
+    result["not_covered_files"] = json!(outside_workspace_files);
 
     tool_success("pre_plan", result)
 }
@@ -3323,7 +3819,7 @@ fn handle_pre_plan_discovery(
     let has_java_files = idx.files().any(|entry| entry.lang == language::Lang::Java);
     let mut discovery_terms: Vec<String> = task_terms.iter().cloned().collect();
     discovery_terms.sort();
-    let py_discovery = if has_python_files {
+    let mut py_discovery = if has_python_files {
         py_deep_layer::run_discovery(py_layer, &idx.root, &discovery_terms)
     } else {
         py_deep_layer::PyDiscoveryResult {
@@ -3336,7 +3832,7 @@ fn handle_pre_plan_discovery(
             elapsed_ms: 0,
         }
     };
-    let rust_discovery = if has_rust_files {
+    let mut rust_discovery = if has_rust_files {
         rust_deep_layer::run_discovery(rust_layer, &idx.root, &discovery_terms)
     } else {
         rust_deep_layer::RustDiscoveryResult {
@@ -3349,7 +3845,7 @@ fn handle_pre_plan_discovery(
             elapsed_ms: 0,
         }
     };
-    let go_discovery = if has_go_files {
+    let mut go_discovery = if has_go_files {
         go_deep_layer::run_discovery(go_layer, &idx.root, &discovery_terms)
     } else {
         go_deep_layer::GoDiscoveryResult {
@@ -3362,7 +3858,7 @@ fn handle_pre_plan_discovery(
             elapsed_ms: 0,
         }
     };
-    let java_discovery = if has_java_files {
+    let mut java_discovery = if has_java_files {
         java_deep_layer::run_discovery(java_layer, &idx.root, &discovery_terms)
     } else {
         java_deep_layer::JavaDiscoveryResult {
@@ -3370,6 +3866,94 @@ fn handle_pre_plan_discovery(
             program_build_count: 0, program_rebuilt: false, snapshot_id: "0".to_string(), elapsed_ms: 0,
         }
     };
+    if has_python_files {
+        let files: Vec<String> = idx
+            .files()
+            .filter(|entry| entry.lang == language::Lang::Python)
+            .map(|entry| make_relative(&entry.path.to_string_lossy(), root_str))
+            .collect();
+        let input_snapshot_id = scoped_snapshot_id(
+            &idx.root,
+            &idx.root,
+            &files,
+            &["pyrightconfig.json", "pyproject.toml"],
+            &py_discovery.snapshot_id,
+        );
+        py_discovery.snapshot_id = semantic_snapshot_id(
+            &input_snapshot_id,
+            &json!({
+                "candidates": &py_discovery.candidates,
+                "status": py_discovery.status,
+                "reason": &py_discovery.reason,
+            }),
+        );
+    }
+    if has_rust_files {
+        let files: Vec<String> = idx
+            .files()
+            .filter(|entry| entry.lang == language::Lang::Rust)
+            .map(|entry| make_relative(&entry.path.to_string_lossy(), root_str))
+            .collect();
+        let input_snapshot_id = scoped_snapshot_id(
+            &idx.root,
+            &idx.root,
+            &files,
+            &["Cargo.toml", "rust-project.json"],
+            &rust_discovery.snapshot_id,
+        );
+        rust_discovery.snapshot_id = semantic_snapshot_id(
+            &input_snapshot_id,
+            &json!({
+                "candidates": &rust_discovery.candidates,
+                "status": rust_discovery.status,
+                "reason": &rust_discovery.reason,
+            }),
+        );
+    }
+    if has_go_files {
+        let files: Vec<String> = idx
+            .files()
+            .filter(|entry| entry.lang == language::Lang::Go)
+            .map(|entry| make_relative(&entry.path.to_string_lossy(), root_str))
+            .collect();
+        let input_snapshot_id = scoped_snapshot_id(
+            &idx.root,
+            &idx.root,
+            &files,
+            &["go.mod", "go.work"],
+            &go_discovery.snapshot_id,
+        );
+        go_discovery.snapshot_id = semantic_snapshot_id(
+            &input_snapshot_id,
+            &json!({
+                "candidates": &go_discovery.candidates,
+                "status": go_discovery.status,
+                "reason": &go_discovery.reason,
+            }),
+        );
+    }
+    if has_java_files {
+        let files: Vec<String> = idx
+            .files()
+            .filter(|entry| entry.lang == language::Lang::Java)
+            .map(|entry| make_relative(&entry.path.to_string_lossy(), root_str))
+            .collect();
+        let input_snapshot_id = scoped_snapshot_id(
+            &idx.root,
+            &idx.root,
+            &files,
+            &["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"],
+            &java_discovery.snapshot_id,
+        );
+        java_discovery.snapshot_id = semantic_snapshot_id(
+            &input_snapshot_id,
+            &json!({
+                "candidates": &java_discovery.candidates,
+                "status": java_discovery.status,
+                "reason": &java_discovery.reason,
+            }),
+        );
+    }
     for candidate in &py_discovery.candidates {
         let Some(name) = candidate.get("name").and_then(Value::as_str) else {
             continue;
@@ -3857,6 +4441,698 @@ fn files_for_language(
     grouped.get(language).cloned().unwrap_or_default()
 }
 
+struct ConfigScope {
+    root: PathBuf,
+    workspace_files: Vec<String>,
+    helper_files: Vec<String>,
+}
+
+struct ScopedLanguageResult {
+    scope: String,
+    files: Vec<String>,
+    status: &'static str,
+    reason: Option<String>,
+    verification: Value,
+    program_build_count: u64,
+    program_rebuilt: bool,
+    snapshot_id: String,
+    elapsed_ms: u128,
+}
+
+struct AggregatedLanguageResult {
+    status: &'static str,
+    reason: Option<String>,
+    verification: Value,
+    program_build_count: u64,
+    program_rebuilt: bool,
+    snapshot_id: String,
+    elapsed_ms: u128,
+}
+
+fn nearest_config_root(workspace_root: &Path, file: &str, markers: &[&str]) -> PathBuf {
+    let absolute = workspace_root.join(file);
+    let mut current = absolute.parent();
+    while let Some(directory) = current {
+        if !directory.starts_with(workspace_root) {
+            break;
+        }
+        if markers.iter().any(|marker| directory.join(marker).is_file()) {
+            return directory.to_path_buf();
+        }
+        if directory == workspace_root {
+            break;
+        }
+        current = directory.parent();
+    }
+    workspace_root.to_path_buf()
+}
+
+fn group_files_by_config_root(
+    workspace_root: &Path,
+    files: &[String],
+    markers: &[&str],
+) -> Vec<ConfigScope> {
+    let mut grouped: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
+    for file in files {
+        grouped
+            .entry(nearest_config_root(workspace_root, file, markers))
+            .or_default()
+            .push(file.clone());
+    }
+    grouped
+        .into_iter()
+        .map(|(root, mut workspace_files)| {
+            workspace_files.sort();
+            let helper_files = workspace_files
+                .iter()
+                .map(|file| {
+                    workspace_root
+                        .join(file)
+                        .strip_prefix(&root)
+                        .unwrap_or_else(|_| Path::new(file))
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                .collect();
+            ConfigScope {
+                root,
+                workspace_files,
+                helper_files,
+            }
+        })
+        .collect()
+}
+
+fn config_scope_name(workspace_root: &Path, scope_root: &Path) -> String {
+    scope_root
+        .strip_prefix(workspace_root)
+        .unwrap_or(scope_root)
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_matches('/')
+        .to_string()
+}
+
+fn scoped_snapshot_id(
+    workspace_root: &Path,
+    scope_root: &Path,
+    files: &[String],
+    markers: &[&str],
+    _helper_snapshot_id: &str,
+) -> String {
+    let canonical_root = workspace_root.canonicalize().ok();
+    let scope = config_scope_name(workspace_root, scope_root);
+    let mut entries: Vec<(String, PathBuf)> = files
+        .iter()
+        .filter_map(|file| {
+            let workspace_file = scoped_path(&scope, file)?;
+            Some((format!("file:{workspace_file}"), workspace_root.join(workspace_file)))
+        })
+        .collect();
+    entries.extend(markers.iter().map(|marker| {
+        (
+            format!("config:{scope}/{marker}"),
+            scope_root.join(marker),
+        )
+    }));
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries.dedup_by(|left, right| left.0 == right.0);
+
+    let mut hash = 0xcbf29ce484222325_u64;
+    update_deterministic_hash(&mut hash, scope.as_bytes());
+    for (name, path) in entries {
+        update_deterministic_hash(&mut hash, name.as_bytes());
+        let resolved = path.canonicalize().ok();
+        let is_bounded = match (&canonical_root, &resolved) {
+            (Some(root), Some(candidate)) => candidate.starts_with(root),
+            _ => false,
+        };
+        if is_bounded {
+            match std::fs::read(path) {
+                Ok(content) => update_deterministic_hash(&mut hash, &content),
+                Err(_) => update_deterministic_hash(&mut hash, b"unreadable"),
+            }
+        } else if path.exists() {
+            update_deterministic_hash(&mut hash, b"outside_workspace");
+        } else {
+            update_deterministic_hash(&mut hash, b"missing");
+        }
+    }
+    format!("{hash:016x}")
+}
+
+fn update_deterministic_hash(hash: &mut u64, bytes: &[u8]) {
+    *hash ^= bytes.len() as u64;
+    *hash = hash.wrapping_mul(0x100000001b3);
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(0x100000001b3);
+    }
+}
+
+fn canonical_value(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::String(value) => serde_json::to_string(value).unwrap_or_default(),
+        Value::Array(values) => {
+            let mut values: Vec<String> = values.iter().map(canonical_value).collect();
+            values.sort();
+            format!("[{}]", values.join(","))
+        }
+        Value::Object(values) => {
+            let mut values: Vec<String> = values
+                .iter()
+                .map(|(key, value)| format!("{}:{}", serde_json::to_string(key).unwrap_or_default(), canonical_value(value)))
+                .collect();
+            values.sort();
+            format!("{{{}}}", values.join(","))
+        }
+    }
+}
+
+fn semantic_snapshot_id(input_snapshot_id: &str, value: &Value) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    update_deterministic_hash(&mut hash, input_snapshot_id.as_bytes());
+    update_deterministic_hash(&mut hash, canonical_value(value).as_bytes());
+    format!("{hash:016x}")
+}
+
+fn structure_snapshot_id(
+    input_snapshot_id: &str,
+    result: &ts_deep_layer::StructureResult,
+) -> String {
+    let relations: Vec<Value> = result
+        .relations
+        .iter()
+        .map(|(symbol, relations)| {
+            json!({
+                "symbol": symbol,
+                "targets": relations.targets.iter().map(|target| json!({
+                    "file": target.file, "name": target.name,
+                    "line": target.line, "character": target.character,
+                    "end_line": target.end_line, "end_character": target.end_character,
+                })).collect::<Vec<_>>(),
+                "names_by_file": relations.names_by_file,
+                "related_files": relations.related_files,
+                "references": relations.references.iter().map(|location| json!({
+                    "file": location.file, "name": location.name,
+                    "line": location.line, "character": location.character,
+                    "end_line": location.end_line, "end_character": location.end_character,
+                })).collect::<Vec<_>>(),
+                "callers": relations.callers.iter().map(|location| json!({
+                    "file": location.file, "name": location.name,
+                    "line": location.line, "character": location.character,
+                    "end_line": location.end_line, "end_character": location.end_character,
+                })).collect::<Vec<_>>(),
+                "callees": relations.callees.iter().map(|location| json!({
+                    "file": location.file, "name": location.name,
+                    "line": location.line, "character": location.character,
+                    "end_line": location.end_line, "end_character": location.end_character,
+                })).collect::<Vec<_>>(),
+                "unresolved_module_specifiers": relations.unresolved_module_specifiers,
+                "unresolved_relative_specifiers": relations.unresolved_relative_specifiers,
+                "external_module_specifiers": relations.external_module_specifiers,
+                "blocked_module_specifiers": relations.blocked_module_specifiers,
+                "dynamic_import_files": relations.dynamic_import_files,
+                "graph_cycle": relations.graph_cycle,
+                "graph_truncated": relations.graph_truncated,
+            })
+        })
+        .collect();
+    semantic_snapshot_id(
+        input_snapshot_id,
+        &json!({
+            "relations": relations,
+            "module_dependencies": result.module_dependencies,
+            "status": result.status,
+            "reason": result.reason,
+        }),
+    )
+}
+
+fn verification_snapshot_id(
+    input_snapshot_id: &str,
+    status: &str,
+    reason: Option<&str>,
+    issues: &[Value],
+    verification: &Value,
+    language_results: Option<&Value>,
+) -> String {
+    semantic_snapshot_id(
+        input_snapshot_id,
+        &json!({
+            "status": status,
+            "reason": reason,
+            "issues": issues,
+            "verification": verification,
+            "language_results": language_results,
+        }),
+    )
+}
+
+fn rebase_scoped_issues(issues: &mut Vec<Value>, scope: &str) {
+    issues.retain_mut(|issue| {
+        let Some(file) = issue.get("file").and_then(Value::as_str) else {
+            return true;
+        };
+        let Some(file) = scoped_path(scope, file) else {
+            return false;
+        };
+        issue["file"] = json!(file);
+        true
+    });
+}
+
+fn scoped_path(scope: &str, path: &str) -> Option<String> {
+    let raw_path = path.trim();
+    if raw_path.is_empty() {
+        return None;
+    }
+    let mut components: Vec<&str> = scope
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect();
+    let normalized = normalize_path(raw_path);
+    let bytes = normalized.as_bytes();
+    if normalized.starts_with('/')
+        || raw_path.starts_with('\\')
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+    {
+        return None;
+    }
+    for component in normalized.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop()?;
+            }
+            value if value.contains(':') => return None,
+            value => components.push(value),
+        }
+    }
+    (!components.is_empty()).then(|| components.join("/"))
+}
+
+fn helper_path_from_workspace(scope: &str, path: &str) -> Option<String> {
+    let normalized = normalize_path(path);
+    let normalized_scope = normalize_path(scope);
+    let scope_components: Vec<&str> = normalized_scope
+        .trim_matches('/')
+        .split('/')
+        .filter(|component| !component.is_empty())
+        .collect();
+    if scope_components.is_empty() {
+        return (!normalized.is_empty()).then_some(normalized);
+    }
+    let path_components: Vec<&str> = normalized
+        .split('/')
+        .filter(|component| !component.is_empty())
+        .collect();
+    let common = scope_components
+        .iter()
+        .zip(path_components.iter())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut relative = vec![".."; scope_components.len().saturating_sub(common)];
+    relative.extend(path_components.into_iter().skip(common));
+    (!relative.is_empty()).then(|| relative.join("/"))
+}
+
+fn refresh_scoped_helper_paths(
+    idx: &mut Index,
+    scope: &str,
+    paths: &[String],
+    outside_workspace_files: &mut Vec<String>,
+) -> Vec<String> {
+    let mut workspace_paths = Vec::new();
+    for path in paths {
+        if let Some(workspace_path) = scoped_path(scope, path) {
+            workspace_paths.push(workspace_path);
+        } else {
+            outside_workspace_files.push(path.clone());
+        }
+    }
+    let (accepted, rejected) = idx.refresh_paths(&workspace_paths);
+    outside_workspace_files.extend(rejected);
+    let mut helper_paths = Vec::new();
+    for path in accepted {
+        if let Some(helper_path) = helper_path_from_workspace(scope, &path) {
+            helper_paths.push(helper_path);
+        } else {
+            outside_workspace_files.push(path);
+        }
+    }
+    helper_paths.sort();
+    helper_paths.dedup();
+    helper_paths
+}
+
+fn retain_workspace_structure_paths(
+    idx: &mut Index,
+    result: &mut ts_deep_layer::StructureResult,
+    outside_workspace_files: &mut Vec<String>,
+) {
+    let paths = collect_structure_paths(result);
+    let (accepted, rejected) = idx.refresh_paths(&paths);
+    let filtered = !rejected.is_empty();
+    outside_workspace_files.extend(rejected);
+    retain_structure_paths(result, accepted.into_iter().collect(), filtered);
+}
+
+fn retain_scoped_structure_paths(
+    idx: &mut Index,
+    scope: &str,
+    result: &mut ts_deep_layer::StructureResult,
+    outside_workspace_files: &mut Vec<String>,
+) {
+    let paths = collect_structure_paths(result);
+    let outside_before = outside_workspace_files.len();
+    let accepted = refresh_scoped_helper_paths(idx, scope, &paths, outside_workspace_files);
+    retain_structure_paths(
+        result,
+        accepted.into_iter().collect(),
+        outside_workspace_files.len() > outside_before,
+    );
+}
+
+fn collect_structure_paths(result: &ts_deep_layer::StructureResult) -> Vec<String> {
+    let mut paths = Vec::new();
+    for (file, dependencies) in &result.module_dependencies {
+        paths.push(file.clone());
+        paths.extend(dependencies.iter().cloned());
+    }
+    for relations in result.relations.values() {
+        paths.extend(relations.targets.iter().map(|target| target.file.clone()));
+        paths.extend(relations.names_by_file.keys().cloned());
+        paths.extend(relations.related_files.iter().cloned());
+        paths.extend(relations.references.iter().map(|location| location.file.clone()));
+        paths.extend(relations.callers.iter().map(|location| location.file.clone()));
+        paths.extend(relations.callees.iter().map(|location| location.file.clone()));
+        paths.extend(relations.dynamic_import_files.iter().cloned());
+    }
+    paths
+}
+
+fn retain_structure_paths(
+    result: &mut ts_deep_layer::StructureResult,
+    accepted: HashSet<String>,
+    filtered: bool,
+) {
+    if filtered {
+        for relations in result.relations.values_mut() {
+            relations.graph_truncated = true;
+        }
+    }
+    result.module_dependencies.retain(|file, dependencies| {
+        dependencies.retain(|dependency| accepted.contains(dependency));
+        accepted.contains(file)
+    });
+    for relations in result.relations.values_mut() {
+        relations.targets.retain(|target| accepted.contains(&target.file));
+        relations.names_by_file.retain(|file, _| accepted.contains(file));
+        relations.related_files.retain(|file| accepted.contains(file));
+        relations.references.retain(|location| accepted.contains(&location.file));
+        relations.callers.retain(|location| accepted.contains(&location.file));
+        relations.callees.retain(|location| accepted.contains(&location.file));
+        relations.dynamic_import_files.retain(|file| accepted.contains(file));
+    }
+}
+
+fn rebase_scoped_locations(
+    locations: &mut Vec<ts_deep_layer::SemanticLocation>,
+    scope: &str,
+) {
+    locations.retain_mut(|location| {
+        let Some(file) = scoped_path(scope, &location.file) else {
+            return false;
+        };
+        location.file = file;
+        true
+    });
+}
+
+fn rebase_structure_result(scope: &str, result: &mut ts_deep_layer::StructureResult) {
+    result.module_dependencies = result
+        .module_dependencies
+        .drain()
+        .filter_map(|(file, dependencies)| {
+            Some((
+                scoped_path(scope, &file)?,
+                dependencies.into_iter().filter_map(|dependency| scoped_path(scope, &dependency)).collect(),
+            ))
+        })
+        .collect();
+    for relations in result.relations.values_mut() {
+        relations.targets.retain_mut(|target| {
+            let Some(file) = scoped_path(scope, &target.file) else {
+                return false;
+            };
+            target.file = file;
+            true
+        });
+        relations.names_by_file = relations
+            .names_by_file
+            .drain()
+            .filter_map(|(file, names)| Some((scoped_path(scope, &file)?, names)))
+            .collect();
+        relations.related_files = relations
+            .related_files
+            .drain(..)
+            .filter_map(|file| scoped_path(scope, &file))
+            .collect();
+        rebase_scoped_locations(&mut relations.references, scope);
+        rebase_scoped_locations(&mut relations.callers, scope);
+        rebase_scoped_locations(&mut relations.callees, scope);
+        relations.dynamic_import_files = relations
+            .dynamic_import_files
+            .drain(..)
+            .filter_map(|file| scoped_path(scope, &file))
+            .collect();
+    }
+}
+
+fn aggregate_scoped_structure_results(
+    mut results: Vec<(String, ts_deep_layer::StructureResult)>,
+) -> ts_deep_layer::StructureResult {
+    results.sort_by(|left, right| left.0.cmp(&right.0));
+    for (scope, result) in &mut results {
+        rebase_structure_result(scope, result);
+        let input_snapshot_id = result.snapshot_id.clone();
+        result.snapshot_id = structure_snapshot_id(&input_snapshot_id, result);
+    }
+    if results.len() == 1 {
+        return results.pop().expect("single scoped structure result").1;
+    }
+
+    let mut relations: HashMap<String, ts_deep_layer::SymbolRelations> = HashMap::new();
+    let mut module_dependencies: HashMap<String, Vec<String>> = HashMap::new();
+    let statuses: BTreeSet<&'static str> = results.iter().map(|(_, result)| result.status).collect();
+    let status = if statuses.len() == 1 {
+        results[0].1.status
+    } else {
+        "partially_verified"
+    };
+    let reason = results
+        .iter()
+        .filter_map(|(scope, result)| {
+            result.reason.as_ref().map(|reason| {
+                format!("scope={}: {reason}", if scope.is_empty() { "." } else { scope })
+            })
+        })
+        .collect::<Vec<_>>();
+    let snapshot_id = results
+        .iter()
+        .map(|(scope, result)| {
+            format!("{}={}", if scope.is_empty() { "." } else { scope }, result.snapshot_id)
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    let program_build_count = results
+        .iter()
+        .map(|(_, result)| result.program_build_count)
+        .sum();
+    let program_rebuilt = results.iter().any(|(_, result)| result.program_rebuilt);
+    let elapsed_ms = results.iter().map(|(_, result)| result.elapsed_ms).sum();
+
+    for (_, result) in results {
+        for (file, dependencies) in result.module_dependencies {
+            module_dependencies.entry(file).or_default().extend(dependencies);
+        }
+        for (symbol, incoming) in result.relations {
+            let current = relations.entry(symbol).or_default();
+            current.targets.extend(incoming.targets);
+            for (file, names) in incoming.names_by_file {
+                current.names_by_file.entry(file).or_default().extend(names);
+            }
+            current.related_files.extend(incoming.related_files);
+            current.references.extend(incoming.references);
+            current.callers.extend(incoming.callers);
+            current.callees.extend(incoming.callees);
+            current
+                .unresolved_module_specifiers
+                .extend(incoming.unresolved_module_specifiers);
+            current
+                .unresolved_relative_specifiers
+                .extend(incoming.unresolved_relative_specifiers);
+            current
+                .external_module_specifiers
+                .extend(incoming.external_module_specifiers);
+            current
+                .blocked_module_specifiers
+                .extend(incoming.blocked_module_specifiers);
+            current.dynamic_import_files.extend(incoming.dynamic_import_files);
+            current.graph_cycle |= incoming.graph_cycle;
+            current.graph_truncated |= incoming.graph_truncated;
+        }
+    }
+    for dependencies in module_dependencies.values_mut() {
+        dependencies.sort();
+        dependencies.dedup();
+    }
+    for current in relations.values_mut() {
+        current.targets.sort_by(|left, right| {
+            (&left.file, &left.name, left.line, left.character)
+                .cmp(&(&right.file, &right.name, right.line, right.character))
+        });
+        current.targets.dedup_by(|left, right| {
+            left.file == right.file
+                && left.name == right.name
+                && left.line == right.line
+                && left.character == right.character
+        });
+        for names in current.names_by_file.values_mut() {
+            names.sort();
+            names.dedup();
+        }
+        current.related_files.sort();
+        current.related_files.dedup();
+        for locations in [&mut current.references, &mut current.callers, &mut current.callees] {
+            locations.sort_by(|left, right| {
+                (&left.file, &left.name, left.line, left.character)
+                    .cmp(&(&right.file, &right.name, right.line, right.character))
+            });
+            locations.dedup_by(|left, right| {
+                left.file == right.file
+                    && left.name == right.name
+                    && left.line == right.line
+                    && left.character == right.character
+            });
+        }
+        for values in [
+            &mut current.unresolved_module_specifiers,
+            &mut current.unresolved_relative_specifiers,
+            &mut current.external_module_specifiers,
+            &mut current.blocked_module_specifiers,
+            &mut current.dynamic_import_files,
+        ] {
+            values.sort();
+            values.dedup();
+        }
+    }
+
+    ts_deep_layer::StructureResult {
+        relations,
+        module_dependencies,
+        status,
+        reason: (!reason.is_empty()).then(|| reason.join("; ")),
+        program_build_count,
+        program_rebuilt,
+        snapshot_id: format!("scoped:{snapshot_id}"),
+        elapsed_ms,
+    }
+}
+
+fn aggregate_scoped_language_results(
+    mut results: Vec<ScopedLanguageResult>,
+) -> AggregatedLanguageResult {
+    results.sort_by(|left, right| left.scope.cmp(&right.scope));
+    let all_statuses: BTreeSet<&'static str> = results.iter().map(|result| result.status).collect();
+    let status = if all_statuses.len() == 1 {
+        results[0].status
+    } else {
+        "partially_verified"
+    };
+    let reason_parts: Vec<String> = results
+        .iter()
+        .filter_map(|result| {
+            result.reason.as_ref().map(|reason| {
+                let scope = if result.scope.is_empty() { "." } else { &result.scope };
+                format!("scope={scope}: {reason}")
+            })
+        })
+        .collect();
+    let mut coverage: Option<BTreeSet<String>> = None;
+    let mut missing = BTreeSet::new();
+    let scopes: Vec<Value> = results
+        .iter()
+        .map(|result| {
+            let scope_coverage: BTreeSet<String> = result
+                .verification
+                .get("coverage")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
+            coverage = Some(match coverage.take() {
+                Some(current) => current.intersection(&scope_coverage).cloned().collect(),
+                None => scope_coverage,
+            });
+            if let Some(values) = result.verification.get("missing").and_then(Value::as_array) {
+                missing.extend(values.iter().filter_map(Value::as_str).map(str::to_string));
+            }
+            json!({
+                "root": if result.scope.is_empty() { "." } else { &result.scope },
+                "files": result.files,
+                "status": result.status,
+                "reason": result.reason,
+                "verification": result.verification,
+                "semantic_snapshot_id": result.snapshot_id,
+            })
+        })
+        .collect();
+    let snapshot_id = if results.len() == 1 {
+        results[0].snapshot_id.clone()
+    } else {
+        format!(
+            "scoped:{}",
+            results
+                .iter()
+                .map(|result| format!("{}={}", result.scope, result.snapshot_id))
+                .collect::<Vec<_>>()
+                .join("|")
+        )
+    };
+    AggregatedLanguageResult {
+        status,
+        reason: (!reason_parts.is_empty()).then(|| reason_parts.join("; ")),
+        verification: json!({
+            "coverage": coverage.unwrap_or_default().into_iter().collect::<Vec<_>>(),
+            "missing": missing.into_iter().collect::<Vec<_>>(),
+            "scopes": scopes,
+        }),
+        program_build_count: results.iter().map(|result| result.program_build_count).sum(),
+        program_rebuilt: results.iter().any(|result| result.program_rebuilt),
+        snapshot_id,
+        elapsed_ms: results.iter().map(|result| result.elapsed_ms).sum(),
+    }
+}
+
+fn disabled_language_result(reason: &str, missing: &str) -> AggregatedLanguageResult {
+    AggregatedLanguageResult {
+        status: "disabled",
+        reason: Some(reason.to_string()),
+        verification: json!({ "coverage": [], "missing": [missing] }),
+        program_build_count: 0,
+        program_rebuilt: false,
+        snapshot_id: "0".to_string(),
+        elapsed_ms: 0,
+    }
+}
+
 fn normalize_verification_layer_status(status: &str, reason: Option<&str>) -> &'static str {
     let status = status.to_ascii_lowercase();
     let reason = reason.unwrap_or_default().to_ascii_lowercase();
@@ -4091,13 +5367,9 @@ fn handle_pre_verify(
         return tool_error("changed_files array is required and must not be empty");
     }
     let t0 = std::time::Instant::now();
-    idx.refresh_paths(&raw_changed_files);
+    let (changed_files, outside_workspace_files) = idx.refresh_paths(&raw_changed_files);
     let refresh_ms = t0.elapsed().as_millis();
     let root_str = idx.root.to_string_lossy().to_string();
-    let changed_files: Vec<String> = raw_changed_files
-        .iter()
-        .map(|path| make_relative(path, &root_str))
-        .collect();
 
     let t1 = std::time::Instant::now();
 
@@ -4165,106 +5437,204 @@ fn handle_pre_verify(
         .chain(&tsx_files)
         .cloned()
         .collect::<Vec<_>>();
-    let typescript_and_tsx_result = if typescript_and_tsx_files.is_empty() {
-        None
-    } else {
-        Some(ts_deep_layer::run(
-            deep_layer,
+    let mut typescript_scope_results = Vec::new();
+    let mut tsx_scope_results = Vec::new();
+    for scope in group_files_by_config_root(&idx.root, &typescript_and_tsx_files, &["tsconfig.json"]) {
+        let scope_name = config_scope_name(&idx.root, &scope.root);
+        let mut result = ts_deep_layer::run(deep_layer, &scope.root, &scope.helper_files);
+        result.snapshot_id = scoped_snapshot_id(
             &idx.root,
-            &typescript_and_tsx_files,
-        ))
-    };
-    let (typescript_deep_layer_status, typescript_deep_layer_reason, typescript_verification) =
-        if typescript_files.is_empty() {
-            (
-                "disabled",
-                Some("no TypeScript files in changed_files".to_string()),
-                json!({ "coverage": [], "missing": ["no_typescript_files"] }),
-            )
-        } else {
-            ts_deep_layer::result_for_language(
-                typescript_and_tsx_result.as_ref().unwrap(),
-                "TypeScript",
-            )
-        };
-    let (tsx_deep_layer_status, tsx_deep_layer_reason, tsx_verification) = if tsx_files.is_empty() {
-            (
-                "disabled",
-                Some("no TSX files in changed_files".to_string()),
-                json!({ "coverage": [], "missing": ["no_tsx_files"] }),
-            )
-        } else {
-        ts_deep_layer::result_for_language(typescript_and_tsx_result.as_ref().unwrap(), "TSX")
-        };
-    let deep_layer_ms = typescript_and_tsx_result
-        .as_ref()
-        .map_or(0, |result| result.elapsed_ms);
-    let typescript_program_build_count = typescript_and_tsx_result
-        .as_ref()
-        .map_or(0, |result| result.program_build_count);
-    let typescript_program_rebuilt = typescript_and_tsx_result
-        .as_ref()
-        .is_some_and(|result| result.program_rebuilt);
-    let typescript_snapshot_id = typescript_and_tsx_result
-        .as_ref()
-        .map_or_else(|| "0".to_string(), |result| result.snapshot_id.clone());
-    if let Some(result) = typescript_and_tsx_result {
-        issues.extend(result.issues);
+            &scope.root,
+            &scope.helper_files,
+            &["tsconfig.json"],
+            &result.snapshot_id,
+        );
+        result.snapshot_id = verification_snapshot_id(
+            &result.snapshot_id,
+            result.status,
+            result.reason.as_deref(),
+            &result.issues,
+            &result.verification,
+            Some(&result.language_results),
+        );
+        rebase_scoped_issues(&mut result.issues, &scope_name);
+        issues.append(&mut result.issues);
+        let scope_typescript_files: Vec<String> = scope
+            .workspace_files
+            .iter()
+            .filter(|file| language::capability_for_path(file).is_some_and(|value| value.language == "TypeScript"))
+            .cloned()
+            .collect();
+        let scope_tsx_files: Vec<String> = scope
+            .workspace_files
+            .iter()
+            .filter(|file| language::capability_for_path(file).is_some_and(|value| value.language == "TSX"))
+            .cloned()
+            .collect();
+        if !scope_typescript_files.is_empty() {
+            let (status, reason, verification) = ts_deep_layer::result_for_language(&result, "TypeScript");
+            typescript_scope_results.push(ScopedLanguageResult {
+                scope: scope_name.clone(),
+                files: scope_typescript_files,
+                status,
+                reason,
+                verification,
+                program_build_count: result.program_build_count,
+                program_rebuilt: result.program_rebuilt,
+                snapshot_id: result.snapshot_id.clone(),
+                elapsed_ms: result.elapsed_ms,
+            });
+        }
+        if !scope_tsx_files.is_empty() {
+            let (status, reason, verification) = ts_deep_layer::result_for_language(&result, "TSX");
+            tsx_scope_results.push(ScopedLanguageResult {
+                scope: scope_name,
+                files: scope_tsx_files,
+                status,
+                reason,
+                verification,
+                program_build_count: result.program_build_count,
+                program_rebuilt: result.program_rebuilt,
+                snapshot_id: result.snapshot_id,
+                elapsed_ms: result.elapsed_ms,
+            });
+        }
     }
+    let typescript_result = if typescript_scope_results.is_empty() {
+        disabled_language_result("no TypeScript files in changed_files", "no_typescript_files")
+    } else {
+        aggregate_scoped_language_results(typescript_scope_results)
+    };
+    let tsx_result = if tsx_scope_results.is_empty() {
+        disabled_language_result("no TSX files in changed_files", "no_tsx_files")
+    } else {
+        aggregate_scoped_language_results(tsx_scope_results)
+    };
+    let typescript_deep_layer_status = typescript_result.status;
+    let typescript_deep_layer_reason = typescript_result.reason;
+    let typescript_verification = typescript_result.verification;
+    let tsx_deep_layer_status = tsx_result.status;
+    let tsx_deep_layer_reason = tsx_result.reason;
+    let tsx_verification = tsx_result.verification;
+    let deep_layer_ms = typescript_result.elapsed_ms.max(tsx_result.elapsed_ms);
+    let typescript_program_build_count = typescript_result
+        .program_build_count
+        .max(tsx_result.program_build_count);
+    let typescript_program_rebuilt =
+        typescript_result.program_rebuilt || tsx_result.program_rebuilt;
+    let typescript_snapshot_id = if !typescript_files.is_empty() {
+        typescript_result.snapshot_id
+    } else {
+        tsx_result.snapshot_id
+    };
 
-    // Python Deep Layer: one persistent Pyright LSP snapshot for diagnostics and structure.
+    // Python Deep Layer: reuse one process while switching deterministically between config roots.
     let py_files = files_for_language(&grouped_files, "Python");
     let py_result = if py_files.is_empty() {
-        py_deep_layer::PyDeepLayerResult {
-            issues: vec![],
-            status: "disabled",
-            reason: Some("no Python files in changed_files".to_string()),
-            verification: json!({ "coverage": [], "missing": ["no_python_files"] }),
-            program_build_count: 0,
-            program_rebuilt: false,
-            snapshot_id: "0".to_string(),
-            elapsed_ms: 0,
-        }
+        disabled_language_result("no Python files in changed_files", "no_python_files")
     } else {
-        py_deep_layer::run(py_layer, &idx.root, &py_files)
+        let mut scoped = Vec::new();
+        for scope in group_files_by_config_root(
+            &idx.root,
+            &py_files,
+            &["pyrightconfig.json", "pyproject.toml"],
+        ) {
+            let scope_name = config_scope_name(&idx.root, &scope.root);
+            let mut result = py_deep_layer::run(py_layer, &scope.root, &scope.helper_files);
+            result.snapshot_id = scoped_snapshot_id(
+                &idx.root,
+                &scope.root,
+                &scope.helper_files,
+                &["pyrightconfig.json", "pyproject.toml"],
+                &result.snapshot_id,
+            );
+            result.snapshot_id = verification_snapshot_id(
+                &result.snapshot_id,
+                result.status,
+                result.reason.as_deref(),
+                &result.issues,
+                &result.verification,
+                None,
+            );
+            rebase_scoped_issues(&mut result.issues, &scope_name);
+            issues.extend(result.issues);
+            scoped.push(ScopedLanguageResult {
+                scope: scope_name,
+                files: scope.workspace_files,
+                status: result.status,
+                reason: result.reason,
+                verification: result.verification,
+                program_build_count: result.program_build_count,
+                program_rebuilt: result.program_rebuilt,
+                snapshot_id: result.snapshot_id,
+                elapsed_ms: result.elapsed_ms,
+            });
+        }
+        aggregate_scoped_language_results(scoped)
     };
-    let py_verification = py_result.verification.clone();
+    let py_verification = py_result.verification;
     let py_program_build_count = py_result.program_build_count;
     let py_program_rebuilt = py_result.program_rebuilt;
-    let py_snapshot_id = py_result.snapshot_id.clone();
-    issues.extend(py_result.issues);
+    let py_snapshot_id = py_result.snapshot_id;
     let py_deep_layer_ms = py_result.elapsed_ms;
     let py_deep_layer_status = py_result.status;
     let py_deep_layer_reason = py_result.reason;
 
-    // Rust Deep Layer: one persistent rust-analyzer session for diagnostics and structure.
+    // Rust Deep Layer: reuse one process while switching deterministically between crate roots.
     let rs_files = files_for_language(&grouped_files, "Rust");
     let rust_result = if rs_files.is_empty() {
-        rust_deep_layer::RustDeepLayerResult {
-            issues: vec![],
-            status: "disabled",
-            reason: Some("no Rust files in changed_files".to_string()),
-            verification: json!({ "coverage": [], "missing": ["no_rust_files"] }),
-            program_build_count: 0,
-            program_rebuilt: false,
-            snapshot_id: "0".to_string(),
-            elapsed_ms: 0,
-        }
+        disabled_language_result("no Rust files in changed_files", "no_rust_files")
     } else {
-        rust_deep_layer::run(rust_layer, &idx.root, &rs_files)
+        let mut scoped = Vec::new();
+        for scope in group_files_by_config_root(
+            &idx.root,
+            &rs_files,
+            &["Cargo.toml", "rust-project.json"],
+        ) {
+            let scope_name = config_scope_name(&idx.root, &scope.root);
+            let mut result = rust_deep_layer::run(rust_layer, &scope.root, &scope.helper_files);
+            result.snapshot_id = scoped_snapshot_id(
+                &idx.root,
+                &scope.root,
+                &scope.helper_files,
+                &["Cargo.toml", "rust-project.json"],
+                &result.snapshot_id,
+            );
+            result.snapshot_id = verification_snapshot_id(
+                &result.snapshot_id,
+                result.status,
+                result.reason.as_deref(),
+                &result.issues,
+                &result.verification,
+                None,
+            );
+            rebase_scoped_issues(&mut result.issues, &scope_name);
+            issues.extend(result.issues);
+            scoped.push(ScopedLanguageResult {
+                scope: scope_name,
+                files: scope.workspace_files,
+                status: result.status,
+                reason: result.reason,
+                verification: result.verification,
+                program_build_count: result.program_build_count,
+                program_rebuilt: result.program_rebuilt,
+                snapshot_id: result.snapshot_id,
+                elapsed_ms: result.elapsed_ms,
+            });
+        }
+        aggregate_scoped_language_results(scoped)
     };
-    let rust_verification = rust_result.verification.clone();
+    let rust_verification = rust_result.verification;
     let rust_program_build_count = rust_result.program_build_count;
     let rust_program_rebuilt = rust_result.program_rebuilt;
-    let rust_snapshot_id = rust_result.snapshot_id.clone();
-    issues.extend(rust_result.issues);
+    let rust_snapshot_id = rust_result.snapshot_id;
     let rust_deep_layer_ms = rust_result.elapsed_ms;
     let rust_deep_layer_status = rust_result.status;
     let rust_deep_layer_reason = rust_result.reason;
 
     // Go Deep Layer: one persistent gopls session for diagnostics and structure.
     let go_files = files_for_language(&grouped_files, "Go");
-    let go_result = if go_files.is_empty() {
+    let mut go_result = if go_files.is_empty() {
         go_deep_layer::GoDeepLayerResult {
             issues: vec![],
             status: "disabled",
@@ -4278,6 +5648,23 @@ fn handle_pre_verify(
     } else {
         go_deep_layer::run(go_layer, &idx.root, &go_files)
     };
+    if !go_files.is_empty() {
+        let input_snapshot_id = scoped_snapshot_id(
+            &idx.root,
+            &idx.root,
+            &go_files,
+            &["go.mod", "go.work"],
+            &go_result.snapshot_id,
+        );
+        go_result.snapshot_id = verification_snapshot_id(
+            &input_snapshot_id,
+            go_result.status,
+            go_result.reason.as_deref(),
+            &go_result.issues,
+            &go_result.verification,
+            None,
+        );
+    }
     let go_verification = go_result.verification.clone();
     let go_program_build_count = go_result.program_build_count;
     let go_program_rebuilt = go_result.program_rebuilt;
@@ -4289,7 +5676,7 @@ fn handle_pre_verify(
 
     // Java Deep Layer: one persistent Eclipse JDT Language Server session.
     let java_files = files_for_language(&grouped_files, "Java");
-    let java_result = if java_files.is_empty() {
+    let mut java_result = if java_files.is_empty() {
         java_deep_layer::JavaDeepLayerResult {
             issues: vec![],
             status: "disabled",
@@ -4303,6 +5690,23 @@ fn handle_pre_verify(
     } else {
         java_deep_layer::run(java_layer, &idx.root, &java_files)
     };
+    if !java_files.is_empty() {
+        let input_snapshot_id = scoped_snapshot_id(
+            &idx.root,
+            &idx.root,
+            &java_files,
+            &["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"],
+            &java_result.snapshot_id,
+        );
+        java_result.snapshot_id = verification_snapshot_id(
+            &input_snapshot_id,
+            java_result.status,
+            java_result.reason.as_deref(),
+            &java_result.issues,
+            &java_result.verification,
+            None,
+        );
+    }
     let java_verification = java_result.verification.clone();
     let java_program_build_count = java_result.program_build_count;
     let java_program_rebuilt = java_result.program_rebuilt;
@@ -4466,7 +5870,7 @@ fn handle_pre_verify(
     let cpp_deep_layer_reason = cpp_result.reason;
 
     let elapsed_ms = t0.elapsed().as_millis();
-    let verification = build_verification_summary(
+    let mut verification = build_verification_summary(
         &changed_files,
         &[
             VerificationLayerResult {
@@ -4576,11 +5980,40 @@ fn handle_pre_verify(
             },
         ],
     );
+    if !outside_workspace_files.is_empty() {
+        let status = if verification.get("status").and_then(Value::as_str) == Some("not_covered") {
+            "not_covered"
+        } else {
+            "partially_verified"
+        };
+        verification["status"] = json!(status);
+        verification["fully_verified"] = json!(false);
+        verification["requested_files"] = json!(changed_files.len() + outside_workspace_files.len());
+        verification["outside_workspace_files"] = json!(outside_workspace_files);
+        if let Some(not_covered) = verification["not_covered_files"].as_array_mut() {
+            not_covered.extend(outside_workspace_files.iter().cloned().map(Value::String));
+        }
+        if let Some(language_results) = verification["language_results"].as_array_mut() {
+            language_results.push(json!({
+                "language": "unknown",
+                "files": outside_workspace_files,
+                "status": "not_covered",
+                "reason": "outside_workspace",
+                "checks_performed": [],
+                "missing": ["outside_workspace"],
+                "verification": {
+                    "coverage": [],
+                    "missing": ["outside_workspace"],
+                },
+            }));
+        }
+    }
     let status = verification_result_status(!issues.is_empty(), &verification);
     let mut result = json!({
         "status": status,
         "verification": verification,
         "checked_files": changed_files.len(),
+        "outside_workspace_files": outside_workspace_files,
         "elapsed_ms": elapsed_ms,
         "refresh_ms": refresh_ms,
         "verify_ms": verify_ms,
@@ -4807,6 +6240,61 @@ mod tests {
     #[test]
     fn tool_definitions_expose_structural_boundaries() {
         let tools = tool_definitions();
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.get("inputSchema").cloned().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "symbol": { "type": "string" },
+                        "path": { "type": "string" },
+                        "depth": { "type": "number" },
+                    },
+                    "required": ["symbol"],
+                }),
+                json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "changes": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                    "path": { "type": "string" },
+                                    "symbols": { "type": "array", "items": { "type": "string" } },
+                                },
+                                "required": ["path"],
+                            },
+                        },
+                    },
+                    "required": ["changes"],
+                }),
+                json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "task": { "type": "string" },
+                        "target_symbols": { "type": "array", "items": { "type": "string" } },
+                        "target_files": { "type": "array", "items": { "type": "string" } },
+                    },
+                    "required": ["task"],
+                }),
+                json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "changed_files": { "type": "array", "items": { "type": "string" } },
+                    },
+                    "required": ["changed_files"],
+                }),
+            ],
+        );
         let context = tools
             .iter()
             .find(|tool| tool.get("name").and_then(Value::as_str) == Some("pre_context"))
@@ -4834,15 +6322,187 @@ mod tests {
             .unwrap();
         assert_eq!(
             verify.pointer("/language_capabilities/supported_languages"),
-            Some(&json!(["TypeScript", "TSX", "Python", "Rust", "Go", "Java"]))
+            Some(&json!([
+                "TypeScript", "TSX", "Python", "Rust", "Go", "Java", "SQL", "Shell",
+                "C#", "PHP", "Ruby", "Kotlin", "Dart", "Swift", "C/C++"
+            ]))
         );
         assert_eq!(
             verify
                 .pointer("/language_capabilities/languages")
                 .and_then(Value::as_array)
                 .map(Vec::len),
-            Some(6)
+            Some(15)
         );
+    }
+
+    #[test]
+    fn scoped_non_typescript_targets_do_not_start_typescript_analysis() {
+        let root = std::env::temp_dir().join(format!(
+            "linghun-pre-non-ts-scope-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("sample.py"), "def selected_target():\n    return 1\n").unwrap();
+        let mut built = Index::new(root.clone());
+        built.build();
+        let mut index = Some(built);
+
+        for (tool, arguments) in [
+            (
+                "pre_context",
+                json!({ "symbol": "selected_target", "path": "sample.py" }),
+            ),
+            (
+                "pre_impact",
+                json!({ "changes": [{ "path": "sample.py", "symbols": ["selected_target"] }] }),
+            ),
+            (
+                "pre_plan",
+                json!({ "task": "edit selected target", "target_files": ["sample.py"], "target_symbols": ["selected_target"] }),
+            ),
+        ] {
+            let payload = tool_payload(&call_tool(tool, arguments, &mut index));
+            assert_eq!(
+                payload.get("semantic_engine_status"),
+                Some(&json!("disabled")),
+                "{tool} started TypeScript analysis"
+            );
+            assert_eq!(payload.get("program_build_count"), Some(&json!(0)), "{tool}");
+        }
+
+        let empty = call_tool(
+            "pre_impact",
+            json!({ "changes": [] }),
+            &mut index,
+        );
+        assert_eq!(empty.get("isError"), Some(&json!(true)));
+        assert_eq!(
+            empty.pointer("/content/0/text"),
+            Some(&json!("changes array must not be empty"))
+        );
+        drop(index);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn python_plan_recomputes_inputs_for_second_round_related_imports() {
+        let root = std::env::temp_dir().join(format!(
+            "linghun-python-second-round-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("entry.py"), "from layer1 import selected_target\n").unwrap();
+        std::fs::write(root.join("layer1.py"), "from layer2 import selected_target\n").unwrap();
+        std::fs::write(root.join("layer2.py"), "def selected_target():\n    return 1\n").unwrap();
+        let mut built = Index::new(root.clone());
+        built.build();
+        let mut index = Some(built);
+
+        let payload = tool_payload(&call_tool(
+            "pre_plan",
+            json!({
+                "task": "edit selected target",
+                "target_files": ["entry.py"],
+                "target_symbols": ["selected_target"],
+            }),
+            &mut index,
+        ));
+        assert!(payload
+            .pointer("/answer_pack/affected_files")
+            .and_then(Value::as_array)
+            .is_some_and(|files| files.contains(&json!("layer2.py"))));
+
+        drop(index);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pre_verify_rejects_outside_workspace_before_language_helpers() {
+        let root = std::env::temp_dir().join(format!(
+            "linghun-pre-verify-root-{}",
+            std::process::id()
+        ));
+        let outside = root.with_file_name(format!(
+            "linghun-pre-verify-outside-{}.ts",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&outside);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&outside, "export const outside = true;\n").unwrap();
+        let mut index = Some(Index::new(root.clone()));
+        index.as_mut().unwrap().build();
+
+        let response = call_tool(
+            "pre_verify",
+            json!({ "changed_files": [outside.to_string_lossy()] }),
+            &mut index,
+        );
+        let payload = tool_payload(&response);
+
+        assert_eq!(payload.get("status"), Some(&json!("not_covered")));
+        assert_eq!(payload.get("checked_files"), Some(&json!(0)));
+        assert_eq!(
+            payload.pointer("/verification/fully_verified"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            payload.pointer("/verification/language_results/0/reason"),
+            Some(&json!("outside_workspace"))
+        );
+        assert_eq!(
+            payload.pointer("/verification/outside_workspace_files/0"),
+            Some(&json!(outside.to_string_lossy()))
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_file(outside).unwrap();
+    }
+
+    #[test]
+    fn structural_tools_preserve_outside_only_paths_as_not_covered() {
+        for (tool, arguments) in [
+            ("pre_context", json!({ "symbol": "Button", "path": "../outside.ts" })),
+            ("pre_impact", json!({ "changes": [{ "path": "../outside.ts", "symbols": ["Button"] }] })),
+            ("pre_plan", json!({ "task": "edit Button", "target_files": ["../outside.ts"], "target_symbols": ["Button"] })),
+        ] {
+            let response = call_tool(tool, arguments, &mut tsx_fixture_index());
+            let payload = tool_payload(&response);
+            assert_eq!(payload.get("status"), Some(&json!("not_covered")), "{tool}");
+            assert_eq!(payload.get("reason"), Some(&json!("outside_workspace")), "{tool}");
+            assert_eq!(payload.pointer("/outside_workspace_files/0"), Some(&json!("../outside.ts")), "{tool}");
+            assert_eq!(payload.pointer("/not_covered_files/0"), Some(&json!("../outside.ts")), "{tool}");
+            assert!(payload.get("anchor_symbols").is_none(), "{tool} entered discovery");
+        }
+    }
+
+    #[test]
+    fn pre_plan_mixed_paths_only_plans_accepted_files() {
+        let response = call_tool(
+            "pre_plan",
+            json!({
+                "task": "edit Button",
+                "target_files": ["components.tsx", "../outside.ts"],
+                "target_symbols": ["Button"],
+            }),
+            &mut tsx_fixture_index(),
+        );
+        let payload = tool_payload(&response);
+        assert_ne!(payload.get("status"), Some(&json!("not_covered")));
+        assert_eq!(payload.pointer("/outside_workspace_files/0"), Some(&json!("../outside.ts")));
+        assert!(payload
+            .get("edit_order")
+            .and_then(Value::as_array)
+            .is_some_and(|steps| steps.iter().all(|step| {
+                step.get("file").and_then(Value::as_str) != Some("../outside.ts")
+            })));
+        assert!(payload
+            .pointer("/answer_pack/missing_evidence")
+            .and_then(Value::as_array)
+            .is_some_and(|missing| missing.contains(&json!("outside_workspace"))));
     }
 
     #[test]
@@ -5222,7 +6882,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_grouping_only_dispatches_product_grade_languages() {
+    fn registry_grouping_dispatches_product_grade_and_verify_only_languages() {
         let changed_files = vec![
             "src/component.TSX".to_string(),
             "src/types.MTS".to_string(),
@@ -5233,22 +6893,360 @@ mod tests {
 
         assert_eq!(grouped.get("TSX"), Some(&vec!["src/component.TSX".to_string()]));
         assert_eq!(grouped.get("TypeScript"), Some(&vec!["src/types.MTS".to_string()]));
-        assert!(!grouped.contains_key("SQL"));
+        assert_eq!(grouped.get("SQL"), Some(&vec!["db/query.SQL".to_string()]));
 
         let tsx_files = files_for_language(&grouped, "TSX");
         let typescript_files = files_for_language(&grouped, "TypeScript");
+        let sql_files = files_for_language(&grouped, "SQL");
         let summary = build_verification_summary(
             &changed_files,
             &[
                 VerificationLayerResult { language: "TSX", files: &tsx_files, status: "verified", reason: None, verification: None },
                 VerificationLayerResult { language: "TypeScript", files: &typescript_files, status: "verified", reason: None, verification: None },
+                VerificationLayerResult { language: "SQL", files: &sql_files, status: "tool_missing", reason: Some("sqlfluff_not_found"), verification: None },
             ],
         );
         assert_eq!(summary.get("status"), Some(&json!("partially_verified")));
         assert_eq!(
             summary.get("not_covered_files"),
-            Some(&json!(["db/query.SQL", "README.md"]))
+            Some(&json!(["README.md"]))
         );
+        assert_eq!(summary.get("missing_tools"), Some(&json!(["sqlfluff"])));
+    }
+
+    #[test]
+    fn nested_language_configs_group_files_by_the_nearest_bounded_root() {
+        let root = std::env::temp_dir().join(format!(
+            "linghun-nested-config-roots-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        for directory in [
+            "packages/a/src",
+            "packages/b/src",
+            "services/b",
+            "crates/c/src",
+        ] {
+            std::fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        for (file, content) in [
+            ("tsconfig.json", "{}"),
+            ("packages/a/tsconfig.json", "{}"),
+            ("services/b/pyrightconfig.json", "{}"),
+            ("crates/c/Cargo.toml", "[package]\nname='c'\nversion='0.1.0'"),
+        ] {
+            std::fs::write(root.join(file), content).unwrap();
+        }
+
+        let ts = group_files_by_config_root(
+            &root,
+            &["packages/a/src/a.ts".into(), "packages/b/src/b.ts".into()],
+            &["tsconfig.json"],
+        );
+        assert_eq!(ts.len(), 2);
+        assert_eq!(config_scope_name(&root, &ts[0].root), "");
+        assert_eq!(ts[0].helper_files, vec!["packages/b/src/b.ts"]);
+        assert_eq!(config_scope_name(&root, &ts[1].root), "packages/a");
+        assert_eq!(ts[1].helper_files, vec!["src/a.ts"]);
+
+        let python = group_files_by_config_root(
+            &root,
+            &["services/b/app.py".into()],
+            &["pyrightconfig.json", "pyproject.toml"],
+        );
+        assert_eq!(config_scope_name(&root, &python[0].root), "services/b");
+        assert_eq!(python[0].helper_files, vec!["app.py"]);
+
+        let rust = group_files_by_config_root(
+            &root,
+            &["crates/c/src/lib.rs".into()],
+            &["Cargo.toml", "rust-project.json"],
+        );
+        assert_eq!(config_scope_name(&root, &rust[0].root), "crates/c");
+        assert_eq!(rust[0].helper_files, vec!["src/lib.rs"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scoped_paths_normalize_workspace_bounded_parent_segments() {
+        assert_eq!(
+            scoped_path("packages/a", "../shared.ts"),
+            Some("packages/shared.ts".to_string())
+        );
+        assert_eq!(
+            scoped_path("packages/a", "../../shared.ts"),
+            Some("shared.ts".to_string())
+        );
+        assert_eq!(scoped_path("packages/a", "../../../outside.ts"), None);
+    }
+
+    #[test]
+    fn scoped_paths_reject_absolute_unc_and_drive_paths_before_rebasing() {
+        for path in [
+            "/etc/passwd",
+            "//server/share/file.ts",
+            r"\\server\share\file.ts",
+            "C:/outside/file.ts",
+            r"C:\outside\file.ts",
+            "C:relative-drive.ts",
+            r"\\?\C:\outside\file.ts",
+        ] {
+            assert_eq!(scoped_path("packages/a", path), None, "accepted {path}");
+        }
+    }
+
+    #[test]
+    fn scoped_helper_refresh_only_returns_workspace_and_scope_accepted_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "linghun-scoped-helper-refresh-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("packages/a/src")).unwrap();
+        std::fs::write(root.join("packages/a/src/value.py"), "value = 1\n").unwrap();
+        std::fs::write(root.join("packages/shared.py"), "shared = 1\n").unwrap();
+        let mut idx = Index::new(root.clone());
+        let mut outside = Vec::new();
+
+        let accepted = refresh_scoped_helper_paths(
+            &mut idx,
+            "packages/a",
+            &[
+                "src/value.py".to_string(),
+                "../shared.py".to_string(),
+                "../../../outside.py".to_string(),
+                "C:/outside.py".to_string(),
+            ],
+            &mut outside,
+        );
+
+        assert_eq!(accepted, vec!["../shared.py", "src/value.py"]);
+        assert!(!outside.contains(&"packages/shared.py".to_string()));
+        assert!(outside.contains(&"../../../outside.py".to_string()));
+        assert!(outside.contains(&"C:/outside.py".to_string()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scoped_structure_retains_rejected_final_round_paths_as_not_covered() {
+        let root = std::env::temp_dir().join(format!(
+            "linghun-scoped-final-rejected-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("packages/a/src")).unwrap();
+        std::fs::write(root.join("packages/a/src/value.py"), "value = 1\n").unwrap();
+        let mut idx = Index::new(root.clone());
+        let mut relations = ts_deep_layer::SymbolRelations::default();
+        relations.related_files = vec![
+            "src/value.py".to_string(),
+            "../../../outside.py".to_string(),
+        ];
+        let mut result = ts_deep_layer::StructureResult {
+            relations: HashMap::from([("value".to_string(), relations)]),
+            module_dependencies: HashMap::new(),
+            status: "verified",
+            reason: None,
+            program_build_count: 1,
+            program_rebuilt: false,
+            snapshot_id: "snapshot".to_string(),
+            elapsed_ms: 1,
+        };
+        let mut outside = Vec::new();
+
+        retain_scoped_structure_paths(
+            &mut idx,
+            "packages/a",
+            &mut result,
+            &mut outside,
+        );
+
+        assert_eq!(result.relations["value"].related_files, vec!["src/value.py"]);
+        assert!(result.relations["value"].graph_truncated);
+        assert!(outside.contains(&"../../../outside.py".to_string()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scoped_snapshot_tracks_source_and_config_content_deterministically() {
+        let root = std::env::temp_dir().join(format!(
+            "linghun-scoped-snapshot-{}",
+            std::process::id()
+        ));
+        let scope_root = root.join("packages/a");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(scope_root.join("src")).unwrap();
+        std::fs::write(scope_root.join("tsconfig.json"), "{}").unwrap();
+        std::fs::write(scope_root.join("src/value.ts"), "export const value = 1;\n").unwrap();
+        let files = vec!["src/value.ts".to_string()];
+
+        let first = scoped_snapshot_id(
+            &root,
+            &scope_root,
+            &files,
+            &["tsconfig.json"],
+            "1",
+        );
+        assert_eq!(
+            first,
+            scoped_snapshot_id(&root, &scope_root, &files, &["tsconfig.json"], "1")
+        );
+        assert_eq!(
+            first,
+            scoped_snapshot_id(&root, &scope_root, &files, &["tsconfig.json"], "999")
+        );
+        std::fs::write(scope_root.join("src/value.ts"), "export const value = 2;\n").unwrap();
+        let source_changed = scoped_snapshot_id(
+            &root,
+            &scope_root,
+            &files,
+            &["tsconfig.json"],
+            "1",
+        );
+        assert_ne!(first, source_changed);
+        std::fs::write(scope_root.join("tsconfig.json"), r#"{"compilerOptions":{"strict":true}}"#).unwrap();
+        let config_changed = scoped_snapshot_id(
+            &root,
+            &scope_root,
+            &files,
+            &["tsconfig.json"],
+            "1",
+        );
+        assert_ne!(source_changed, config_changed);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nested_language_structure_results_rebase_and_merge_deterministically() {
+        fn scoped_result(file: &str, status: &'static str) -> ts_deep_layer::StructureResult {
+            let mut relations = ts_deep_layer::SymbolRelations::default();
+            relations.targets.push(ts_deep_layer::SymbolTarget {
+                file: file.to_string(),
+                name: "Shared".to_string(),
+                line: 1,
+                character: 0,
+                end_line: 1,
+                end_character: 6,
+            });
+            relations.related_files.push("src/dependency.ts".to_string());
+            ts_deep_layer::StructureResult {
+                relations: HashMap::from([("Shared".to_string(), relations)]),
+                module_dependencies: HashMap::from([(
+                    file.to_string(),
+                    vec!["src/dependency.ts".to_string()],
+                )]),
+                status,
+                reason: (status != "verified").then(|| "types unavailable".to_string()),
+                program_build_count: 1,
+                program_rebuilt: false,
+                snapshot_id: file.to_string(),
+                elapsed_ms: 1,
+            }
+        }
+
+        let result = aggregate_scoped_structure_results(vec![
+            ("packages/b".to_string(), scoped_result("src/shared.ts", "fallback_used")),
+            ("packages/a".to_string(), scoped_result("src/shared.ts", "verified")),
+        ]);
+        let repeated = aggregate_scoped_structure_results(vec![
+            ("packages/a".to_string(), scoped_result("src/shared.ts", "verified")),
+            ("packages/b".to_string(), scoped_result("src/shared.ts", "fallback_used")),
+        ]);
+
+        assert_eq!(result.status, "partially_verified");
+        assert_eq!(
+            result.module_dependencies.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "packages/a/src/shared.ts".to_string(),
+                "packages/b/src/shared.ts".to_string(),
+            ])
+        );
+        let targets = &result.relations["Shared"].targets;
+        assert_eq!(targets[0].file, "packages/a/src/shared.ts");
+        assert_eq!(targets[1].file, "packages/b/src/shared.ts");
+        assert_eq!(result.snapshot_id, repeated.snapshot_id);
+        assert!(result.snapshot_id.starts_with("scoped:packages/a="));
+        assert!(result.snapshot_id.contains("|packages/b="));
+    }
+
+    #[test]
+    fn nested_language_pre_context_keeps_workspace_relative_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "linghun-nested-context-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("packages/a/src")).unwrap();
+        std::fs::write(
+            root.join("packages/a/tsconfig.json"),
+            r#"{"compilerOptions":{"strict":true},"include":["src/**/*.ts"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("packages/a/src/shared.ts"),
+            "export function nestedTarget(): number { return 1; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("packages/a/src/consumer.ts"),
+            "import { nestedTarget } from './shared';\nexport const value = nestedTarget();\n",
+        )
+        .unwrap();
+        let mut built = Index::new(root.clone());
+        built.build();
+        let mut index = Some(built);
+
+        let response = call_tool(
+            "pre_context",
+            json!({ "symbol": "nestedTarget", "path": "packages/a/src/shared.ts" }),
+            &mut index,
+        );
+        let payload = tool_payload(&response);
+        assert!(payload
+            .pointer("/definition/file")
+            .and_then(Value::as_str)
+            .unwrap()
+            .replace('\\', "/")
+            .ends_with("/packages/a/src/shared.ts"));
+        let payload_text = serde_json::to_string(&payload).unwrap();
+        assert!(!payload_text.contains("\"file\":\"src/shared.ts\""));
+        assert!(!payload_text.contains("\"file\":\"src/consumer.ts\""));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nested_language_status_is_conservative_across_scopes() {
+        let result = aggregate_scoped_language_results(vec![
+            ScopedLanguageResult {
+                scope: "packages/a".into(),
+                files: vec!["packages/a/src/a.ts".into()],
+                status: "verified",
+                reason: None,
+                verification: json!({ "coverage": ["syntax", "types"], "missing": [] }),
+                program_build_count: 1,
+                program_rebuilt: false,
+                snapshot_id: "1".into(),
+                elapsed_ms: 2,
+            },
+            ScopedLanguageResult {
+                scope: "packages/b".into(),
+                files: vec!["packages/b/src/b.ts".into()],
+                status: "fallback_used",
+                reason: Some("typescript unavailable".into()),
+                verification: json!({ "coverage": ["syntax"], "missing": ["types"] }),
+                program_build_count: 0,
+                program_rebuilt: true,
+                snapshot_id: "0".into(),
+                elapsed_ms: 3,
+            },
+        ]);
+
+        assert_eq!(result.status, "partially_verified");
+        assert_eq!(result.verification["coverage"], json!(["syntax"]));
+        assert_eq!(result.verification["missing"], json!(["types"]));
+        assert_eq!(result.verification["scopes"].as_array().map(Vec::len), Some(2));
+        assert_eq!(result.snapshot_id, "scoped:packages/a=1|packages/b=0");
+        assert!(result.program_rebuilt);
     }
 
     #[test]

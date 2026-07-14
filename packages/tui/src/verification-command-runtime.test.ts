@@ -1145,21 +1145,65 @@ describe("verification-command-runtime", () => {
     );
 
     expect(result.outcome).toBe("cancelled");
+    expect(result).not.toHaveProperty("exitCode");
     expect(await readdir(projectPath)).not.toContain("should-not-exist.txt");
+  });
+
+  it("does not synthesize an exit code and confirms timeout process termination", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-timeout-stop-"));
+    const result = await runVerificationCommand(
+      'node -e "setTimeout(()=>require(\'fs\').writeFileSync(\'timeout-sentinel.txt\',\'late\'),1500)"',
+      projectPath,
+      undefined,
+      25,
+    );
+
+    expect(result.outcome).toBe("timeout");
+    expect(result).not.toHaveProperty("exitCode");
+    await new Promise((resolve) => setTimeout(resolve, 1_700));
+    expect(await readdir(projectPath)).not.toContain("timeout-sentinel.txt");
+  });
+
+  it("does not synthesize an exit code and confirms cancelled process termination", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-cancel-stop-"));
+    const controller = new AbortController();
+    const running = runVerificationCommand(
+      'node -e "setTimeout(()=>require(\'fs\').writeFileSync(\'cancel-sentinel.txt\',\'late\'),1500)"',
+      projectPath,
+      controller.signal,
+    );
+    setTimeout(() => controller.abort(), 25);
+    const result = await running;
+
+    expect(result.outcome).toBe("cancelled");
+    expect(result).not.toHaveProperty("exitCode");
+    await new Promise((resolve) => setTimeout(resolve, 1_700));
+    expect(await readdir(projectPath)).not.toContain("cancel-sentinel.txt");
   });
 
   it("discards PASS when owner cancellation wins the verification_end commit", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-pass-commit-abort-"));
     const context = await createRunnableVerificationContext(projectPath);
     const ownerController = new AbortController();
-    const events: Array<{ type?: string; report?: VerificationReport }> = [];
+    const events: Array<{
+      type?: string;
+      report?: VerificationReport;
+      task?: { result?: string };
+    }> = [];
     context.store = {
       appendEvent: vi.fn(
         async (
           _sessionId: string,
-          event: { type?: string; report?: VerificationReport },
+          event: {
+            type?: string;
+            report?: VerificationReport;
+            task?: { result?: string };
+          },
           commitGuard?: () => boolean,
         ) => {
+          if (event.type === "background_task_update" && event.task?.result === "pass") {
+            ownerController.abort();
+          }
           if (event.type === "verification_end" && event.report?.status === "pass") {
             ownerController.abort();
           }
@@ -1173,7 +1217,17 @@ describe("verification-command-runtime", () => {
       context,
       "session-pass-race",
       new MockWritable(),
-      async () => {},
+      async (targetContext, targetSessionId, task, commitGuard) => {
+        await targetContext.store.appendEvent(
+          targetSessionId,
+          {
+            type: "background_task_update",
+            task,
+            createdAt: new Date().toISOString(),
+          },
+          commitGuard,
+        );
+      },
       { ownerSignal: ownerController.signal, requestTurnId: "request-pass-race" },
     );
 
@@ -1182,6 +1236,11 @@ describe("verification-command-runtime", () => {
       .toBe(false);
     expect(events.some((event) => event.type === "verification_end" && event.report?.status === "cancelled"))
       .toBe(true);
+    expect(
+      events.some(
+        (event) => event.type === "background_task_update" && event.task?.result === "pass",
+      ),
+    ).toBe(false);
   }, 30_000);
 
   it("finalizes the task when verification persistence throws", async () => {

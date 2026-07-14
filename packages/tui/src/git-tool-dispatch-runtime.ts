@@ -1192,6 +1192,12 @@ export type WorktreeRemoveResolveDeps = GitToolDispatchDeps & {
     context: TuiContext,
     output: Writable,
   ) => Promise<void>;
+  recordSuccessfulToolExecutionProgress?: (
+    continuation: PendingModelContinuation,
+    toolCall: Pick<ModelToolCall, "name" | "input">,
+    result: { ok: boolean; tool: string; text: string; evidenceId?: string },
+    context: TuiContext,
+  ) => boolean;
 };
 
 const MANAGED_WORKTREE_REMOVE_TOOL = "ManagedWorktreeRemove";
@@ -1218,6 +1224,17 @@ export async function resolveWorktreeRemoveApprove(
   if (commitGuard && !commitGuard()) return;
   deps.writeLine(output, result.text);
   if (approval.continuation && approval.toolCall) {
+    deps.recordSuccessfulToolExecutionProgress?.(
+      approval.continuation,
+      approval.toolCall,
+      {
+        ok: result.ok,
+        tool: MANAGED_WORKTREE_REMOVE_TOOL,
+        text: result.text,
+        evidenceId: result.evidenceId,
+      },
+      context,
+    );
     approval.continuation.messages.push({
       role: "tool",
       tool_call_id: approval.toolCall.id,
@@ -1322,6 +1339,17 @@ export async function resolveStablePointApprove(
   if (commitGuard && !commitGuard()) return;
   deps.writeLine(output, result.text);
   if (approval.continuation) {
+    deps.recordSuccessfulToolExecutionProgress?.(
+      approval.continuation,
+      approval.toolCall,
+      {
+        ok: result.ok,
+        tool: GIT_STABLE_POINT_CREATE,
+        text: result.text,
+        evidenceId: result.evidenceId,
+      },
+      context,
+    );
     approval.continuation.messages.push({
       role: "tool",
       tool_call_id: approval.toolCall.id,

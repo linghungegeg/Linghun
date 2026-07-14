@@ -313,6 +313,35 @@ describe("tool-output-presenter", () => {
       expect(text).toContain("2");
     });
 
+    it("Bash 显式语义成功不被非零兼容退出码误判", () => {
+      const structured = createStructuredToolOutput(
+        "Bash",
+        { text: "semantic success", data: { exitCode: 1, isError: false } },
+        "zh-CN",
+      );
+
+      expect(structured.block.kind).toBe("tool_result_success");
+      expect(structured.block.title).toContain("✓");
+      expect(structured.text).not.toContain("退出码 1");
+      expect(structured.text).not.toContain("✗");
+    });
+
+    it.each([
+      ["timeout", "已超时", "命令超时"],
+      ["cancelled", "已取消", "命令已取消"],
+    ] as const)("Bash outcome=%s 优先于兼容 exitCode", (outcome, lead, end) => {
+      const structured = createStructuredToolOutput(
+        "Bash",
+        { text: "stopped", data: { outcome, exitCode: 1 } },
+        "zh-CN",
+      );
+
+      expect(structured.block.kind).toBe("tool_result_error");
+      expect(structured.block.title).toContain(lead);
+      expect(structured.text).toContain(end);
+      expect(structured.text).not.toContain("退出 1");
+    });
+
     it("Bash diagnostics 会出现在模型工具结果文本里", () => {
       const text = formatToolOutput(
         "Bash",

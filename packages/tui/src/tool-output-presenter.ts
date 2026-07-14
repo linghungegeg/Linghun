@@ -1,5 +1,6 @@
 import type { Language } from "@linghun/shared";
 import type { ToolName, ToolOutput } from "@linghun/tools";
+import { isToolOutputFailure } from "./evidence-runtime.js";
 import type { DisplayBlock } from "./shell/types.js";
 import {
   normalizeVisibleToolText,
@@ -140,7 +141,7 @@ export function createStructuredToolOutput(
   }
   const body = bodyLines.join("\n");
   const text = [lead, body].filter(Boolean).join("\n");
-  const isError = isToolOutputError(output);
+  const isError = isToolOutputFailure(name, output);
   return {
     layered,
     block: {
@@ -205,7 +206,7 @@ function formatPrimaryToolLead(
   language: Language,
 ): string {
   const metadata = output.data && typeof output.data === "object" ? output.data : undefined;
-  if ((name === "WebSearch" || name === "WebFetch") && isToolOutputError(output)) {
+  if ((name === "WebSearch" || name === "WebFetch") && isToolOutputFailure(name, output)) {
     return formatWebFailureLead(name, metadata, language);
   }
   const count = readNumber(metadata, "count");
@@ -242,7 +243,7 @@ function formatPrimaryToolLead(
     }
     if (name === "ReadSnippets") return `ReadSnippets **${count ?? visibleLines}** ranges.`;
     if (name === "SourcePack") return `SourcePack **${count ?? visibleLines}** snippets.`;
-    if (name === "Bash") return formatBashLead(metadata, language);
+    if (name === "Bash") return formatBashLead(output, language);
     // Phase 17: WebSearch / WebFetch dedicated format.
     if (name === "WebSearch") return formatWebSearchLead(output, language);
     if (name === "WebFetch") return formatWebFetchLead(output, language);
@@ -260,7 +261,7 @@ function formatPrimaryToolLead(
   }
   if (name === "ReadSnippets") return `ReadSnippets **${count ?? visibleLines}** 个范围`;
   if (name === "SourcePack") return `SourcePack **${count ?? visibleLines}** 个片段`;
-  if (name === "Bash") return formatBashLead(metadata, language);
+  if (name === "Bash") return formatBashLead(output, language);
   // Phase 17: WebSearch / WebFetch dedicated format.
   if (name === "WebSearch") return formatWebSearchLead(output, language);
   if (name === "WebFetch") return formatWebFetchLead(output, language);
@@ -268,21 +269,6 @@ function formatPrimaryToolLead(
   const zhStructured = tryExtractLeadText(output.text);
   if (zhStructured) return `${name}：${zhStructured}`;
   return `${name} 摘要：${layered.summary}`;
-}
-
-function isToolOutputError(output: ToolOutput): boolean {
-  const metadata = output.data && typeof output.data === "object" ? output.data : undefined;
-  const explicitError =
-    metadata && typeof (metadata as Record<string, unknown>).isError === "boolean"
-      ? (metadata as Record<string, unknown>).isError
-      : undefined;
-  if (explicitError === true) return true;
-  const exitCode = readNumber(metadata, "exitCode");
-  if (exitCode !== undefined) return exitCode !== 0;
-  const ok = metadata && typeof (metadata as Record<string, unknown>).ok === "boolean"
-    ? (metadata as Record<string, unknown>).ok
-    : undefined;
-  return ok === false;
 }
 
 function formatWebFailureLead(
@@ -309,15 +295,24 @@ function lineCount(value: string): number {
  * Bash lead line: short command summary + exit status indicator.
  * Success: "Bash(git status) ✓"  Failure: "Bash(npm test) ✗ exit 1"
  */
-function formatBashLead(metadata: object | undefined, language: Language): string {
+function formatBashLead(output: ToolOutput, language: Language): string {
+  const metadata = output.data && typeof output.data === "object" ? output.data : undefined;
   const command = readStringValue(metadata, "command") ?? "";
   const exitCode = readNumber(metadata, "exitCode");
+  const outcome = readBashOutcome(metadata);
+  const failed = isToolOutputFailure("Bash", output);
   const shortCmd = command.length > 60 ? `${command.slice(0, 57)}...` : command;
   const cmdPart = shortCmd ? `Bash(${shortCmd})` : "Bash";
+  if (outcome === "timeout") {
+    return language === "en-US" ? `${cmdPart} timed out` : `${cmdPart} 已超时`;
+  }
+  if (outcome === "cancelled") {
+    return language === "en-US" ? `${cmdPart} cancelled` : `${cmdPart} 已取消`;
+  }
   if (exitCode === undefined) {
     return cmdPart;
   }
-  if (exitCode === 0) {
+  if (!failed) {
     return `${cmdPart} ✓`;
   }
   return language === "en-US" ? `${cmdPart} ✗ exit ${exitCode}` : `${cmdPart} ✗ 退出 ${exitCode}`;
@@ -334,10 +329,20 @@ function formatBashEndSummary(
       ? (output.data as Record<string, unknown>)
       : undefined;
   const exitCode = data && typeof data.exitCode === "number" ? data.exitCode : undefined;
+  const outcome = readBashOutcome(data);
+  if (outcome === "timeout") return language === "en-US" ? "Timed out" : "命令超时";
+  if (outcome === "cancelled") return language === "en-US" ? "Cancelled" : "命令已取消";
   if (exitCode === undefined) return undefined;
   // 退出码已在 lead 中显示；end summary 只在失败时补充一行用于醒目提示
-  if (exitCode === 0) return undefined;
+  if (!isToolOutputFailure(name, output)) return undefined;
   return language === "en-US" ? `Exit code ${exitCode}` : `退出码 ${exitCode}`;
+}
+
+function readBashOutcome(metadata: object | undefined): "completed" | "timeout" | "cancelled" | undefined {
+  const outcome = metadata && (metadata as Record<string, unknown>).outcome;
+  return outcome === "completed" || outcome === "timeout" || outcome === "cancelled"
+    ? outcome
+    : undefined;
 }
 
 /**

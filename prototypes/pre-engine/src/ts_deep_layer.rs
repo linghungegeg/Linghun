@@ -409,24 +409,29 @@ impl Drop for DeepLayer {
     }
 }
 
-pub fn run(deep: &mut Option<DeepLayer>, root: &Path, files: &[String]) -> DeepLayerResult {
-    // lazy init
-    if deep.is_none() {
-        match DeepLayer::try_init(root) {
-            Ok(d) => *deep = Some(d),
-            Err(reason) => {
-                return unavailable_result(
-                    root,
-                    "tool_missing",
-                    format!("TypeScript tool_missing: {reason}"),
-                    "typescript_deep_layer",
-                );
-            }
-        }
+fn ensure_layer<'a>(deep: &'a mut Option<DeepLayer>, root: &Path) -> Result<&'a mut DeepLayer, String> {
+    if deep.as_ref().is_some_and(|layer| layer.root != root) {
+        *deep = None;
     }
+    if deep.is_none() {
+        *deep = Some(DeepLayer::try_init(root)?);
+    }
+    Ok(deep.as_mut().unwrap())
+}
 
-    let d = deep.as_mut().unwrap();
-    match d.query(files) {
+pub fn run(deep: &mut Option<DeepLayer>, root: &Path, files: &[String]) -> DeepLayerResult {
+    let layer = match ensure_layer(deep, root) {
+        Ok(layer) => layer,
+        Err(reason) => {
+            return unavailable_result(
+                root,
+                "tool_missing",
+                format!("TypeScript tool_missing: {reason}"),
+                "typescript_deep_layer",
+            );
+        }
+    };
+    match layer.query(files) {
         Ok(result) => result,
         Err(reason) => {
             // process died; clear so next call can re-init
@@ -442,13 +447,10 @@ pub fn run(deep: &mut Option<DeepLayer>, root: &Path, files: &[String]) -> DeepL
 }
 
 pub fn prepare(deep: &mut Option<DeepLayer>, root: &Path, files: &[String]) {
-    if deep.is_none() {
-        match DeepLayer::try_init(root) {
-            Ok(layer) => *deep = Some(layer),
-            Err(_) => return,
-        }
-    }
-    if deep.as_mut().unwrap().query_prepare(files).is_err() {
+    let Ok(layer) = ensure_layer(deep, root) else {
+        return;
+    };
+    if layer.query_prepare(files).is_err() {
         *deep = None;
     }
 }
@@ -460,20 +462,17 @@ pub fn run_structure(
     symbols: &[String],
     preferred_files: &[String],
 ) -> StructureResult {
-    if deep.is_none() {
-        match DeepLayer::try_init(root) {
-            Ok(layer) => *deep = Some(layer),
-            Err(reason) => {
-                return unavailable_structure_result(
-                    symbols,
-                    "tool_missing",
-                    format!("TypeScript tool_missing: {reason}; missing=typescript_deep_layer"),
-                );
-            }
+    let layer = match ensure_layer(deep, root) {
+        Ok(layer) => layer,
+        Err(reason) => {
+            return unavailable_structure_result(
+                symbols,
+                "tool_missing",
+                format!("TypeScript tool_missing: {reason}; missing=typescript_deep_layer"),
+            );
         }
-    }
-
-    match deep.as_mut().unwrap().query_structure(files, symbols, preferred_files) {
+    };
+    match layer.query_structure(files, symbols, preferred_files) {
         Ok(result) => result,
         Err(reason) => {
             *deep = None;
@@ -484,6 +483,14 @@ pub fn run_structure(
             )
         }
     }
+}
+
+pub fn disabled_structure(symbols: &[String]) -> StructureResult {
+    unavailable_structure_result(
+        symbols,
+        "disabled",
+        "no TypeScript files selected".to_string(),
+    )
 }
 
 fn unavailable_structure_result(

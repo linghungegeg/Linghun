@@ -9,6 +9,7 @@ import {
   transcriptSourceKindForBlock,
   transcriptSourceRawTextForBlock,
   transcriptSourceToBlocks,
+  TRANSCRIPT_SOURCE_RECENT_CELL_LIMIT,
   upsertTranscriptSourceCell,
 } from "./transcript-source.js";
 
@@ -269,5 +270,41 @@ describe("transcript source", () => {
     expect(transcriptSourceKindForBlock(command)).toBe("command");
     expect(transcriptSourceKindForBlock(compactBoundary)).toBe("compact_boundary");
     expect(transcriptSourceKindForBlock(permission)).toBeUndefined();
+  });
+
+  it("keeps 2000 terminal-first cells bounded around the latest compact boundary", () => {
+    const source = createTranscriptSource();
+    const append = (id: string, kind: "assistant" | "compact_boundary") => {
+      appendTranscriptSourceCell(source, {
+        id,
+        kind,
+        block: {
+          id,
+          kind: "details",
+          status: "info",
+          title: kind === "compact_boundary" ? "compact" : "",
+          summary: id,
+          fullText: id,
+          messageKind: kind === "compact_boundary" ? "compact_boundary" : "assistant_text",
+        },
+      });
+    };
+
+    append("expanded-cell", "assistant");
+    source.retainedCellId = "expanded-cell";
+    append("compact-boundary", "compact_boundary");
+    for (let index = 0; index < 2_000; index += 1) {
+      append(`assistant-${index}`, "assistant");
+    }
+
+    expect(source.cells).toHaveLength(TRANSCRIPT_SOURCE_RECENT_CELL_LIMIT + 2);
+    expect(source.cells.map((cell) => cell.id)).toEqual([
+      "expanded-cell",
+      "compact-boundary",
+      ...Array.from(
+        { length: TRANSCRIPT_SOURCE_RECENT_CELL_LIMIT },
+        (_, index) => `assistant-${2_000 - TRANSCRIPT_SOURCE_RECENT_CELL_LIMIT + index}`,
+      ),
+    ]);
   });
 });

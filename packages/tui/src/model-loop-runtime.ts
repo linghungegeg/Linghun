@@ -25,6 +25,7 @@ import type { ModelToolDefinition } from "@linghun/providers";
 import type { Language } from "@linghun/shared";
 import { type ToolName, builtInTools } from "@linghun/tools";
 
+import { parseCompoundCommand } from "./bash-subcommand-parser.js";
 import { stableHash } from "./cache-freshness.js";
 import { createGitToolDefinitions } from "./git-tool-runtime.js";
 import { createIndexToolDefinitions } from "./index-tool-runtime.js";
@@ -262,7 +263,7 @@ export const RUN_VERIFICATION_TOOL_NAME = "RunVerification" as const;
 export const WRITE_REPORT_TOOL_NAME = "WriteReport" as const;
 
 export const SEARCH_EXTRA_TOOLS_DESCRIPTION =
-  "Discover deferred tools provided by enabled MCP servers, trusted skills, trusted plugins, codebase-memory, and pre-engine repository analysis. Use this before broad manual exploration when a task needs repository code understanding, impact analysis, edit planning, or quick verification. When a codebase-memory index is ready, prefer index-backed search/graph/architecture tools for broad repository discovery, then use pre-engine for AST precision; when the index is missing or stale, use pre-engine as the fast repository-analysis entry. Returns name/kind/description/requiredArgs/executable/reason for each match. Pass a free-text query to filter; pass empty string to list all. Use ExecuteExtraTool to actually invoke a discovered tool.";
+  "Discover deferred tools provided by enabled MCP servers, trusted skills, trusted plugins, and codebase-memory. First-class tools, including pre-engine repository analysis, are already present in the provider tool list and must be called directly. Returns name/kind/description/requiredArgs/executable/reason for each match. Pass a free-text query to filter; pass empty string to list all. Use ExecuteExtraTool to invoke a discovered deferred tool.";
 
 export const EXECUTE_EXTRA_TOOL_DESCRIPTION =
   "Invoke a deferred tool that was previously returned by SearchExtraTools with executable=true. Built-in tools (Read/ReadSnippets/SourcePack/Edit/Write/Bash/Grep/Glob/Todo) MUST be called directly, not via this wrapper. tool_name must match a discovered tool exactly; params must include all required args.";
@@ -699,27 +700,11 @@ function createBuiltInToolIdentityDefinition(definition: ModelToolDefinition): M
   };
 }
 
-export type CreateModelToolDefinitionsForReportGuardOptions = {
-  excludePreEngineTools?: boolean;
-  excludeDeferredToolDispatch?: boolean;
-};
-
 export function createModelToolDefinitionsForReportGuard(
   guard: ReportWriteGuard | undefined,
-  options: CreateModelToolDefinitionsForReportGuardOptions = {},
 ): ModelToolDefinition[] {
   void guard;
-  const definitions = createModelToolDefinitions();
-  return definitions.filter((definition) => {
-    if (options.excludePreEngineTools && isPreEngineToolName(definition.name)) return false;
-    if (
-      options.excludeDeferredToolDispatch &&
-      (definition.name === SEARCH_EXTRA_TOOLS_NAME || definition.name === EXECUTE_EXTRA_TOOL_NAME)
-    ) {
-      return false;
-    }
-    return true;
-  });
+  return createModelToolDefinitions();
 }
 
 // ---------------------------------------------------------------------------
@@ -1396,7 +1381,7 @@ export function evidenceSupportsLocalCodeFact(record: EvidenceRecord): boolean {
     return true;
   }
   const tokens = evidenceTokens(record);
-  return /(?:local_read|grep_match|file:|git_local_fact|git_status)/iu.test(tokens);
+  return /(?:git_local_fact|git_status)/iu.test(tokens);
 }
 
 function evidenceSupportsExternalCurrent(record: EvidenceRecord): boolean {
@@ -2217,6 +2202,135 @@ function stripDeferredInternalTokens(text: string): string {
 // \u65e7 recordToolEvidence \u4ec5\u5199 [name]\uff0c\u5bfc\u81f4\u4efb\u4f55\u5de5\u5177\u8c03\u7528\u90fd\u88ab\u5f53\u6210\u4e07\u80fd\u8bc1\u636e\u3002
 // \u65b0\u7248\u6309 \u5de5\u5177 + \u547d\u4ee4\u6587\u672c + exit code \u6d3e\u751f\u5177\u4f53 claim \u7c7b\u578b\u3002
 
+type ParsedShellInvocation = {
+  executable: string;
+  args: string[];
+  manager?: "pnpm" | "npm" | "yarn" | "bun";
+  script?: string;
+};
+
+function parseShellInvocations(command: string): ParsedShellInvocation[] {
+  const segments = parseCompoundCommand(command);
+  const commandWithoutFdMerges = command.replace(/\d*>\s*&\s*\d+/gu, "");
+  if (
+    segments.length !== 1 ||
+    segments[0]?.operator !== null ||
+    /[\r\n&]/u.test(commandWithoutFdMerges)
+  ) {
+    return [];
+  }
+  return segments.flatMap((segment) => {
+    const tokens = segment.command
+      .trim()
+      .split(/\s+/u)
+      .filter(Boolean)
+      .map((token) => token.toLowerCase());
+    let index = 0;
+    if (tokens[index] === "corepack") index += 1;
+    const managerToken = normalizeShellExecutable(tokens[index]);
+    if (/^(?:pnpm|npm|yarn|bun)$/u.test(managerToken ?? "")) {
+      const manager = managerToken as "pnpm" | "npm" | "yarn" | "bun";
+      index += 1;
+      while (index < tokens.length) {
+        const token = tokens[index]!;
+        if (token === "run" || token === "run-script") {
+          index += 1;
+          while (index < tokens.length) {
+            const option = tokens[index]!;
+            if (/^--(?:dir|prefix|filter|workspace|cwd)=\S+/u.test(option)) {
+              index += 1;
+              continue;
+            }
+            if (/^(?:--dir|--prefix|--filter|--workspace|--cwd|-c|-f)$/u.test(option)) {
+              index += 2;
+              continue;
+            }
+            if (manager !== "pnpm" && option === "-w") {
+              index += 2;
+              continue;
+            }
+            if (
+              /^(?:--if-present|--ignore-scripts|--foreground-scripts|--workspaces|--recursive|--silent|-r|-s)$/u.test(
+                option,
+              ) ||
+              (manager === "pnpm" && /^(?:--workspace-root|-w)$/u.test(option))
+            ) {
+              index += 1;
+              continue;
+            }
+            break;
+          }
+          const script = tokens[index];
+          return script ? [{ executable: manager, args: tokens.slice(index + 1), manager, script }] : [];
+        }
+        if (manager === "yarn" && token === "workspace") {
+          index += 2;
+          if (tokens[index] === "run") index += 1;
+          const script = tokens[index];
+          return script ? [{ executable: manager, args: tokens.slice(index + 1), manager, script }] : [];
+        }
+        if (token === "exec" || token === "dlx") {
+          index += 1;
+          while (tokens[index] === "--") index += 1;
+          const executable = normalizeShellExecutable(tokens[index]);
+          return executable ? [{ executable, args: tokens.slice(index + 1) }] : [];
+        }
+        if (/^--(?:dir|prefix|filter|workspace|cwd)=\S+/u.test(token)) {
+          index += 1;
+          continue;
+        }
+        if (manager === "pnpm" && /^(?:--workspace-root|-w)$/u.test(token)) {
+          index += 1;
+          continue;
+        }
+        if (/^(?:--dir|--prefix|--filter|--workspace|--cwd|-c|-f)$/u.test(token)) {
+          index += 2;
+          continue;
+        }
+        if (manager !== "pnpm" && token === "-w") {
+          index += 2;
+          continue;
+        }
+        if (/^(?:--if-present|--recursive|--silent|-r|-s)$/u.test(token)) {
+          index += 1;
+          continue;
+        }
+        if (token.startsWith("-")) return [];
+        return [{ executable: manager, args: tokens.slice(index + 1), manager, script: token }];
+      }
+      return [];
+    }
+    if (tokens[index] === "npx") {
+      index += 1;
+      while (/^(?:--yes|-y)$/u.test(tokens[index] ?? "")) index += 1;
+    }
+    const executable = normalizeShellExecutable(tokens[index]);
+    return executable ? [{ executable, args: tokens.slice(index + 1) }] : [];
+  });
+}
+
+function normalizeShellExecutable(token: string | undefined): string | undefined {
+  if (!token) return undefined;
+  return token.replace(/^.*[\\/]/u, "").replace(/\.(?:cmd|exe|ps1)$/u, "");
+}
+
+function invocationOnlyInspects(
+  invocation: ParsedShellInvocation,
+  kind: "test" | "typecheck" | "build" | "lint" | "smoke",
+): boolean {
+  const args = new Set(invocation.args);
+  if (args.has("--help") || args.has("-h") || args.has("--version")) return true;
+  if (kind === "test") {
+    return ["list", "--collect-only", "--co", "--list", "-list", "--listtests", "--list-tests", "--no-run"].some(
+      (flag) => args.has(flag),
+    );
+  }
+  if (kind === "typecheck") {
+    return args.has("-v") || args.has("--showconfig") || args.has("--init");
+  }
+  return kind === "build" && (args.has("-n") || args.has("--dry-run"));
+}
+
 export function deriveToolSupportsClaims(
   name: ToolName,
   input: unknown,
@@ -2263,7 +2377,12 @@ export function deriveToolSupportsClaims(
   if (name === "Bash") {
     const command = typeof inputObj.command === "string" ? inputObj.command : "";
     claims.add("command_ran");
-    const dataExit = (output.data as { exitCode?: unknown } | undefined)?.exitCode;
+    const bashData = output.data as { exitCode?: unknown; outcome?: unknown } | undefined;
+    const outcome = bashData?.outcome;
+    if (outcome === "timeout") claims.add("bash_outcome_timeout");
+    if (outcome === "cancelled") claims.add("bash_outcome_cancelled");
+    if (outcome === "completed") claims.add("bash_outcome_completed");
+    const dataExit = bashData?.exitCode;
     const textExit = /(?:^|\s)exit\s*code\s*(-?\d+)(?:\s|$)/iu.exec(output.text ?? "");
     const exitCode =
       typeof dataExit === "number"
@@ -2272,31 +2391,84 @@ export function deriveToolSupportsClaims(
           ? Number(textExit[1])
           : undefined;
     const exitOk = exitCode === 0;
-    if (exitCode !== undefined) claims.add(exitOk ? "bash_exit_0" : "bash_exit_nonzero");
+    if (outcome !== "timeout" && outcome !== "cancelled" && exitCode !== undefined) {
+      claims.add(exitOk ? "bash_exit_0" : "bash_exit_nonzero");
+    }
     const cmd = command.toLowerCase();
+    const invocations = parseShellInvocations(cmd);
+    const invokes = (
+      executables: string[],
+      kind: "test" | "typecheck" | "build" | "lint" | "smoke",
+      firstArg?: string,
+    ) =>
+      invocations.some(
+        (invocation) =>
+          executables.includes(invocation.executable) &&
+          (firstArg === undefined || invocation.args[0] === firstArg) &&
+          !invocationOnlyInspects(invocation, kind),
+      );
+    const runsScript = (
+      script: string,
+      kind: "test" | "typecheck" | "build" | "lint" | "smoke",
+    ) =>
+      invocations.some(
+        (invocation) =>
+          invocation.manager !== undefined &&
+          (invocation.script === script || invocation.script?.startsWith(`${script}:`)) &&
+          !invocationOnlyInspects(invocation, kind),
+      );
+    const isTestCommand =
+      invokes(["vitest", "jest", "pytest", "mocha", "jasmine", "tap"], "test") ||
+      invokes(["go", "cargo"], "test", "test") ||
+      runsScript("test", "test");
+    const isTypecheckCommand =
+      invokes(["tsc"], "typecheck") ||
+      runsScript("typecheck", "typecheck");
+    const isBuildCommand =
+      invokes(["cargo", "go"], "build", "build") ||
+      runsScript("build", "build");
+    const isLintCommand =
+      invokes(["eslint", "oxlint"], "lint") ||
+      invokes(["biome"], "lint", "check") ||
+      runsScript("lint", "lint");
+    const isSmokeCommand =
+      invokes(["smoke", "run-smoke"], "smoke") ||
+      runsScript("smoke", "smoke");
+    if (isTestCommand) claims.add("test_attempted");
+    if (isTypecheckCommand) claims.add("typecheck_attempted");
+    if (isBuildCommand) claims.add("build_attempted");
+    if (isLintCommand) claims.add("lint_attempted");
+    if (isSmokeCommand) claims.add("smoke_attempted");
+    if (isTestCommand || isTypecheckCommand || isBuildCommand || isLintCommand || isSmokeCommand) {
+      claims.add("verification_attempted");
+    }
     if (exitOk) {
-      if (
-        /(?:^|[\s&|;])(?:vitest|jest|pytest|go\s+test|cargo\s+test|mocha|jasmine|tap\b)/iu.test(cmd)
-      ) {
+      if (isTestCommand) {
         claims.add("test_passed");
         claims.add(isFullTestCommand(cmd) ? "test_scope:full" : "test_scope:focused");
       }
-      if (/(?:^|[\s&|;])(?:tsc)(?:\s|$)/iu.test(cmd) || /tsc\s+--noemit/iu.test(cmd)) {
+      if (isTypecheckCommand) {
         claims.add("typecheck_passed");
       }
-      if (
-        /(?:^|[\s&|;])(?:pnpm|npm|yarn)\s+(?:run\s+)?build(?:\s|$)/iu.test(cmd) ||
-        /(?:^|[\s&|;])(?:cargo|go)\s+build(?:\s|$)/iu.test(cmd)
-      ) {
+      if (isBuildCommand) {
         claims.add("build_passed");
       }
-      if (/git\s+diff\s+--check/iu.test(cmd)) {
+      if (isLintCommand) claims.add("lint_passed");
+      if (invocations.some((invocation) =>
+        invocation.executable === "git" &&
+        invocation.args[0] === "diff" &&
+        invocation.args.includes("--check")
+      )) {
         claims.add("diff_check_passed");
       }
-      if (/(?:^|[\s&|;])(?:smoke|run-smoke|.*\bsmoke\b.*)/iu.test(cmd)) {
+      if (isSmokeCommand) {
         claims.add("smoke_ran");
+        claims.add("smoke_passed");
       }
-      if (/git\s+(?:status|branch|rev-parse|log|show-ref|symbolic-ref)/iu.test(cmd)) {
+      if (invocations.some((invocation) =>
+        invocation.executable === "git" &&
+        /^(?:status|branch|rev-parse|log|show-ref|symbolic-ref)$/u.test(invocation.args[0] ?? "")
+      )) {
         claims.add("git_status");
         claims.add("git_local_fact");
       }

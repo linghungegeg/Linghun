@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Writable } from "node:stream";
 import {
   parseUsableTranscriptCompactBoundary,
@@ -51,7 +51,10 @@ import {
   refreshWorkspaceReferenceCache,
   shouldForceCompactFromConfirmedUsage,
 } from "./compact-cache-command-runtime.js";
-import { prepareMessagesForProviderPreflight } from "./compact-preflight-runtime.js";
+import {
+  formatCompactProjectionPromptSummary,
+  prepareMessagesForProviderPreflight,
+} from "./compact-preflight-runtime.js";
 import { getProviderContextMaxChars } from "./compact-preflight-runtime.js";
 import { getAutoCompactTriggerChars } from "./compact-preflight-runtime.js";
 import { estimateModelMessageChars } from "./context-estimator.js";
@@ -70,6 +73,7 @@ import {
   recordProviderFailureEvidence,
   recordToolResultBudgetEvidence,
   rememberEvidence,
+  resolveToolResultBudgetLedgerRecords,
   sanitizeProviderFailureError,
   scopeEvidenceToContext,
   truncateRoundAssistantForProvider,
@@ -105,6 +109,7 @@ import { detectEngineeringTaskProfile } from "./headless-bench-runtime.js";
 import { startModelSetup } from "./model-command-runtime.js";
 import {
   createModelToolDefinitionsForReportGuard,
+  deriveToolSupportsClaims,
   isPreEngineToolName,
 } from "./model-loop-runtime.js";
 import type { FinalAnswerClaimVerdict, FinalAnswerExtendedVerdict } from "./model-loop-runtime.js";
@@ -181,7 +186,11 @@ import {
   forbidsVerificationEvidence,
   parseUserActionConstraints,
 } from "./user-action-constraints.js";
-import { getRequestScopedVerificationChangedFiles } from "./verification-command-runtime.js";
+import {
+  createVerificationPlan,
+  getRequestScopedVerificationChangedFiles,
+  resolveVerificationScopeCwd,
+} from "./verification-command-runtime.js";
 import type { PendingModelContinuation, TuiContext } from "./tui-context-runtime.js";
 import { updateTurnContinuity } from "./turn-continuity-runtime.js";
 import {
@@ -190,9 +199,9 @@ import {
 } from "./tui-context-runtime.js";
 import {
   MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES,
-  MAX_MODEL_TOTAL_TOOL_ROUNDS,
+  MODEL_REQUEST_WALL_CLOCK_LIMIT_MS,
+  MODEL_REQUEST_WALL_CLOCK_TIMEOUT_REASON,
   REQUEST_SLOW_HINT_MS,
-  TODO_ONLY_KILL_GRACE,
   MAX_TODO_ONLY_CODE_FACT,
 } from "./tui-context-runtime.js";
 import type {
@@ -381,8 +390,11 @@ export function createToolFallbackRecoveryReminder(language: Language, previousF
 }
 
 export function recordPreEngineFallbackPreference(context: TuiContext): void {
+  const requestTurnId = context.currentRequestTurnId;
+  if (!requestTurnId) return;
   context.preEngineFallbackPreference = {
     projectPath: context.projectPath,
+    requestTurnId,
     active: true,
     activatedAt: new Date().toISOString(),
     reason: "fallback_required",
@@ -392,19 +404,9 @@ export function recordPreEngineFallbackPreference(context: TuiContext): void {
 function isPreEngineFallbackHardCutActive(context: TuiContext): boolean {
   return (
     context.preEngineFallbackPreference?.active === true &&
-    context.preEngineFallbackPreference.projectPath === context.projectPath
+    context.preEngineFallbackPreference.projectPath === context.projectPath &&
+    context.preEngineFallbackPreference.requestTurnId === context.currentRequestTurnId
   );
-}
-
-function createProviderToolDefinitionsForContext(
-  context: TuiContext,
-  guard: ToolBatchExecutionOptions["continuation"]["reportWriteGuard"],
-): ReturnType<typeof createModelToolDefinitionsForReportGuard> {
-  const preEngineFallbackActive = isPreEngineFallbackHardCutActive(context);
-  return createModelToolDefinitionsForReportGuard(guard, {
-    excludePreEngineTools: preEngineFallbackActive,
-    excludeDeferredToolDispatch: preEngineFallbackActive,
-  });
 }
 
 export function createPreFallbackHardCutSkippedToolResult(
@@ -493,6 +495,7 @@ type ToolBatchExecutionOptions = {
   continuation: PendingModelContinuation;
   collectFailureFingerprints?: boolean;
   streamingFeed?: StreamingToolCallFeed;
+  progressEvidenceAction?: FinalGateEvidenceGapActionPlan["evidenceAction"];
 };
 
 type StreamingToolCallFeed = {
@@ -635,7 +638,7 @@ async function executeToolCallsWithReadonlyParallelism(
         });
         return "pending";
       }
-      updateToolBatchExecutionState(state, toolCall, result, options);
+      updateToolBatchExecutionState(state, toolCall, result, options, context);
       pushToolResultMessage(options.continuation.messages, toolCall, result);
     }
     return "continue";
@@ -713,6 +716,14 @@ const REAL_FALLBACK_TOOL_NAMES = new Set([
   "RunVerification",
 ]);
 
+const FINAL_GAP_READONLY_EVIDENCE_TOOL_NAMES = new Set([
+  "Read",
+  "ReadSnippets",
+  "SourcePack",
+  "Grep",
+  "Glob",
+]);
+
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -762,20 +773,28 @@ function updateToolBatchExecutionState(
   toolCall: ModelToolCall,
   result: ModelToolExecutionResult,
   options: ToolBatchExecutionOptions,
+  context: TuiContext,
 ): void {
   if (doesWriteSatisfyReportGuard(options.continuation.reportWriteGuard, toolCall, result)) {
     options.continuation.reportWriteGuard.completed = true;
   }
+  recordSuccessfulToolExecutionProgress(
+    options.continuation,
+    toolCall,
+    result,
+    context,
+    options.progressEvidenceAction,
+  );
   if (isToolBatchFallbackRequired(result)) {
     state.roundFallbackRequiredCount += 1;
     state.batchFailureCount = 0;
     return;
   }
   if (!isToolBatchFailure(result)) {
-    state.roundHadProgress = true;
     if (isRealFallbackToolProgress(toolCall, result)) {
       state.roundHadRealFallbackToolProgress = true;
     }
+    state.roundHadProgress = true;
     state.batchFailureCount = 0;
     return;
   }
@@ -784,6 +803,105 @@ function updateToolBatchExecutionState(
   }
   state.batchFailureCount += 1;
   state.lastBatchFailureReason = result.text;
+}
+
+export function recordSuccessfulToolExecutionProgress(
+  continuation: Pick<PendingModelContinuation, "finalGapProgressState">,
+  toolCall: Pick<ModelToolCall, "name" | "input">,
+  result: {
+    ok: boolean;
+    tool: string;
+    text: string;
+    data?: unknown;
+    modelContent?: unknown;
+    evidenceId?: string;
+  },
+  context: TuiContext,
+  progressEvidenceAction?: FinalGateEvidenceGapActionPlan["evidenceAction"],
+): boolean {
+  const progressState = continuation.finalGapProgressState;
+  const evidenceAction = progressEvidenceAction ?? progressState?.evidenceAction;
+  const progressEvidence = result.evidenceId
+    ? evidenceForCurrentVerificationScope(context).find((record) => record.id === result.evidenceId)
+    : undefined;
+  if (evidenceAction) {
+    const actionFingerprint = createCommandFingerprint(evidenceAction);
+    const attempted = progressState?.attemptedCommandFingerprints;
+    const wasAttempted = attempted?.has(actionFingerprint) === true;
+    if (
+      evidenceAction.strategy === "artifact_readonly_check" ||
+      evidenceAction.strategy === "service_runtime_readonly_check"
+    ) {
+      const attemptedAction = FINAL_GAP_READONLY_EVIDENCE_TOOL_NAMES.has(toolCall.name)
+        ? { ...evidenceAction, toolName: toolCall.name, input: toolCall.input }
+        : undefined;
+      if (attemptedAction) {
+        progressState?.attemptedCommandFingerprints.add(
+          createCommandFingerprint(attemptedAction),
+        );
+      }
+    }
+    if (!toolCallMatchesFinalGapAction(toolCall, evidenceAction, progressEvidence)) {
+      if (finalGapExecutionStateAdvanced(context, progressState)) {
+        attempted?.clear();
+        return true;
+      }
+      return false;
+    }
+    attempted?.add(actionFingerprint);
+    if (wasAttempted && !finalGapExecutionStateAdvanced(context, progressState)) return false;
+  }
+  return result.ok && finalGapExecutionStateAdvanced(context, progressState);
+}
+
+function finalGapExecutionStateAdvanced(
+  context: TuiContext,
+  state: FinalGapProgressState | undefined,
+): boolean {
+  if (!state) return false;
+  return (
+    (!!state.scopeFingerprint && state.scopeFingerprint !== finalGapScopeFingerprint(context)) ||
+    (!!state.freshnessFingerprint &&
+      state.freshnessFingerprint !== finalGapFreshnessFingerprint(context))
+  );
+}
+
+function evidenceSupportsExecutionProgress(record: EvidenceRecord): boolean {
+  if (record.kind === "test_result") {
+    return record.supportsClaims.some((claim) =>
+      claim === "verification_passed" ||
+      claim === "test_passed" ||
+      claim === "typecheck_passed" ||
+      claim === "build_passed" ||
+      claim === "lint_passed" ||
+      claim === "smoke_passed"
+    );
+  }
+  if (record.kind === "file_read" || record.kind === "grep_result") return false;
+  if (record.kind === "index_query") return true;
+  if (record.kind === "web_source") {
+    return record.supportsClaims.includes("external_current_fact");
+  }
+  if (record.kind === "vision_observation" || record.kind === "image_result") {
+    return record.supportsClaims.length > 0;
+  }
+  if (record.kind !== "command_output") return false;
+  const claims = new Set(record.supportsClaims);
+  return (
+    (claims.has("file_written") && (record.ownerScope?.targets?.length ?? 0) > 0) ||
+    claims.has("agent_terminal_status") ||
+    claims.has("workflow_terminal_status") ||
+    claims.has("index_operation") ||
+    claims.has("report_write") ||
+    claims.has("git_operation") ||
+    claims.has("verification_passed") ||
+    claims.has("test_passed") ||
+    claims.has("typecheck_passed") ||
+    claims.has("build_passed") ||
+    claims.has("lint_passed") ||
+    claims.has("diff_check_passed") ||
+    claims.has("smoke_passed")
+  );
 }
 
 function recordCacheRequestObservation(
@@ -978,20 +1096,26 @@ function evidenceForCurrentVerificationScope(context: TuiContext): TuiContext["e
   );
 }
 
-type FinalGapProgressState = {
-  unsupportedKinds: string[];
-  relevantEvidenceIds: Set<string>;
-  evidenceAction?: FinalGateEvidenceGapActionPlan["evidenceAction"];
-  commandFingerprint?: string;
-  attemptedCommandFingerprints: Set<string>;
-};
+type FinalGapProgressState = NonNullable<PendingModelContinuation["finalGapProgressState"]>;
 
 function finalGapHasProgress(
   result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
   context: TuiContext,
   previous: FinalGapProgressState | undefined,
 ): boolean {
-  if (!previous) return true;
+  if (!previous) return false;
+
+  const currentScopeFingerprint = finalGapScopeFingerprint(context);
+  if (previous.scopeFingerprint && previous.scopeFingerprint !== currentScopeFingerprint) {
+    return true;
+  }
+  const currentFreshnessFingerprint = finalGapFreshnessFingerprint(context);
+  if (
+    previous.freshnessFingerprint &&
+    previous.freshnessFingerprint !== currentFreshnessFingerprint
+  ) {
+    return true;
+  }
 
   // Stage 4: Gap must shrink or new matching evidence must appear
   const currentKinds = new Set(result.unsupportedKinds);
@@ -1005,34 +1129,11 @@ function finalGapHasProgress(
     return true;
   }
 
-  // Stage 4: Read/Grep/repeated PASS without gap change is NOT progress
+  // Read/Grep/repeated PASS without gap change is not progress unless a new
+  // owner-scoped evidence record directly supports the action that was run.
   if (!previous.evidenceAction) return false;
-  if (
-    previous.commandFingerprint &&
-    previous.attemptedCommandFingerprints.has(previous.commandFingerprint)
-  ) {
-    return false;
-  }
 
-  const currentEvidence = evidenceForCurrentVerificationScope(context);
-  const newMatchingEvidence = currentEvidence.filter(
-    (record) =>
-      !previous.relevantEvidenceIds.has(record.id) &&
-      evidenceMatchesFinalGapAction(record, previous.evidenceAction!),
-  );
-
-  // Stage 4: New evidence must directly address the current gap
-  if (newMatchingEvidence.length === 0) return false;
-  if (
-    (previous.evidenceAction.toolName === "RunVerification" ||
-      previous.evidenceAction.toolName === "Bash") &&
-    readRequestedVerificationLevel(previous.evidenceAction.input) ===
-      selectFinalGateVerificationLevel(result)
-  ) {
-    return false;
-  }
-
-  return true;
+  return false;
 }
 
 function captureFinalGapProgressState(
@@ -1040,6 +1141,7 @@ function captureFinalGapProgressState(
   context: TuiContext,
   evidenceAction: FinalGateEvidenceGapActionPlan["evidenceAction"],
   previousState?: FinalGapProgressState,
+  madeProgress = false,
 ): FinalGapProgressState {
   const currentEvidence = evidenceForCurrentVerificationScope(context);
   const relevantEvidenceIds = new Set(
@@ -1047,32 +1149,204 @@ function captureFinalGapProgressState(
       .filter((record) => evidenceAction && evidenceMatchesFinalGapAction(record, evidenceAction))
       .map((record) => record.id),
   );
+  const relevantEvidenceFingerprints = new Set(
+    currentEvidence
+      .filter((record) => evidenceAction && evidenceMatchesFinalGapAction(record, evidenceAction))
+      .map(createEvidenceProgressFingerprint),
+  );
 
-  // Stage 4: Calculate command fingerprint for deduplication
+  // A planned action is not attempted until its matching tool call actually executes.
   const commandFingerprint = evidenceAction ? createCommandFingerprint(evidenceAction) : undefined;
-  const attemptedCommandFingerprints = new Set(previousState?.attemptedCommandFingerprints ?? []);
-  if (previousState?.commandFingerprint) {
-    attemptedCommandFingerprints.add(previousState.commandFingerprint);
-  }
+  const attemptedCommandFingerprints = madeProgress
+    ? new Set<string>()
+    : new Set(previousState?.attemptedCommandFingerprints ?? []);
 
   return {
     unsupportedKinds: [...new Set(result.unsupportedKinds)],
+    scopeFingerprint: finalGapScopeFingerprint(context),
+    freshnessFingerprint: finalGapFreshnessFingerprint(context),
     relevantEvidenceIds,
+    relevantEvidenceFingerprints,
     evidenceAction,
     commandFingerprint,
     attemptedCommandFingerprints,
+    externalBlockReason: previousState?.externalBlockReason,
   };
+}
+
+function unavailableFinalGapActionFingerprints(
+  state: FinalGapProgressState | undefined,
+  madeProgress: boolean,
+): ReadonlySet<string> | undefined {
+  if (!state || madeProgress) return undefined;
+  return new Set(state.attemptedCommandFingerprints);
+}
+
+function shouldAutoExecuteFinalGapAction(
+  state: FinalGapProgressState | undefined,
+  action: FinalGateEvidenceGapActionPlan["evidenceAction"],
+  madeProgress: boolean,
+): action is NonNullable<FinalGateEvidenceGapActionPlan["evidenceAction"]> {
+  if (!state || !action || madeProgress) return false;
+  const fingerprint = createCommandFingerprint(action);
+  return (
+    state.commandFingerprint === fingerprint &&
+    !state.attemptedCommandFingerprints.has(fingerprint)
+  );
+}
+
+async function createFinalGapEvidenceToolCall(
+  action: NonNullable<FinalGateEvidenceGapActionPlan["evidenceAction"]>,
+  context: TuiContext,
+  sequence: number,
+): Promise<ModelToolCall | undefined> {
+  let input = action.input;
+  if (action.toolName === "Bash" && action.strategy === "minimal_bash_verification") {
+    const level = readRequestedVerificationLevel(action.input);
+    if (!level) return undefined;
+    const changedFiles = getRequestScopedVerificationChangedFiles(context);
+    const verificationCwd = await resolveVerificationScopeCwd(
+      context.projectPath,
+      changedFiles,
+    );
+    const step = (await createVerificationPlan(verificationCwd, "default")).find(
+      (candidate) => candidate.kind === level,
+    );
+    if (!step) return undefined;
+    input = {
+      command: step.command,
+      ...(step.cwd ? { cwd: step.cwd } : {}),
+    };
+  }
+  const fingerprint = createCommandFingerprint(action);
+  return {
+    id: `final-gate-evidence-${fingerprint.slice(0, 20)}-${sequence}`,
+    name: action.toolName,
+    input,
+  };
+}
+
+function abortSupersededFinalGapVerification(context: TuiContext): void {
+  const sessionId = context.sessionId;
+  const requestTurnId = context.currentRequestTurnId;
+  if (!sessionId || !requestTurnId) return;
+  const ownerKey = `request:${sessionId}:${requestTurnId}`;
+  const runId = context.latestVerificationRunIds?.get(ownerKey);
+  if (!runId) return;
+  const running = context.backgroundTasks.find(
+    (task) =>
+      task.id === runId &&
+      task.kind === "verification" &&
+      task.status === "running" &&
+      !task.ownerAgentId &&
+      !task.workflowRunId &&
+      task.ownerSessionId === sessionId &&
+      task.requestTurnId === requestTurnId,
+  );
+  if (!running) return;
+  context.activeVerificationAbortControllers?.get(runId)?.abort(
+    "superseded_by_final_gap_reverification",
+  );
+}
+
+function finalGapScopeFingerprint(context: TuiContext): string {
+  return stableHash({
+    projectPath: normalizeEvidenceCwd(context.projectPath),
+    changedFiles: [...getRequestScopedVerificationChangedFiles(context)].sort(),
+  });
+}
+
+function finalGapFreshnessFingerprint(context: TuiContext): string {
+  return stableHash(
+    evidenceForCurrentVerificationScope(context)
+      .filter(evidenceSupportsExecutionProgress)
+      .map(createEvidenceProgressFingerprint)
+      .sort(),
+  );
+}
+
+function createEvidenceProgressFingerprint(record: EvidenceRecord): string {
+  return stableHash({
+    kind: record.kind,
+    summary: record.summary,
+    supportsClaims: [...record.supportsClaims].sort(),
+    ownerScope: record.ownerScope,
+    data: {
+      artifactHint: readEvidenceDataRecord(record, "artifactHint"),
+      binaryPreflight: readEvidenceDataRecord(record, "binaryPreflight"),
+      verificationScope: readEvidenceDataRecord(record, "verificationScope"),
+    },
+  });
 }
 
 function createCommandFingerprint(
   evidenceAction: NonNullable<FinalGateEvidenceGapActionPlan["evidenceAction"]>,
 ): string {
+  if (
+    evidenceAction.strategy === "artifact_readonly_check" ||
+    evidenceAction.strategy === "service_runtime_readonly_check"
+  ) {
+    const scopedPath = readToolCallPath(evidenceAction.input) ?? ".";
+    const snippetPaths = readToolCallSnippetPaths(evidenceAction.input);
+    const evidenceTarget = evidenceAction.toolName === "ReadSnippets"
+      ? snippetPaths.join("|") || scopedPath
+      : evidenceAction.toolName === "SourcePack"
+        ? "."
+        : scopedPath;
+    return stableHash([
+      evidenceAction.toolName,
+      evidenceAction.strategy,
+      normalizeEvidenceCwd(evidenceTarget),
+    ].join("|"));
+  }
   const parts = [
     evidenceAction.toolName,
     evidenceAction.strategy ?? "default",
     stableStringify(evidenceAction.input ?? null).slice(0, 500),
   ];
   return stableHash(parts.join("|"));
+}
+
+function readToolCallSnippetPaths(input: unknown): string[] {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return [];
+  const ranges = (input as Record<string, unknown>).ranges;
+  if (!Array.isArray(ranges)) return [];
+  return [...new Set(ranges.flatMap((range) => {
+    const path = readToolCallPath(range);
+    return path ? [path] : [];
+  }))].sort();
+}
+
+function toolCallMatchesFinalGapAction(
+  toolCall: Pick<ModelToolCall, "name" | "input">,
+  action: NonNullable<FinalGateEvidenceGapActionPlan["evidenceAction"]>,
+  evidence?: Pick<EvidenceRecord, "supportsClaims">,
+): boolean {
+  if (toolCall.name !== action.toolName) return false;
+  if (
+    action.toolName === "Bash" &&
+    action.strategy === "minimal_bash_verification"
+  ) {
+    const level = readRequestedVerificationLevel(action.input);
+    return !!level && evidence?.supportsClaims.includes(`${level}_attempted`) === true;
+  }
+  const expectedPattern = readToolCallString(action.input, "pattern");
+  if (
+    expectedPattern &&
+    readToolCallString(toolCall.input, "pattern") !== expectedPattern
+  ) return false;
+  const expectedPath = readToolCallPath(action.input);
+  if (expectedPath) {
+    const actualPath = readToolCallPath(toolCall.input);
+    if (!actualPath || !pathsReferToSameArtifactHint(actualPath, expectedPath)) return false;
+    if (expectedPattern) return true;
+  }
+  if (expectedPattern) return true;
+  const expectedLevel = readRequestedVerificationLevel(action.input);
+  if (expectedLevel) {
+    return readRequestedVerificationLevel(toolCall.input) === expectedLevel;
+  }
+  return stableStringify(toolCall.input ?? null) === stableStringify(action.input ?? null);
 }
 
 function evidenceMatchesFinalGapAction(
@@ -1341,22 +1615,41 @@ function hasServiceVerificationEvidence(context: Pick<TuiContext, "evidence">): 
 export function planFinalGateEvidenceGapAction(input: {
   result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>;
   context: Pick<TuiContext, "permissionMode" | "evidence" | "language"> &
-    Partial<Pick<TuiContext, "tools" | "recentlyMentionedFiles" | "lastMetaSchedulerDecision" | "backgroundTasks" | "currentRequestTurnId" | "sessionId">>;
+    Partial<Pick<TuiContext, "tools" | "recentlyMentionedFiles" | "lastMetaSchedulerDecision" | "backgroundTasks" | "currentRequestTurnId" | "sessionId" | "projectPath">>;
   userText?: string;
   assistantText?: string;
-  retryBudgetRemaining?: boolean;
   evidenceActionRetryCount?: number;
+  attemptedEvidenceActionFingerprints?: ReadonlySet<string>;
+  externalBlockReason?: FinalGapProgressState["externalBlockReason"];
 }): FinalGateEvidenceGapActionPlan {
   const { result, context } = input;
   const language = context.language;
-  if (input.retryBudgetRemaining === false) {
+  const gap = classifyFinalGateEvidenceGap(result.unsupportedKinds);
+  if (input.externalBlockReason) {
     return {
-      action: "downgrade_only",
-      reason: "final_gate_retry_disabled",
-      directive: createFinalGateEvidenceTaskDirective(result, language),
+      action: "blocked_explanation",
+      reason: input.externalBlockReason,
+      directive: formatEvidenceGapBlocker(input.externalBlockReason, language),
     };
   }
-  const gap = classifyFinalGateEvidenceGap(result.unsupportedKinds);
+  const finalizeEvidencePlan = (
+    plan: FinalGateEvidenceGapActionPlan,
+  ): FinalGateEvidenceGapActionPlan => {
+    const fingerprint = plan.evidenceAction
+      ? createCommandFingerprint(plan.evidenceAction)
+      : undefined;
+    if (
+      fingerprint &&
+      input.attemptedEvidenceActionFingerprints?.has(fingerprint)
+    ) {
+      return {
+        action: "downgrade_only",
+        reason: "final_gate_no_new_evidence_path",
+        directive: createFinalGateEvidenceTaskDirective(result, language),
+      };
+    }
+    return plan;
+  };
   const constraints = parseUserActionConstraints(input.userText);
   const taskKind = context.lastMetaSchedulerDecision?.policyDecision.taskKind;
   if (
@@ -1377,28 +1670,6 @@ export function planFinalGateEvidenceGapAction(input: {
         directive: formatEvidenceGapBlocker("user_forbid_commands", language),
       };
     }
-    const resumableVerification = context.backgroundTasks?.find(
-      (task) =>
-        task.kind === "verification" &&
-        !task.ownerAgentId &&
-        !task.workflowRunId &&
-        (!task.ownerSessionId || !context.sessionId || task.ownerSessionId === context.sessionId) &&
-        (task.requestTurnId
-          ? task.requestTurnId === context.currentRequestTurnId
-          : task.status === "running") &&
-        (task.status === "running" ||
-          task.status === "failed" ||
-          task.status === "cancelled" ||
-          task.status === "timeout" ||
-          task.status === "stale"),
-    );
-    if (resumableVerification) {
-      return {
-        action: "downgrade_only",
-        reason: "verification_background_resumable",
-        directive: createFinalGateEvidenceTaskDirective(result, language),
-      };
-    }
   }
   if (constraints.forbidAllTools) {
     return {
@@ -1411,26 +1682,33 @@ export function planFinalGateEvidenceGapAction(input: {
     const artifactAction = createArtifactReadonlyEvidenceAction({
       text: input.assistantText ?? input.userText ?? "",
       context,
-      retryCount: input.evidenceActionRetryCount ?? 0,
+      attemptedEvidenceActionFingerprints: input.attemptedEvidenceActionFingerprints,
     });
-    return {
+    if (!artifactAction) {
+      return {
+        action: "downgrade_only",
+        reason: "final_gate_no_new_evidence_path",
+        directive: createFinalGateEvidenceTaskDirective(result, language),
+      };
+    }
+    return finalizeEvidencePlan({
       action: "readonly_check",
       reason: "artifact_gap_readonly",
       directive: formatEvidenceGapToolDirective({
         language,
         action: "readonly_check",
         missing: mapFinalGateKindsToUserLabels(result.unsupportedKinds, language),
-        tools: ["Read", "Grep", "Glob"],
+        tools: ["Read", "ReadSnippets", "SourcePack", "Grep", "Glob"],
         note:
           language === "en-US"
             ? "Only inspect existing files or report references; do not write files and do not run Bash."
             : "只检查已有文件或报告引用；不要写文件，也不要运行 Bash。",
       }),
       evidenceAction: artifactAction,
-    };
+    });
   }
   if (gap === "git") {
-    return {
+    return finalizeEvidencePlan({
       action: "readonly_check",
       reason: "git_gap_readonly",
       directive: formatEvidenceGapToolDirective({
@@ -1448,16 +1726,9 @@ export function planFinalGateEvidenceGapAction(input: {
         input: { includeDetails: true },
         summary: "inspect git status for final-gate git evidence",
       },
-    };
+    });
   }
   if (gap === "completion") {
-    if ((input.evidenceActionRetryCount ?? 0) > 0) {
-      return {
-        action: "downgrade_only",
-        reason: "completion_gap_verified_scope_only",
-        directive: createFinalGateEvidenceTaskDirective(result, language),
-      };
-    }
     if (context.permissionMode === "plan") {
       return {
         action: "blocked_explanation",
@@ -1465,7 +1736,7 @@ export function planFinalGateEvidenceGapAction(input: {
         directive: formatEvidenceGapBlocker("readonly_mode_blocks_verification", language),
       };
     }
-    return createVerificationEvidenceGapPlan({
+    return finalizeEvidencePlan(createVerificationEvidenceGapPlan({
       language,
       permissionMode: context.permissionMode,
       reason:
@@ -1474,13 +1745,21 @@ export function planFinalGateEvidenceGapAction(input: {
           : "completion_gap_verification_allowed_by_mode",
       missingKinds: result.unsupportedKinds,
       level: selectFinalGateVerificationLevel(result),
-    });
+    }));
   }
   if (gap === "runtime") {
     const runtimeAction = createServiceRuntimeReadonlyEvidenceAction(
       [input.assistantText, input.userText].filter(Boolean).join("\n"),
+      input.attemptedEvidenceActionFingerprints,
     );
-    return {
+    if (!runtimeAction) {
+      return {
+        action: "downgrade_only",
+        reason: "final_gate_no_new_evidence_path",
+        directive: createFinalGateEvidenceTaskDirective(result, language),
+      };
+    }
+    return finalizeEvidencePlan({
       action: "readonly_check",
       reason: "service_runtime_gap_readonly",
       directive: formatEvidenceGapToolDirective({
@@ -1494,7 +1773,7 @@ export function planFinalGateEvidenceGapAction(input: {
             : "只检查已有日志、配置或 health/status 线索；不要启动服务，不要运行 Bash，不要 curl 网络，也不要写文件。",
       }),
       evidenceAction: runtimeAction,
-    };
+    });
   }
   if (gap === "verification") {
     if (context.permissionMode === "plan") {
@@ -1504,13 +1783,13 @@ export function planFinalGateEvidenceGapAction(input: {
         directive: formatEvidenceGapBlocker("readonly_mode_blocks_verification", language),
       };
     }
-    return createVerificationEvidenceGapPlan({
+    return finalizeEvidencePlan(createVerificationEvidenceGapPlan({
       language,
       permissionMode: context.permissionMode,
       reason: context.permissionMode === "default" ? "verification_requires_permission" : "verification_allowed_by_mode",
       missingKinds: result.unsupportedKinds,
       level: selectFinalGateVerificationLevel(result),
-    });
+    }));
   }
   return {
     action: "downgrade_only",
@@ -1632,6 +1911,7 @@ export function buildEvidenceBackedFinalBoundaryAnswer(
   result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
   language: Language,
   evidence: TuiContext["evidence"] = [],
+  externalBlockReason?: FinalGapProgressState["externalBlockReason"],
 ): string {
   const labels = mapFinalGateKindsToUserLabels(result.unsupportedKinds, language);
   const missing = labels.length > 0
@@ -1641,24 +1921,56 @@ export function buildEvidenceBackedFinalBoundaryAnswer(
   if (language === "en-US") {
     return [
       `I have confirmed the part covered by the checks so far: ${evidenceScope}.`,
-      `I still need more evidence for ${missing}; if we continue, I will gather that evidence first.`,
+      ...(externalBlockReason
+        ? [
+            externalBlockReason === "permission_denied"
+              ? "The planned evidence action was not run because permission was denied for this request; only the unsupported conclusion remains blocked."
+              : "The planned evidence action was cancelled by the user for this request; only the unsupported conclusion remains blocked.",
+          ]
+        : []),
+      `Not established by this request: ${missing}. No unsupported conclusion is reported.`,
     ].join("\n");
   }
   return [
     `我已确认目前检查覆盖到的部分：${evidenceScope}。`,
-    `还需要补充${missing}；如果继续，我会先补这部分证据。`,
+    ...(externalBlockReason
+      ? [
+          externalBlockReason === "permission_denied"
+            ? "本请求中计划的补证动作因用户拒绝权限而未执行；仅对应的无证据结论受阻。"
+            : "本请求中计划的补证动作已被用户取消；仅对应的无证据结论受阻。",
+        ]
+      : []),
+    `本请求未能证实：${missing}；未输出无证据支撑的结论。`,
   ].join("\n");
 }
 
-function buildEvidenceBackedPartialAnswer(context: TuiContext, reason: string): string {
-  const boundary = buildEvidenceBackedFinalBoundaryAnswer(
-    { status: "needs_disclaimer", unsupportedKinds: ["completion_claim"] },
-    context.language,
+export function recordFinalGapExternalBlock(
+  continuation: PendingModelContinuation,
+  toolCall: Pick<ModelToolCall, "name" | "input">,
+  reason: NonNullable<FinalGapProgressState["externalBlockReason"]>,
+): boolean {
+  const state = continuation.finalGapProgressState;
+  const commandIntent = toolCall.name === "Bash"
+    ? { supportsClaims: deriveToolSupportsClaims("Bash", toolCall.input, {}) }
+    : undefined;
+  if (
+    !state?.evidenceAction ||
+    !toolCallMatchesFinalGapAction(toolCall, state.evidenceAction, commandIntent)
+  ) {
+    return false;
+  }
+  state.externalBlockReason = reason;
+  return true;
+}
+
+function buildEvidenceBackedFailureAnswer(context: TuiContext, reason: string): string {
+  const evidenceScope = formatEvidenceBoundaryScope(
     evidenceForCurrentVerificationScope(context),
+    context.language,
   );
   return context.language === "en-US"
-    ? `PARTIAL: ${reason}\n${boundary}`
-    : `部分完成：${reason}\n${boundary}`;
+    ? `Execution failed: ${reason}\nEvidence retained from this request: ${evidenceScope}.`
+    : `执行失败：${reason}\n已保留本请求证据范围：${evidenceScope}。`;
 }
 
 function formatEvidenceBoundaryScope(evidence: TuiContext["evidence"], language: Language): string {
@@ -1827,6 +2139,9 @@ function classifyFinalGateEvidenceGap(kinds: string[]): "verification" | "comple
   if (kinds.some((kind) => /completion_claim|task_completion|task_completed/iu.test(kind))) {
     return "completion";
   }
+  if (kinds.some((kind) => /code_fact|source_read|source_search|local_read/iu.test(kind))) {
+    return "artifact";
+  }
   if (kinds.some((kind) => /artifact|file|report|write/iu.test(kind))) return "artifact";
   if (kinds.some((kind) => /service|runtime|port|health|log|daemon|server/iu.test(kind))) {
     return "runtime";
@@ -1840,46 +2155,88 @@ function classifyFinalGateEvidenceGap(kinds: string[]): "verification" | "comple
 function createArtifactReadonlyEvidenceAction(input: {
   text: string;
   context: Pick<TuiContext, "evidence"> &
-    Partial<Pick<TuiContext, "tools" | "recentlyMentionedFiles" | "lastMetaSchedulerDecision">>;
-  retryCount: number;
-}): NonNullable<FinalGateEvidenceGapActionPlan["evidenceAction"]> {
-  const path = extractLikelyArtifactPath(input.text);
-  if (path) {
-    return {
-      toolName: "Read",
-      input: { path, limit: 200 },
-      strategy: "artifact_readonly_check",
-      summary: `read claimed artifact ${path}`,
-    };
-  }
-  const candidate = collectArtifactProbeCandidatePaths(input.context)
-    .find((item) => !hasArtifactProbeEvidenceForPath(input.context.evidence, item));
-  if (candidate) {
-    return {
-      toolName: "Read",
-      input: { path: candidate, limit: 200 },
-      strategy: "artifact_readonly_check",
-      summary: `read artifact candidate ${candidate}`,
-    };
-  }
-  if (input.retryCount > 0) {
-    return {
+    Partial<Pick<TuiContext, "tools" | "recentlyMentionedFiles" | "lastMetaSchedulerDecision" | "currentRequestTurnId" | "sessionId" | "projectPath">>;
+  attemptedEvidenceActionFingerprints?: ReadonlySet<string>;
+}): FinalGateEvidenceGapActionPlan["evidenceAction"] {
+  const currentRequestTurnId = input.context.currentRequestTurnId;
+  const projectPath = input.context.projectPath;
+  const currentEvidence = currentRequestTurnId && projectPath
+    ? input.context.evidence.filter((record) => evidenceMatchesRequestOwner(record, {
+        currentRequestTurnId,
+        projectPath,
+        sessionId: input.context.sessionId,
+      }))
+    : input.context.evidence;
+  const claimedPath = extractLikelyArtifactPath(input.text);
+  const candidate = collectArtifactProbeCandidatePaths({
+    ...input.context,
+    evidence: currentEvidence,
+  }).find((item) => !hasArtifactProbeEvidenceForPath(currentEvidence, item));
+  const path = claimedPath ?? candidate;
+  const actions: NonNullable<FinalGateEvidenceGapActionPlan["evidenceAction"]>[] = path
+    ? [
+      {
+        toolName: "Read",
+        input: { path, limit: 200 },
+        strategy: "artifact_readonly_check",
+        summary: `read artifact candidate ${path}`,
+      },
+      {
+        toolName: "ReadSnippets",
+        input: { ranges: [{ path, start: 1, end: 200 }] },
+        strategy: "artifact_readonly_check",
+        summary: `read artifact snippets ${path}`,
+      },
+      {
+        toolName: "SourcePack",
+        input: { query: path, limit: 5 },
+        strategy: "artifact_readonly_check",
+        summary: `locate artifact source references for ${path}`,
+      },
+      {
       toolName: "Grep",
       input: {
         pattern: "artifact|report|output|generated|created|产物|报告|输出|生成|创建",
-        path: ".",
+          path,
         limit: 30,
       },
       strategy: "artifact_readonly_check",
-      summary: "grep for likely artifact references",
-    };
-  }
-  return {
-    toolName: "Glob",
-    input: { pattern: "**/*.{md,txt,json,log,html,csv,xml,yaml,yml,pdf,png,jpg,jpeg,zip}", path: ".", limit: 20 },
-    strategy: "artifact_readonly_check",
-    summary: "glob for likely report/artifact files",
-  };
+        summary: `grep artifact candidate ${path}`,
+      },
+      {
+        toolName: "Glob",
+        input: { pattern: path, path: ".", limit: 20 },
+        strategy: "artifact_readonly_check",
+        summary: `glob artifact candidate ${path}`,
+      },
+    ]
+    : [
+      {
+        toolName: "SourcePack",
+        input: { query: "artifact report output generated created", limit: 5 },
+        strategy: "artifact_readonly_check",
+        summary: "locate likely artifact references",
+      },
+      {
+        toolName: "Grep",
+        input: {
+          pattern: "artifact|report|output|generated|created|产物|报告|输出|生成|创建",
+          path: ".",
+          limit: 30,
+        },
+        strategy: "artifact_readonly_check",
+        summary: "grep for likely artifact references",
+      },
+      {
+        toolName: "Glob",
+        input: { pattern: "**/*.{md,txt,json,log,html,csv,xml,yaml,yml,pdf,png,jpg,jpeg,zip}", path: ".", limit: 20 },
+        strategy: "artifact_readonly_check",
+        summary: "glob for likely report/artifact files",
+      },
+    ];
+  return actions.find((action) =>
+    !input.attemptedEvidenceActionFingerprints?.has(createCommandFingerprint(action))
+  );
 }
 
 function collectArtifactProbeCandidatePaths(
@@ -1905,7 +2262,9 @@ function collectArtifactProbeCandidatePaths(
 }
 
 function hasArtifactProbeEvidenceForPath(evidence: TuiContext["evidence"], path: string): boolean {
-  return hasStructuredArtifactEvidenceForPath(evidence, path);
+  return hasStructuredArtifactEvidenceForPath(evidence, path) || evidence.some((record) =>
+    record.ownerScope?.targets?.some((target) => pathsReferToSameArtifactHint(target, path)) === true
+  );
 }
 
 function extractLikelyFilePathsFromText(text: string): string[] {
@@ -1925,6 +2284,12 @@ function readToolCallPath(input: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function readToolCallString(input: unknown, key: string): string | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const value = (input as Record<string, unknown>)[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
 function isMissingArtifactToolFailure(
   failure: TuiContext["lastToolFailure"] | undefined,
 ): boolean {
@@ -1936,26 +2301,38 @@ function isMissingArtifactToolFailure(
   );
 }
 
-function createServiceRuntimeReadonlyEvidenceAction(text: string): NonNullable<FinalGateEvidenceGapActionPlan["evidenceAction"]> {
+function createServiceRuntimeReadonlyEvidenceAction(
+  text: string,
+  attemptedEvidenceActionFingerprints?: ReadonlySet<string>,
+): FinalGateEvidenceGapActionPlan["evidenceAction"] {
   const path = extractLikelyArtifactPath(text);
-  if (path) {
-    return {
+  const actions: NonNullable<FinalGateEvidenceGapActionPlan["evidenceAction"]>[] = [
+    ...(path ? [{
       toolName: "Read",
       input: { path, limit: 200 },
-      strategy: "service_runtime_readonly_check",
+      strategy: "service_runtime_readonly_check" as const,
       summary: `read claimed runtime evidence ${path}`,
-    };
-  }
-  return {
-    toolName: "Grep",
-    input: {
-      pattern: "health|ready|listening|server|service|daemon|port|localhost|127\\.0\\.0\\.1|error|failed",
-      path: ".",
-      limit: 30,
+    }] : []),
+    {
+      toolName: "Grep",
+      input: {
+        pattern: "health|ready|listening|server|service|daemon|port|localhost|127\\.0\\.0\\.1|error|failed",
+        path: ".",
+        limit: 30,
+      },
+      strategy: "service_runtime_readonly_check",
+      summary: "grep existing files for service/runtime health evidence",
     },
-    strategy: "service_runtime_readonly_check",
-    summary: "grep existing files for service/runtime health evidence",
-  };
+    {
+      toolName: "Glob",
+      input: { pattern: "**/*.{log,json,jsonl,yaml,yml,toml,ini,conf}", path: ".", limit: 30 },
+      strategy: "service_runtime_readonly_check",
+      summary: "glob for existing service/runtime evidence files",
+    },
+  ];
+  return actions.find((action) =>
+    !attemptedEvidenceActionFingerprints?.has(createCommandFingerprint(action))
+  );
 }
 
 function extractLikelyArtifactPath(text: string): string | undefined {
@@ -2001,10 +2378,21 @@ function formatEvidenceGapToolDirective(input: {
 }
 
 function formatEvidenceGapBlocker(
-  reason: "retry_budget_exhausted" | "user_forbid_commands" | "readonly_mode_blocks_verification",
+  reason:
+    | "retry_budget_exhausted"
+    | "user_forbid_commands"
+    | "readonly_mode_blocks_verification"
+    | "permission_denied"
+    | "user_cancelled",
   language: Language,
 ): string {
   if (language === "en-US") {
+    if (reason === "permission_denied") {
+      return "The planned evidence action was denied for this request. Report only the affected conclusion as blocked.";
+    }
+    if (reason === "user_cancelled") {
+      return "The planned evidence action was cancelled for this request. Report only the affected conclusion as blocked.";
+    }
     if (reason === "user_forbid_commands") {
       return "Evidence gap remains, but the user explicitly constrained this turn to no commands/tests. Downgrade and state the needed authorization.";
     }
@@ -2012,6 +2400,12 @@ function formatEvidenceGapBlocker(
       return "Evidence gap requires verification commands, but current permission mode is read-only/plan. Downgrade and ask for authorization before running tests or Bash.";
     }
     return "Evidence gap remains and final-gate retry budget is exhausted. Downgrade without claiming completion.";
+  }
+  if (reason === "permission_denied") {
+    return "本请求中计划的补证动作被拒绝。只把对应结论标为受阻，不要泛化为整项失败。";
+  }
+  if (reason === "user_cancelled") {
+    return "本请求中计划的补证动作被取消。只把对应结论标为受阻，不要泛化为整项失败。";
   }
   if (reason === "user_forbid_commands") {
     return "证据缺口仍存在，但用户明确限制本轮不要执行命令/测试。请降级说明，并写明需要用户授权的下一步。";
@@ -2305,8 +2699,60 @@ function isCurrentForegroundRequestTurn(context: TuiContext, requestTurnId: stri
   return context.currentRequestTurnId === requestTurnId;
 }
 
-function clearForegroundRequestState(context: TuiContext, requestTurnId: string): void {
-  if (!isCurrentForegroundRequestTurn(context, requestTurnId)) return;
+function interruptedModelRequestReason(
+  signal: AbortSignal,
+): "model_abort" | "model_timeout" {
+  return signal.reason === MODEL_REQUEST_WALL_CLOCK_TIMEOUT_REASON ? "model_timeout" : "model_abort";
+}
+
+function armModelRequestWallClock(
+  controller: AbortController,
+  deadlineAtMs: number,
+  ownerIsCurrent: () => boolean,
+): NodeJS.Timeout | undefined {
+  const remainingMs = deadlineAtMs - Date.now();
+  if (remainingMs <= 0) {
+    controller.abort(MODEL_REQUEST_WALL_CLOCK_TIMEOUT_REASON);
+    return undefined;
+  }
+  return setTimeout(() => {
+    if (ownerIsCurrent() && !controller.signal.aborted) {
+      controller.abort(MODEL_REQUEST_WALL_CLOCK_TIMEOUT_REASON);
+    }
+  }, remainingMs);
+}
+
+export function ownsForegroundRequestState(
+  context: TuiContext,
+  requestTurnId: string,
+  expectedAbortController: AbortController,
+): boolean {
+  if (!isCurrentForegroundRequestTurn(context, requestTurnId)) {
+    return false;
+  }
+  if (context.activeAbortController === expectedAbortController) {
+    return true;
+  }
+  return (
+    context.activeAbortController === undefined &&
+    expectedAbortController.signal.aborted
+  );
+}
+
+export function clearForegroundRequestState(
+  context: TuiContext,
+  requestTurnId: string,
+  expectedAbortController: AbortController,
+): void {
+  if (
+    !ownsForegroundRequestState(
+      context,
+      requestTurnId,
+      expectedAbortController,
+    )
+  ) {
+    return;
+  }
   clearRequestActivity(context, { kind: "foreground", requestTurnId });
   if (context.currentUserActionConstraintsRequestTurnId === requestTurnId) {
     context.currentUserActionConstraints = undefined;
@@ -2316,6 +2762,9 @@ function clearForegroundRequestState(context: TuiContext, requestTurnId: string)
   context.foregroundAbortPendingUntilMs = undefined;
   context.tools.abortSignal = undefined;
   context.interrupt = { type: "idle" };
+  if (context.preEngineFallbackPreference?.requestTurnId === requestTurnId) {
+    context.preEngineFallbackPreference = undefined;
+  }
   context.currentRequestTurnId = undefined;
   context.currentRequestUserMessageId = undefined;
 }
@@ -2519,15 +2968,28 @@ export async function sendMessage(
   let finalGapProgressState: FinalGapProgressState | undefined;
   let modelLoopCompleted = false;
   let staleRequestRecorded = false;
+  const requestGenerationIsOwned = (): boolean =>
+    ownsForegroundRequestState(context, requestTurnId, controller);
   const requestOwnerIsCurrent = (): boolean =>
-    !controller.signal.aborted && isCurrentForegroundRequestTurn(context, requestTurnId);
+    !controller.signal.aborted &&
+    isCurrentForegroundRequestTurn(context, requestTurnId) &&
+    context.activeAbortController === controller;
+  const requestDeadlineAtMs = Date.now() + MODEL_REQUEST_WALL_CLOCK_LIMIT_MS;
+  const requestDeadlineTimer = armModelRequestWallClock(
+    controller,
+    requestDeadlineAtMs,
+    requestOwnerIsCurrent,
+  );
   const recordStaleRequest = async (): Promise<void> => {
     if (staleRequestRecorded) return;
     staleRequestRecorded = true;
-    if (controller.signal.aborted && isCurrentForegroundRequestTurn(context, requestTurnId)) {
+    if (
+      controller.signal.aborted &&
+      requestGenerationIsOwned()
+    ) {
       await recordInterruptedForegroundTurn(context, sessionId, {
         requestTurnId,
-        reason: "model_abort",
+        reason: interruptedModelRequestReason(controller.signal),
         userMessageId: userMessageEvent.id,
       });
       return;
@@ -2771,9 +3233,7 @@ export async function sendMessage(
   if (await stopStaleRequest()) return;
   context.currentUserActionConstraints = parseUserActionConstraints(text);
   context.currentUserActionConstraintsRequestTurnId = requestTurnId;
-    let evidenceRounds = 0;
     let consecutiveTodoOnlyRounds = 0;
-    let noProgressRounds = 0;
     let todoOnlyHintSent = false;
     let todoOnlyWarningSent = false;
     let rawToolProtocolTextRetries = 0;
@@ -2785,26 +3245,8 @@ export async function sendMessage(
     let reactiveCompactRetried = false;
     const _suggestedMax = metaSchedulerDecision.suggestedMaxTodoRounds;
     const _hintThreshold = Math.ceil(_suggestedMax * 0.5);
-    const _killThreshold = _suggestedMax + TODO_ONLY_KILL_GRACE;
     modelRoundLoop: for (let round = 0; ; round += 1) {
       if (await stopStaleRequest()) return;
-      if (round >= MAX_MODEL_TOTAL_TOOL_ROUNDS) {
-        await appendSystemEvent(
-          context,
-          sessionId,
-          `model_round_limit_reached rounds=${round}/${MAX_MODEL_TOTAL_TOOL_ROUNDS}`,
-          "warning",
-          requestOwnerIsCurrent,
-        );
-        assistantText = buildEvidenceBackedPartialAnswer(
-          context,
-          context.language === "en-US"
-            ? "execution reached this request's turn limit; the task is not complete"
-            : "执行已到达本请求轮次上限，任务尚未完成",
-        );
-        replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
-        break;
-      }
       if (round > 0) {
         assistantStreamBlockId = `assistant-stream-${assistantEventId}-${round}`;
         beginAssistantStream(output, assistantStreamBlockId, { holdStableCommit: true });
@@ -2912,7 +3354,7 @@ export async function sendMessage(
           : {}),
         ...(modelSupportsTools
           ? {
-              tools: createProviderToolDefinitionsForContext(context, reportWriteGuard),
+              tools: createModelToolDefinitionsForReportGuard(reportWriteGuard),
               toolChoice: "auto" as const,
               parallelToolCalls: false,
             }
@@ -2987,7 +3429,9 @@ export async function sendMessage(
       )) {
         if (!requestOwnerIsCurrent()) {
           await recordStaleRequest();
-          if (isCurrentForegroundRequestTurn(context, requestTurnId)) {
+          if (
+            requestGenerationIsOwned()
+          ) {
             cancelAssistantStream(output);
             writeLine(output, t(context, "toolInterrupted"));
           }
@@ -3059,8 +3503,11 @@ export async function sendMessage(
               reasoningSent: selectedRuntime.reasoningSent,
               requestTurnId,
               abortSignal: toolAttemptController.signal,
+              deadlineAtMs: requestDeadlineAtMs,
               attemptedRuntimeKeys: [...attemptedRuntimeKeys],
               originalUserText: text,
+              finalAnswerEvidenceActionRetries,
+              finalGapProgressState,
               ...(reportWriteGuard ? { reportWriteGuard } : {}),
             };
             earlyToolFeed = createStreamingToolCallFeed(toolCalls);
@@ -3072,6 +3519,7 @@ export async function sendMessage(
               {
                 continuation: earlyToolContinuation,
                 collectFailureFingerprints: true,
+                progressEvidenceAction: finalGapProgressState?.evidenceAction,
                 streamingFeed: earlyToolFeed,
               },
             );
@@ -3215,6 +3663,7 @@ export async function sendMessage(
             checkAndWriteProviderCooldown(context, selectedRuntime, output);
             continue modelRoundLoop;
           }
+          if (await stopStaleRequest()) return;
           await recordInterruptedForegroundTurn(context, sessionId, {
             requestTurnId,
             reason: "provider_disconnect",
@@ -3223,7 +3672,7 @@ export async function sendMessage(
           if (hadToolUse) {
             invalidateToolAttempt("provider_stream_failed_after_tool_use");
           }
-          if (isCurrentForegroundRequestTurn(context, requestTurnId)) {
+          if (requestOwnerIsCurrent()) {
             writeProviderTerminalError(output, event.error, context, requestTurnId);
           }
           return;
@@ -3317,7 +3766,7 @@ export async function sendMessage(
           rawToolProtocolTextRetries += 1;
           continue;
         }
-        assistantText = buildEvidenceBackedPartialAnswer(
+        assistantText = buildEvidenceBackedFailureAnswer(
           context,
           formatRawToolProtocolRetryFailure(context.language),
         );
@@ -3398,27 +3847,12 @@ export async function sendMessage(
         }
         if (toolFailureRecoveryState.repeatedFailureRounds > 0) {
           discardAssistantBlock(output, assistantStreamBlockId);
-          assistantText = buildEvidenceBackedPartialAnswer(
+          assistantText = buildEvidenceBackedFailureAnswer(
             context,
             context.language === "en-US"
               ? "the repeated tool failure did not recover; no unsupported completion is claimed"
               : "重复工具失败未能恢复，不声明未经证据支持的完成状态",
           );
-          roundAssistantText = assistantText;
-          replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
-          break;
-        }
-        if (consecutiveTodoOnlyRounds >= _killThreshold && todoOnlyWarningSent) {
-          const reason =
-            evidenceRounds === 0
-              ? context.language === "en-US"
-                ? "only planning/Todo was completed; no repository verification was performed"
-                : "只完成计划整理，尚未执行仓库验证"
-              : context.language === "en-US"
-                ? "the no-progress guard stopped execution before completion"
-                : "无进展保护已停止执行，任务尚未完成";
-          discardAssistantBlock(output, assistantStreamBlockId);
-          assistantText = buildEvidenceBackedPartialAnswer(context, reason);
           roundAssistantText = assistantText;
           replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
           break;
@@ -3506,17 +3940,22 @@ export async function sendMessage(
               });
               continue;
             }
+            const finalGapMadeProgress = finalGapHasProgress(
+              gateResult,
+              context,
+              finalGapProgressState,
+            );
             const actionPlan = planFinalGateEvidenceGapAction({
               result: gateResult,
               context,
               userText: text,
               assistantText,
-              retryBudgetRemaining: finalGapHasProgress(
-                gateResult,
-                context,
-                finalGapProgressState,
-              ),
               evidenceActionRetryCount: finalAnswerEvidenceActionRetries,
+              attemptedEvidenceActionFingerprints: unavailableFinalGapActionFingerprints(
+                finalGapProgressState,
+                finalGapMadeProgress,
+              ),
+              externalBlockReason: finalGapProgressState?.externalBlockReason,
             });
             await appendSystemEvent(
               context,
@@ -3527,39 +3966,99 @@ export async function sendMessage(
                 : "info",
             );
             if (await stopStaleRequest()) return;
-            if (actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only") {
+            if (actionPlan.action === "blocked_explanation") {
               await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
               if (await stopStaleRequest()) return;
               assistantText = buildEvidenceBackedFinalBoundaryAnswer(
                 gateResult,
                 context.language,
                 evidenceForCurrentVerificationScope(context),
+                actionPlan.reason === "permission_denied" || actionPlan.reason === "user_cancelled"
+                  ? actionPlan.reason
+                  : undefined,
               );
               replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
               break;
             }
+            if (actionPlan.action === "downgrade_only") {
+              await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+              if (await stopStaleRequest()) return;
+              assistantText = (
+                  actionPlan.reason === "final_gate_no_new_evidence_path"
+                )
+                ? buildEvidenceBackedFailureAnswer(
+                    context,
+                    context.language === "en-US"
+                      ? "all distinct applicable evidence paths were exhausted before the final gap closed"
+                      : "所有可用且不重复的真实补证路径均已尝试，但最终证据缺口仍未闭合",
+                  )
+                : buildEvidenceBackedFinalBoundaryAnswer(
+                    gateResult,
+                    context.language,
+                    evidenceForCurrentVerificationScope(context),
+                  );
+              replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+              break;
+            }
+            const autoExecuteEvidenceAction = shouldAutoExecuteFinalGapAction(
+              finalGapProgressState,
+              actionPlan.evidenceAction,
+              finalGapMadeProgress,
+            );
             discardAssistantBlock(output, assistantStreamBlockId);
             assistantText = "";
             roundAssistantText = "";
-            noProgressRounds += 1;
             finalAnswerEvidenceActionRetries += 1;
             finalGapProgressState = captureFinalGapProgressState(
               gateResult,
               context,
               actionPlan.evidenceAction,
               finalGapProgressState,
+              finalGapMadeProgress,
             );
-            messagesForProvider.push({ role: "user", content: actionPlan.directive });
-            await appendSystemEvent(
-              context,
-              sessionId,
-              `final_answer_gap_returned_to_model_loop reason=${actionPlan.reason} noProgress=${noProgressRounds}/${_killThreshold}`,
-              "warning",
-            );
-            continue;
+            if (autoExecuteEvidenceAction && actionPlan.evidenceAction) {
+              const syntheticToolCall = await createFinalGapEvidenceToolCall(
+                actionPlan.evidenceAction,
+                context,
+                finalAnswerEvidenceActionRetries,
+              );
+              if (await stopStaleRequest()) return;
+              if (syntheticToolCall) {
+                if (syntheticToolCall.name === "RunVerification") {
+                  abortSupersededFinalGapVerification(context);
+                }
+                toolCalls.push(syntheticToolCall);
+                await appendSystemEvent(
+                  context,
+                  sessionId,
+                  `final_answer_gap_auto_execute tool=${syntheticToolCall.name}`,
+                  "warning",
+                );
+                if (await stopStaleRequest()) return;
+              } else {
+                assistantText = buildEvidenceBackedFailureAnswer(
+                  context,
+                  context.language === "en-US"
+                    ? "the selected verification level has no executable command in the current workspace"
+                    : "当前工作区没有与所选验证级别匹配的可执行命令",
+                );
+                roundAssistantText = assistantText;
+                replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+                break;
+              }
+            } else {
+              messagesForProvider.push({ role: "user", content: actionPlan.directive });
+              await appendSystemEvent(
+                context,
+                sessionId,
+                `final_answer_gap_returned_to_model_loop reason=${actionPlan.reason}`,
+                "warning",
+              );
+              continue;
+            }
           }
         }
-        break;
+        if (toolCalls.length === 0) break;
       }
       if (await stopStaleRequest()) return;
       if (roundAssistantText) {
@@ -3576,7 +4075,6 @@ export async function sendMessage(
         consecutiveTodoOnlyRounds += 1;
       } else {
         consecutiveTodoOnlyRounds = 0;
-        evidenceRounds += 1;
       }
       const remainingToolCalls = earlyToolBatchResult ? [] : toolCalls;
       let toolBatchResult = earlyToolBatchResult;
@@ -3596,11 +4094,15 @@ export async function sendMessage(
               reasoningSent: selectedRuntime.reasoningSent,
               requestTurnId,
               abortSignal: controller.signal,
+              deadlineAtMs: requestDeadlineAtMs,
               attemptedRuntimeKeys: [...attemptedRuntimeKeys],
               originalUserText: text,
+              finalAnswerEvidenceActionRetries,
+              finalGapProgressState,
               ...(reportWriteGuard ? { reportWriteGuard } : {}),
             },
             collectFailureFingerprints: true,
+            progressEvidenceAction: finalGapProgressState?.evidenceAction,
           },
         );
         toolBatchResult = toolBatchResult
@@ -3635,7 +4137,7 @@ export async function sendMessage(
             `meta_scheduler:retry_guard_limit tool_failure_retries=${toolFailureRetries} repeated_same_failure=yes`,
             "warning",
           );
-          assistantText = buildEvidenceBackedPartialAnswer(
+          assistantText = buildEvidenceBackedFailureAnswer(
             context,
             context.language === "en-US"
               ? "the same tool failure repeated across rounds and reached the retry breaker"
@@ -3660,7 +4162,6 @@ export async function sendMessage(
           `pre_fallback_requires_real_tools count=${roundFallbackRequiredCount}`,
           "warning",
         );
-        continue;
       } else if (roundHadProgress) {
         toolFailureRetries = 0;
         toolFailureRecoveryState = { repeatedFailureRounds: 0 };
@@ -3669,8 +4170,8 @@ export async function sendMessage(
       if (todoOnly && consecutiveTodoOnlyRounds >= _hintThreshold && !todoOnlyHintSent) {
         const todoHint =
           context.language === "en-US"
-            ? "Planning recorded. Please proceed with verification tools (Read/Grep/Bash/GitStatusInspect); otherwise execution will pause at the runaway guard."
-            : "计划已记录。请继续执行验证工具（Read/Grep/Bash/GitStatusInspect）；否则执行将停在 runaway 保护处。";
+            ? "Planning recorded. Please proceed with verification tools (Read/Grep/Bash/GitStatusInspect); otherwise this remains a no-progress round."
+            : "计划已记录。请继续执行验证工具（Read/Grep/Bash/GitStatusInspect）；否则本轮仍记为无进展。";
         messagesForProvider.push({ role: "user", content: todoHint });
         todoOnlyHintSent = true;
         continue;
@@ -3678,25 +4179,11 @@ export async function sendMessage(
       if (todoOnly && consecutiveTodoOnlyRounds >= _suggestedMax && !todoOnlyWarningSent) {
         const warnMsg =
           context.language === "en-US"
-            ? "Planning phase is complete. This round will proceed without tools; the next round MUST call tools (Read/Grep/Bash or StartAgent/RunWorkflow) or execution will pause."
-            : "规划阶段已完成。本轮不会调用工具；下一轮必须调用工具（Read/Grep/Bash 或 StartAgent/RunWorkflow）执行，否则将暂停。";
+            ? "Planning phase is complete. The next round MUST call tools (Read/Grep/Bash or StartAgent/RunWorkflow) to make real progress."
+            : "规划阶段已完成。下一轮必须调用工具（Read/Grep/Bash 或 StartAgent/RunWorkflow）产生真实进展。";
         messagesForProvider.push({ role: "user", content: warnMsg });
         todoOnlyWarningSent = true;
         continue;
-      }
-      noProgressRounds = todoOnly || !roundHadProgress ? noProgressRounds + 1 : 0;
-      if (noProgressRounds > _killThreshold) {
-        const onlyPlanning = evidenceRounds === 0;
-        const reason = onlyPlanning
-          ? context.language === "en-US"
-            ? "only planning/Todo was completed; no repository verification was performed"
-            : "只完成计划整理，尚未执行仓库验证"
-          : context.language === "en-US"
-            ? "the no-progress guard stopped execution before completion"
-            : "无进展保护已停止执行，任务尚未完成";
-        assistantText = buildEvidenceBackedPartialAnswer(context, reason);
-        replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
-        break;
       }
     }
     modelLoopCompleted = true;
@@ -3787,8 +4274,9 @@ export async function sendMessage(
             context,
             userText: text,
             assistantText,
-            retryBudgetRemaining: false,
             evidenceActionRetryCount: finalAnswerEvidenceActionRetries,
+            attemptedEvidenceActionFingerprints: finalGapProgressState?.attemptedCommandFingerprints,
+            externalBlockReason: finalGapProgressState?.externalBlockReason,
           });
           await appendSystemEvent(
             context,
@@ -3805,6 +4293,9 @@ export async function sendMessage(
             gateResult,
             context.language,
             evidenceForCurrentVerificationScope(context),
+            actionPlan.reason === "permission_denied" || actionPlan.reason === "user_cancelled"
+              ? actionPlan.reason
+              : undefined,
           );
         }
         replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
@@ -3922,16 +4413,22 @@ export async function sendMessage(
   writeLightHints(output, context);
   writeStatus(output, context);
   } finally {
+    if (requestDeadlineTimer) clearTimeout(requestDeadlineTimer);
     try {
       if (!requestOwnerIsCurrent()) {
         await recordStaleRequest();
       }
     } finally {
-      if (isCurrentForegroundRequestTurn(context, requestTurnId)) {
-        if (assistantStreamStarted && (!modelLoopCompleted || !assistantText)) {
-          endAssistantStream(output);
+      if (
+        requestGenerationIsOwned()
+      ) {
+        try {
+          if (assistantStreamStarted && (!modelLoopCompleted || !assistantText)) {
+            endAssistantStream(output);
+          }
+        } finally {
+          clearForegroundRequestState(context, requestTurnId, controller);
         }
-        clearForegroundRequestState(context, requestTurnId);
       }
     }
   }
@@ -4515,12 +5012,9 @@ function modelHistoryCompactSummary(
     return content ? { role: "user", content } : undefined;
   }
   if (boundary?.kind !== "projection") return undefined;
-  const restoreMetadata = boundary.projection.restoreContext
-    ? `\n[Context restore metadata]\n${JSON.stringify(boundary.projection.restoreContext)}`
-    : "";
   return {
     role: "user",
-    content: `Context compact projection\n${boundary.projection.summary}${restoreMetadata}`,
+    content: formatCompactProjectionPromptSummary(boundary.projection),
   };
 }
 
@@ -4721,6 +5215,24 @@ async function budgetRecentContextToolResults(
   sessionId: string,
   messages: ModelMessage[],
 ): Promise<ModelMessage[]> {
+  const ledgerLookups = messages.flatMap((message) =>
+    message.role === "tool"
+      ? [{
+          toolUseId: message.tool_call_id,
+          contentSha256: createHash("sha256").update(message.content).digest("hex"),
+        }]
+      : [],
+  );
+  const ledgerResolutions =
+    ledgerLookups.length > 0
+      ? await resolveToolResultBudgetLedgerRecords(context, sessionId, ledgerLookups)
+      : [];
+  const resolutionByLookup = new Map(
+    ledgerLookups.map((lookup, index) => [
+      `${lookup.toolUseId}\0${lookup.contentSha256}`,
+      ledgerResolutions[index] ?? {},
+    ]),
+  );
   const budgetedMessages: ModelMessage[] = [];
   for (const message of messages) {
     if (message.role !== "tool") {
@@ -4732,6 +5244,10 @@ async function budgetRecentContextToolResults(
       sessionId,
       state: getToolResultBudgetState(context),
       singleResultChars: LINGHUN_PROVIDER_TOOL_RESULT_CHARS,
+      resolveLedgerRecords: (lookups) =>
+        lookups.map(
+          (lookup) => resolutionByLookup.get(`${lookup.toolUseId}\0${lookup.contentSha256}`) ?? {},
+        ),
     });
     for (const record of budgeted.records) {
       await recordToolResultBudgetEvidence(context, sessionId, record);
@@ -5040,7 +5556,7 @@ async function streamFinalModelAnswerWithoutTools(
   if (!assistantText) {
     clearRequestActivity(context, activityOwner);
     if (ignoredRawToolProtocolText) {
-      assistantText = buildEvidenceBackedPartialAnswer(
+      assistantText = buildEvidenceBackedFailureAnswer(
         context,
         formatRawToolProtocolRetryFailure(context.language),
       );
@@ -5111,8 +5627,8 @@ async function streamFinalModelAnswerWithoutTools(
         context,
         userText: continuation.originalUserText,
         assistantText,
-        retryBudgetRemaining: false,
         evidenceActionRetryCount,
+        externalBlockReason: continuation.finalGapProgressState?.externalBlockReason,
       });
       await appendSystemEvent(
         context,
@@ -5129,6 +5645,9 @@ async function streamFinalModelAnswerWithoutTools(
         gateResult,
         context.language,
         evidenceForCurrentVerificationScope(context),
+        actionPlan.reason === "permission_denied" || actionPlan.reason === "user_cancelled"
+          ? actionPlan.reason
+          : undefined,
       );
       replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
     }
@@ -5262,61 +5781,150 @@ export async function continueModelAfterToolResults(
   output: Writable,
 ): Promise<void> {
   const inheritedSignal = continuation.abortSignal;
-  if (inheritedSignal?.aborted) return;
+  const continuationOwnerAtEntry = continuation.requestTurnId;
+  const foregroundOwnerAtEntry = context.currentRequestTurnId;
+  const foregroundControllerAtEntry = context.activeAbortController;
+  const foregroundOwnerSignalAtEntry = context.tools?.abortSignal;
+  const inheritedContinuationOwnsEntryGeneration = (): boolean => {
+    if (
+      !inheritedSignal ||
+      !continuationOwnerAtEntry ||
+      context.currentRequestTurnId !== continuationOwnerAtEntry
+    ) {
+      return false;
+    }
+    if (!foregroundControllerAtEntry) {
+      return (
+        context.activeAbortController === undefined &&
+        foregroundOwnerSignalAtEntry === inheritedSignal &&
+        context.tools.abortSignal === inheritedSignal
+      );
+    }
+    if (
+      foregroundControllerAtEntry.signal !== inheritedSignal &&
+      foregroundOwnerSignalAtEntry !== inheritedSignal
+    ) {
+      return false;
+    }
+    return ownsForegroundRequestState(
+      context,
+      continuationOwnerAtEntry,
+      foregroundControllerAtEntry,
+    );
+  };
+  const stopAbortedInheritedContinuation = async (sessionId?: string): Promise<boolean> => {
+    if (!inheritedSignal?.aborted) return false;
+    if (inheritedContinuationOwnsEntryGeneration()) {
+      if (inheritedSignal.reason === MODEL_REQUEST_WALL_CLOCK_TIMEOUT_REASON) {
+        const interruptedSessionId = sessionId ?? await ensureSession(context);
+        if (inheritedContinuationOwnsEntryGeneration()) {
+          await recordInterruptedForegroundTurn(context, interruptedSessionId, {
+            requestTurnId: continuationOwnerAtEntry,
+            reason: "model_timeout",
+          });
+        }
+      }
+      if (
+        continuationOwnerAtEntry &&
+        foregroundControllerAtEntry &&
+        inheritedContinuationOwnsEntryGeneration()
+      ) {
+        clearForegroundRequestState(
+          context,
+          continuationOwnerAtEntry,
+          foregroundControllerAtEntry,
+        );
+      }
+    }
+    return true;
+  };
+  if (await stopAbortedInheritedContinuation()) return;
   if (
-    continuation.requestTurnId &&
-    continuation.requestTurnId !== context.currentRequestTurnId
+    continuationOwnerAtEntry &&
+    continuationOwnerAtEntry !== context.currentRequestTurnId
   ) {
     return;
   }
   const sessionId = await ensureSession(context);
+  if (await stopAbortedInheritedContinuation(sessionId)) return;
+  if (
+    (continuationOwnerAtEntry && continuationOwnerAtEntry !== context.currentRequestTurnId) ||
+    (!continuationOwnerAtEntry && context.currentRequestTurnId !== foregroundOwnerAtEntry) ||
+    context.activeAbortController !== foregroundControllerAtEntry
+  ) {
+    return;
+  }
   const requestTurnId = continuation.requestTurnId ?? beginForegroundRequestTurn(context);
+  const requestDeadlineAtMs =
+    continuation.deadlineAtMs ?? Date.now() + MODEL_REQUEST_WALL_CLOCK_LIMIT_MS;
+  continuation.deadlineAtMs = requestDeadlineAtMs;
   const controller = new AbortController();
   const abortFromInheritedSignal = () => controller.abort(inheritedSignal?.reason);
-  inheritedSignal?.addEventListener("abort", abortFromInheritedSignal, { once: true });
-  if (inheritedSignal?.aborted) controller.abort(inheritedSignal.reason);
-  continuation.requestTurnId = requestTurnId;
-  continuation.abortSignal = controller.signal;
   const originalContProvider = continuation.provider;
   const originalContModel = continuation.model;
-  context.activeAbortController = controller;
-  context.tools.abortSignal = controller.signal;
-  context.interrupt = { type: "running", taskId: "model-continuation", canCancel: true };
-  startRequestActivity(output, context, "continuing_after_tool");
   let assistantText = "";
   let committedIntermediateAssistantText = "";
-  let finalAnswerEvidenceActionRetries = 0;
+  let finalAnswerEvidenceActionRetries = continuation.finalAnswerEvidenceActionRetries ?? 0;
   let finalAnswerClaimAlignmentRewrites = 0;
-  let finalGapProgressState: FinalGapProgressState | undefined;
+  let finalGapProgressState = continuation.finalGapProgressState;
   let continuationLoopCompleted = false;
   const assistantEventId = randomUUID();
   // 每轮 round 都会开新的 streaming block，避免不同轮的输出粘到同一行。
   let assistantStreamBlockId = `assistant-stream-cont-${assistantEventId}-0`;
-  beginAssistantStream(output, assistantStreamBlockId, { holdStableCommit: true });
+  let assistantStreamStarted = false;
   let staleContinuationRecorded = false;
+  const requestGenerationIsOwned = (): boolean =>
+    ownsForegroundRequestState(context, requestTurnId, controller);
   const requestOwnerIsCurrent = (): boolean =>
-    !controller.signal.aborted && isCurrentForegroundRequestTurn(context, requestTurnId);
+    !controller.signal.aborted &&
+    isCurrentForegroundRequestTurn(context, requestTurnId) &&
+    context.activeAbortController === controller;
+  let requestDeadlineTimer: NodeJS.Timeout | undefined;
   const stopStaleContinuation = async (): Promise<boolean> => {
     if (requestOwnerIsCurrent()) return false;
     if (!staleContinuationRecorded) {
       staleContinuationRecorded = true;
-      await appendSystemEvent(
-        context,
-        sessionId,
-        `stale_foreground_continuation_dropped: requestTurnId=${requestTurnId}`,
-        "warning",
-      );
+      if (
+        controller.signal.aborted &&
+        requestGenerationIsOwned()
+      ) {
+        await recordInterruptedForegroundTurn(context, sessionId, {
+          requestTurnId,
+          reason: interruptedModelRequestReason(controller.signal),
+        });
+      } else {
+        await appendSystemEvent(
+          context,
+          sessionId,
+          `stale_foreground_continuation_dropped: requestTurnId=${requestTurnId}`,
+          "warning",
+        );
+      }
     }
     return true;
   };
-  const agentCompletionNoticeIdsForTurn = injectAgentCompletionMainChainContext(
-    continuation.messages,
-    context,
-  );
+  let agentCompletionNoticeIdsForTurn: string[] = [];
   try {
-    let evidenceRounds = 0;
+    inheritedSignal?.addEventListener("abort", abortFromInheritedSignal, { once: true });
+    if (inheritedSignal?.aborted) controller.abort(inheritedSignal.reason);
+    continuation.requestTurnId = requestTurnId;
+    continuation.abortSignal = controller.signal;
+    context.activeAbortController = controller;
+    context.tools.abortSignal = controller.signal;
+    context.interrupt = { type: "running", taskId: "model-continuation", canCancel: true };
+    startRequestActivity(output, context, "continuing_after_tool");
+    beginAssistantStream(output, assistantStreamBlockId, { holdStableCommit: true });
+    assistantStreamStarted = true;
+    requestDeadlineTimer = armModelRequestWallClock(
+      controller,
+      requestDeadlineAtMs,
+      requestOwnerIsCurrent,
+    );
+    agentCompletionNoticeIdsForTurn = injectAgentCompletionMainChainContext(
+      continuation.messages,
+      context,
+    );
     let consecutiveTodoOnlyRounds = 0;
-    let noProgressRounds = 0;
     let todoOnlyHintSent = false;
     let todoOnlyWarningSent = false;
     let rawToolProtocolTextRetries = 0;
@@ -5332,25 +5940,8 @@ export async function continueModelAfterToolResults(
     let toolFailureNoToolRecoveryPrompts = 0;
     const _suggestedMax = context.lastMetaSchedulerDecision?.suggestedMaxTodoRounds ?? MAX_TODO_ONLY_CODE_FACT;
     const _hintThreshold = Math.ceil(_suggestedMax * 0.5);
-    const _killThreshold = _suggestedMax + TODO_ONLY_KILL_GRACE;
     continuationRoundLoop: for (let round = 0; ; round += 1) {
-      if (round >= MAX_MODEL_TOTAL_TOOL_ROUNDS) {
-        await appendSystemEvent(
-          context,
-          sessionId,
-          `model_round_limit_reached continuation=yes rounds=${round}/${MAX_MODEL_TOTAL_TOOL_ROUNDS}`,
-          "warning",
-          requestOwnerIsCurrent,
-        );
-        assistantText = buildEvidenceBackedPartialAnswer(
-          context,
-          context.language === "en-US"
-            ? "continuation reached this request's turn limit; the task is not complete"
-            : "续轮执行已到达本请求轮次上限，任务尚未完成",
-        );
-        replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
-        break;
-      }
+      if (await stopStaleContinuation()) return;
       if (round > 0) {
         assistantStreamBlockId = `assistant-stream-cont-${assistantEventId}-${round}`;
         beginAssistantStream(output, assistantStreamBlockId, { holdStableCommit: true });
@@ -5374,6 +5965,7 @@ export async function continueModelAfterToolResults(
         trigger: "continuation",
         deps: compactPreflightDeps,
       });
+      if (await stopStaleContinuation()) return;
       if (preflight.blocked) {
         clearRequestActivity(context);
         writeLine(output, preflight.message);
@@ -5432,7 +6024,7 @@ export async function continueModelAfterToolResults(
         ...(continuation.reasoningSent ? { reasoningLevel: continuation.reasoningLevel } : {}),
         ...(continuationToolsEnabled
           ? {
-              tools: createProviderToolDefinitionsForContext(context, continuation.reportWriteGuard),
+              tools: createModelToolDefinitionsForReportGuard(continuation.reportWriteGuard),
               toolChoice: "auto" as const,
               parallelToolCalls: false,
             }
@@ -5509,18 +6101,22 @@ export async function continueModelAfterToolResults(
         // continuation messages。与 sendMessage 顶层的 controller.signal.aborted
         // 早返回保持一致。
         if (controller.signal.aborted) {
-          await recordInterruptedForegroundTurn(context, sessionId, {
-            requestTurnId,
-            reason: "model_abort",
-          });
-          if (isCurrentForegroundRequestTurn(context, requestTurnId)) {
-            clearForegroundRequestState(context, requestTurnId);
+          if (
+            requestGenerationIsOwned()
+          ) {
+            await recordInterruptedForegroundTurn(context, sessionId, {
+              requestTurnId,
+              reason: interruptedModelRequestReason(controller.signal),
+            });
+            clearForegroundRequestState(context, requestTurnId, controller);
             cancelAssistantStream(output);
             writeLine(output, t(context, "toolInterrupted"));
+          } else {
+            await stopStaleContinuation();
           }
           return;
         }
-        if (!isCurrentForegroundRequestTurn(context, requestTurnId)) {
+        if (!requestOwnerIsCurrent()) {
           await stopStaleContinuation();
           return;
         }
@@ -5585,6 +6181,8 @@ export async function continueModelAfterToolResults(
                 },
               ],
               abortSignal: toolAttemptController.signal,
+              finalAnswerEvidenceActionRetries,
+              finalGapProgressState,
             };
             earlyToolFeed = createStreamingToolCallFeed(pendingContinuationToolUses);
             earlyToolExecution = executeToolCallsWithReadonlyParallelism(
@@ -5595,6 +6193,7 @@ export async function continueModelAfterToolResults(
               {
                 continuation: earlyToolContinuation,
                 collectFailureFingerprints: true,
+                progressEvidenceAction: finalGapProgressState?.evidenceAction,
                 streamingFeed: earlyToolFeed,
               },
             );
@@ -5735,11 +6334,12 @@ export async function continueModelAfterToolResults(
             checkAndWriteProviderCooldown(context, fallback.runtime, output);
             continue continuationRoundLoop;
           }
+          if (await stopStaleContinuation()) return;
           await recordInterruptedForegroundTurn(context, sessionId, {
             requestTurnId,
             reason: "provider_disconnect",
           });
-          if (isCurrentForegroundRequestTurn(context, requestTurnId)) {
+          if (requestOwnerIsCurrent()) {
             writeProviderTerminalError(output, event.error, context, requestTurnId);
           }
           return;
@@ -5834,7 +6434,7 @@ export async function continueModelAfterToolResults(
           rawToolProtocolTextRetries += 1;
           continue;
         }
-        assistantText = buildEvidenceBackedPartialAnswer(
+        assistantText = buildEvidenceBackedFailureAnswer(
           context,
           formatRawToolProtocolRetryFailure(context.language),
         );
@@ -5874,7 +6474,7 @@ export async function continueModelAfterToolResults(
         }
         if (toolFailureRecoveryState.repeatedFailureRounds > 0) {
           discardAssistantBlock(output, assistantStreamBlockId);
-          assistantText = buildEvidenceBackedPartialAnswer(
+          assistantText = buildEvidenceBackedFailureAnswer(
             context,
             context.language === "en-US"
               ? "the repeated tool failure did not recover; no unsupported completion is claimed"
@@ -5970,7 +6570,12 @@ export async function continueModelAfterToolResults(
             runtimeFromContinuation(continuation),
             requestOwnerIsCurrent,
           );
-          const gateResult = evaluateAggregatedFinalAnswerGate(context, assistantText);
+          if (await stopStaleContinuation()) return;
+          const gateResult = evaluateAggregatedFinalAnswerGate(
+            context,
+            assistantText,
+            context.lastMetaSchedulerDecision?.shouldRunFinalAnswerGate ?? true,
+          );
           if (gateResult.status === "needs_disclaimer") {
             await appendSystemEvent(
               context,
@@ -5978,6 +6583,7 @@ export async function continueModelAfterToolResults(
               `final_answer_gate_aggregated retry kinds=${gateResult.unsupportedKinds.join(",")}`,
               "warning",
             );
+            if (await stopStaleContinuation()) return;
             if (
               shouldRewriteFinalGateClaimAlignment(gateResult, context) &&
               finalAnswerClaimAlignmentRewrites < MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES
@@ -5989,6 +6595,7 @@ export async function continueModelAfterToolResults(
                 `final_answer_claim_alignment_rewrite continuation=yes attempt=${finalAnswerClaimAlignmentRewrites}`,
                 "warning",
               );
+              if (await stopStaleContinuation()) return;
               discardAssistantBlock(output, assistantStreamBlockId);
               assistantText = "";
               roundAssistantText = "";
@@ -5998,17 +6605,22 @@ export async function continueModelAfterToolResults(
               });
               continue;
             }
+            const finalGapMadeProgress = finalGapHasProgress(
+              gateResult,
+              context,
+              finalGapProgressState,
+            );
             const actionPlan = planFinalGateEvidenceGapAction({
               result: gateResult,
               context,
               userText: continuation.originalUserText,
               assistantText,
-              retryBudgetRemaining: finalGapHasProgress(
-                gateResult,
-                context,
-                finalGapProgressState,
-              ),
               evidenceActionRetryCount: finalAnswerEvidenceActionRetries,
+              attemptedEvidenceActionFingerprints: unavailableFinalGapActionFingerprints(
+                finalGapProgressState,
+                finalGapMadeProgress,
+              ),
+              externalBlockReason: finalGapProgressState?.externalBlockReason,
             });
             await appendSystemEvent(
               context,
@@ -6018,38 +6630,100 @@ export async function continueModelAfterToolResults(
                 ? "warning"
                 : "info",
             );
-            if (actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only") {
+            if (await stopStaleContinuation()) return;
+            if (actionPlan.action === "blocked_explanation") {
               await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+              if (await stopStaleContinuation()) return;
               assistantText = buildEvidenceBackedFinalBoundaryAnswer(
                 gateResult,
                 context.language,
                 evidenceForCurrentVerificationScope(context),
+                actionPlan.reason === "permission_denied" || actionPlan.reason === "user_cancelled"
+                  ? actionPlan.reason
+                  : undefined,
               );
               replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
               break;
             }
+            if (actionPlan.action === "downgrade_only") {
+              await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+              if (await stopStaleContinuation()) return;
+              assistantText = (
+                  actionPlan.reason === "final_gate_no_new_evidence_path"
+                )
+                ? buildEvidenceBackedFailureAnswer(
+                    context,
+                    context.language === "en-US"
+                      ? "all distinct applicable evidence paths were exhausted before the final gap closed"
+                      : "所有可用且不重复的真实补证路径均已尝试，但最终证据缺口仍未闭合",
+                  )
+                : buildEvidenceBackedFinalBoundaryAnswer(
+                    gateResult,
+                    context.language,
+                    evidenceForCurrentVerificationScope(context),
+                  );
+              replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+              break;
+            }
+            const autoExecuteEvidenceAction = shouldAutoExecuteFinalGapAction(
+              finalGapProgressState,
+              actionPlan.evidenceAction,
+              finalGapMadeProgress,
+            );
             discardAssistantBlock(output, assistantStreamBlockId);
             assistantText = "";
             roundAssistantText = "";
-            noProgressRounds += 1;
             finalAnswerEvidenceActionRetries += 1;
             finalGapProgressState = captureFinalGapProgressState(
               gateResult,
               context,
               actionPlan.evidenceAction,
               finalGapProgressState,
+              finalGapMadeProgress,
             );
-            continuation.messages.push({ role: "user", content: actionPlan.directive });
-            await appendSystemEvent(
-              context,
-              sessionId,
-              `final_answer_gap_returned_to_model_loop continuation=yes reason=${actionPlan.reason} noProgress=${noProgressRounds}/${_killThreshold}`,
-              "warning",
-            );
-            continue;
+            if (autoExecuteEvidenceAction && actionPlan.evidenceAction) {
+              const syntheticToolCall = await createFinalGapEvidenceToolCall(
+                actionPlan.evidenceAction,
+                context,
+                finalAnswerEvidenceActionRetries,
+              );
+              if (await stopStaleContinuation()) return;
+              if (syntheticToolCall) {
+                if (syntheticToolCall.name === "RunVerification") {
+                  abortSupersededFinalGapVerification(context);
+                }
+                toolCalls.push(syntheticToolCall);
+                await appendSystemEvent(
+                  context,
+                  sessionId,
+                  `final_answer_gap_auto_execute continuation=yes tool=${syntheticToolCall.name}`,
+                  "warning",
+                );
+                if (await stopStaleContinuation()) return;
+              } else {
+                assistantText = buildEvidenceBackedFailureAnswer(
+                  context,
+                  context.language === "en-US"
+                    ? "the selected verification level has no executable command in the current workspace"
+                    : "当前工作区没有与所选验证级别匹配的可执行命令",
+                );
+                roundAssistantText = assistantText;
+                replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+                break;
+              }
+            } else {
+              continuation.messages.push({ role: "user", content: actionPlan.directive });
+              await appendSystemEvent(
+                context,
+                sessionId,
+                `final_answer_gap_returned_to_model_loop continuation=yes reason=${actionPlan.reason}`,
+                "warning",
+              );
+              continue;
+            }
           }
         }
-        break;
+        if (toolCalls.length === 0) break;
       }
       if (roundAssistantText) {
         replaceAssistantBlockContent(output, assistantStreamBlockId, roundAssistantText);
@@ -6066,11 +6740,12 @@ export async function continueModelAfterToolResults(
         consecutiveTodoOnlyRounds += 1;
       } else {
         consecutiveTodoOnlyRounds = 0;
-        evidenceRounds += 1;
       }
       const remainingToolCalls = earlyToolBatchResult ? [] : toolCalls;
       let toolBatchResult = earlyToolBatchResult;
       if (remainingToolCalls.length > 0) {
+        continuation.finalAnswerEvidenceActionRetries = finalAnswerEvidenceActionRetries;
+        continuation.finalGapProgressState = finalGapProgressState;
         const remainingResult = await executeToolCallsWithReadonlyParallelism(
           remainingToolCalls,
           context,
@@ -6079,6 +6754,7 @@ export async function continueModelAfterToolResults(
           {
             continuation,
             collectFailureFingerprints: true,
+            progressEvidenceAction: finalGapProgressState?.evidenceAction,
           },
         );
         toolBatchResult = toolBatchResult
@@ -6111,7 +6787,7 @@ export async function continueModelAfterToolResults(
             `meta_scheduler:retry_guard_limit continuation=yes repeated_same_failure=yes rounds=${toolFailureRecoveryState.repeatedFailureRounds}`,
             "warning",
           );
-          assistantText = buildEvidenceBackedPartialAnswer(
+          assistantText = buildEvidenceBackedFailureAnswer(
             context,
             context.language === "en-US"
               ? "the same tool failure repeated across rounds and reached the retry breaker"
@@ -6135,8 +6811,6 @@ export async function continueModelAfterToolResults(
           `pre_fallback_requires_real_tools count=${roundFallbackRequiredCount}`,
           "warning",
         );
-        noProgressRounds = 0;
-        continue;
       } else if (roundHadProgress) {
         toolFailureRecoveryState = { repeatedFailureRounds: 0 };
         toolFailureNoToolRecoveryPrompts = 0;
@@ -6145,26 +6819,21 @@ export async function continueModelAfterToolResults(
         if (!todoOnlyHintSent) {
           const todoHint =
             context.language === "en-US"
-              ? "Planning recorded. Please proceed with verification tools (Read/Grep/Bash/GitStatusInspect); otherwise execution will pause at the runaway guard."
-              : "计划已记录。请继续执行验证工具（Read/Grep/Bash/GitStatusInspect）；否则执行将停在 runaway 保护处。";
+              ? "Planning recorded. Please proceed with verification tools (Read/Grep/Bash/GitStatusInspect); otherwise this remains a no-progress round."
+              : "计划已记录。请继续执行验证工具（Read/Grep/Bash/GitStatusInspect）；否则本轮仍记为无进展。";
           continuation.messages.push({ role: "user", content: todoHint });
           todoOnlyHintSent = true;
           continue;
         }
       }
-      noProgressRounds = todoOnly || !roundHadProgress ? noProgressRounds + 1 : 0;
-      if (noProgressRounds > _killThreshold) {
-        const onlyPlanning = evidenceRounds === 0;
-        const reason = onlyPlanning
-          ? context.language === "en-US"
-            ? "only planning/Todo was completed; no repository verification was performed"
-            : "只完成计划整理，尚未执行仓库验证"
-          : context.language === "en-US"
-            ? "the no-progress guard stopped continuation before completion"
-            : "无进展保护已停止续轮执行，任务尚未完成";
-        assistantText = buildEvidenceBackedPartialAnswer(context, reason);
-        replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
-        break;
+      if (todoOnly && consecutiveTodoOnlyRounds >= _suggestedMax && !todoOnlyWarningSent) {
+        const warnMsg =
+          context.language === "en-US"
+            ? "Planning phase is complete. The next round MUST call tools (Read/Grep/Bash or StartAgent/RunWorkflow) to make real progress."
+            : "规划阶段已完成。下一轮必须调用工具（Read/Grep/Bash 或 StartAgent/RunWorkflow）产生真实进展。";
+        continuation.messages.push({ role: "user", content: warnMsg });
+        todoOnlyWarningSent = true;
+        continue;
       }
     }
     continuationLoopCompleted = true;
@@ -6232,8 +6901,9 @@ export async function continueModelAfterToolResults(
               context,
               userText: continuation.originalUserText,
               assistantText,
-              retryBudgetRemaining: false,
               evidenceActionRetryCount: finalAnswerEvidenceActionRetries,
+              attemptedEvidenceActionFingerprints: finalGapProgressState?.attemptedCommandFingerprints,
+              externalBlockReason: finalGapProgressState?.externalBlockReason,
             });
             await appendSystemEvent(
               context,
@@ -6250,6 +6920,9 @@ export async function continueModelAfterToolResults(
               gateResult,
               context.language,
               evidenceForCurrentVerificationScope(context),
+              actionPlan.reason === "permission_denied" || actionPlan.reason === "user_cancelled"
+                ? actionPlan.reason
+                : undefined,
             );
           }
           replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
@@ -6327,12 +7000,18 @@ export async function continueModelAfterToolResults(
       }
     }
   } finally {
+    if (requestDeadlineTimer) clearTimeout(requestDeadlineTimer);
     inheritedSignal?.removeEventListener("abort", abortFromInheritedSignal);
-    if (isCurrentForegroundRequestTurn(context, requestTurnId)) {
-      if (!continuationLoopCompleted || !assistantText) {
-        endAssistantStream(output);
+    if (
+      requestGenerationIsOwned()
+    ) {
+      try {
+        if (assistantStreamStarted && (!continuationLoopCompleted || !assistantText)) {
+          endAssistantStream(output);
+        }
+      } finally {
+        clearForegroundRequestState(context, requestTurnId, controller);
       }
-      clearForegroundRequestState(context, requestTurnId);
     }
   }
 }

@@ -102,6 +102,7 @@ function semanticLocation(root, location, name) {
 class GoplsSession {
   constructor(root, executable) {
     this.root = path.resolve(root);
+    this.canonicalRoot = fs.realpathSync.native(this.root);
     this.executable = executable;
     this.child = null;
     this.buffer = Buffer.alloc(0);
@@ -121,15 +122,18 @@ class GoplsSession {
     const files = new Map();
     const configs = new Map();
     const visit = directory => {
-      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const canonicalDirectory = this.boundedExistingPath(directory, true);
+      if (!canonicalDirectory) return;
+      for (const entry of fs.readdirSync(canonicalDirectory, { withFileTypes: true })) {
         if (entry.isDirectory()) {
           if (![".git", "node_modules", "target", "vendor"].includes(entry.name)) {
-            visit(path.join(directory, entry.name));
+            visit(path.join(canonicalDirectory, entry.name));
           }
           continue;
         }
         if (!entry.name.endsWith(".go") && !GO_CONFIG_FILES.includes(entry.name)) continue;
-        const absolute = path.join(directory, entry.name);
+        const absolute = this.boundedExistingPath(path.join(canonicalDirectory, entry.name), true);
+        if (!absolute) continue;
         const stat = fs.statSync(absolute);
         const relative = normalize(path.relative(this.root, absolute));
         const stamp = `${stat.mtimeMs}:${stat.size}`;
@@ -139,6 +143,33 @@ class GoplsSession {
     };
     visit(this.root);
     return { configStamp: this.configStampFor(configs), configs, files };
+  }
+
+  boundedExistingPath(candidate, alreadyResolved = false) {
+    if (typeof candidate !== "string" || candidate.length === 0) return null;
+    if (!alreadyResolved) {
+      const normalized = normalize(candidate);
+      if (
+        path.isAbsolute(candidate) ||
+        normalized.startsWith("/") ||
+        /^[A-Za-z]:/u.test(normalized) ||
+        normalized.split("/").includes("..")
+      ) return null;
+    }
+    const absolute = alreadyResolved ? path.resolve(candidate) : path.resolve(this.root, candidate);
+    const lexicalRelative = path.relative(this.root, absolute);
+    if (lexicalRelative === ".." || lexicalRelative.startsWith(`..${path.sep}`) || path.isAbsolute(lexicalRelative)) {
+      return null;
+    }
+    if (!fs.existsSync(absolute)) return null;
+    const canonical = fs.realpathSync.native(absolute);
+    const canonicalRelative = path.relative(this.canonicalRoot, canonical);
+    if (
+      canonicalRelative === ".." ||
+      canonicalRelative.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(canonicalRelative)
+    ) return null;
+    return canonical;
   }
 
   configStampFor(configs) {
@@ -361,8 +392,8 @@ class GoplsSession {
   }
 
   async openFile(file) {
-    const absolute = path.resolve(this.root, file);
-    if (!fs.existsSync(absolute)) return null;
+    const absolute = this.boundedExistingPath(file);
+    if (!absolute) return null;
     const text = fs.readFileSync(absolute, "utf8");
     const stat = fs.statSync(absolute);
     const stamp = `${stat.mtimeMs}:${stat.size}`;

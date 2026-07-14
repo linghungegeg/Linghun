@@ -109,7 +109,7 @@ export type RecentToolDiagnostic = {
 
 export type BashBackgroundResult = {
   taskId: string;
-  exitCode: number;
+  exitCode?: number;
   outcome: "completed" | "timeout" | "cancelled";
   outputPath: string;
   command: string;
@@ -1553,13 +1553,16 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     context.trackChildProcess,
     createBashNoOutputHint(input.command),
   );
-  const cmdInterpretation = interpretCommandResult(input.command, result.exitCode);
+  const cmdInterpretation =
+    result.outcome === "completed" && result.exitCode !== undefined
+      ? interpretCommandResult(input.command, result.exitCode)
+      : undefined;
   const diagnostics = createBashOutcomeDiagnostics(input.command, result.outcome);
   const trailerLines = [
     "",
-    `exit code ${result.exitCode}`,
+    `exit code ${result.exitCode ?? "unavailable"}`,
     `outcome ${result.outcome}`,
-    ...(cmdInterpretation.message ? [`returnCodeInterpretation: ${cmdInterpretation.message}`] : []),
+    ...(cmdInterpretation?.message ? [`returnCodeInterpretation: ${cmdInterpretation.message}`] : []),
   ];
   await appendFileToPath(fullOutputPath, `${trailerLines.join("\n")}\n`);
   result.capture.appendLogOnly(`${trailerLines.join("\n")}\n`);
@@ -1567,12 +1570,16 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
   const details = createBashDetails(fullOutputPath, result.capture);
   const data =
     adapted.adapter === "native"
-      ? { exitCode: result.exitCode, outcome: result.outcome }
-      : { exitCode: result.exitCode, outcome: result.outcome, adapter: adapted.adapter };
+      ? { ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}), outcome: result.outcome }
+      : {
+          ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
+          outcome: result.outcome,
+          adapter: adapted.adapter,
+        };
   const outputData = {
     ...data,
-    ...(cmdInterpretation.message ? { returnCodeInterpretation: cmdInterpretation.message } : {}),
-    ...(cmdInterpretation.isError === false && result.exitCode !== 0 ? { isError: false } : {}),
+    ...(cmdInterpretation?.message ? { returnCodeInterpretation: cmdInterpretation.message } : {}),
+    ...(cmdInterpretation?.isError === false && result.exitCode !== 0 ? { isError: false } : {}),
     ...(diagnostics.length > 0 ? { diagnostics } : {}),
   };
   const truncated = result.capture.isTruncated();
@@ -3900,6 +3907,8 @@ async function runRipgrep(
     const lines: string[] = [];
     let pending = "";
     let stderr = "";
+    const stdoutDecoder = createShellChunkDecoder();
+    const stderrDecoder = createShellChunkDecoder();
     let resolved = false;
     let killedForLimit = false;
     const timeout = setTimeout(() => {
@@ -3917,7 +3926,7 @@ async function runRipgrep(
       resolvePromise(value);
     };
     child.stdout.on("data", (chunk: Buffer) => {
-      pending += decodeShellChunk(chunk);
+      pending += stdoutDecoder.push(chunk);
       const parts = pending.split(/\r?\n/u);
       pending = parts.pop() ?? "";
       for (const line of parts) {
@@ -3933,10 +3942,19 @@ async function runRipgrep(
       }
     });
     child.stderr.on("data", (chunk: Buffer) => {
-      stderr += decodeShellChunk(chunk);
+      stderr += stderrDecoder.push(chunk);
     });
     child.on("error", () => finish(null));
     child.on("close", (code) => {
+      pending += stdoutDecoder.flush();
+      stderr += stderrDecoder.flush();
+      const flushedLines = pending.split(/\r?\n/u);
+      pending = flushedLines.pop() ?? "";
+      for (const line of flushedLines) {
+        if (!line || lines.length >= limit) continue;
+        const mapped = mapLine(line);
+        if (mapped) lines.push(mapped);
+      }
       if (pending && lines.length < limit) {
         const mapped = mapLine(pending);
         if (mapped) {
@@ -3987,7 +4005,7 @@ function runShell(
   onProgress?: (stream: "stdout" | "stderr" | "system", text: string) => void,
   trackChildProcess?: ToolContext["trackChildProcess"],
   noOutputHint?: string,
-): Promise<{ exitCode: number; capture: BashOutputCapture; outcome: "completed" | "timeout" | "cancelled" }> {
+): Promise<{ exitCode?: number; capture: BashOutputCapture; outcome: "completed" | "timeout" | "cancelled" }> {
   return new Promise((resolvePromise) => {
     const detached = process.platform !== "win32";
     const child = spawn(command, { cwd, shell: true, windowsHide: true, detached });
@@ -4009,6 +4027,17 @@ function runShell(
       }
       logWrite = logWrite.then(() => appendFileToPath(fullOutputPath, sanitized));
     };
+    const stdoutDecoder = createShellChunkDecoder();
+    const stderrDecoder = createShellChunkDecoder();
+    const appendDecodedChunk = (stream: "stdout" | "stderr", text: string): void => {
+      if (!text) return;
+      appendSanitizedChunk(text, true);
+      onProgress?.(stream, text);
+    };
+    const flushDecodedChunks = (): void => {
+      appendDecodedChunk("stdout", stdoutDecoder.flush());
+      appendDecodedChunk("stderr", stderrDecoder.flush());
+    };
     let settled = false;
     let forcedKillTimer: NodeJS.Timeout | undefined;
     let heartbeatTimer: NodeJS.Timeout | undefined;
@@ -4017,13 +4046,14 @@ function runShell(
     let stoppingOutcome: "timeout" | "cancelled" | undefined;
     let childClosed = false;
     const finish = (
-      exitCode: number,
+      exitCode: number | undefined,
       outcome: "completed" | "timeout" | "cancelled" = "completed",
     ) => {
       if (settled) {
         return;
       }
       settled = true;
+      flushDecodedChunks();
       clearTimeout(timer);
       if (heartbeatTimer) {
         clearTimeout(heartbeatTimer);
@@ -4077,7 +4107,7 @@ function runShell(
         void requestStop(false);
         scheduleForceStop();
       }
-      finish(1, "cancelled");
+      finish(undefined, "cancelled");
     };
     const timer = setTimeout(() => {
       void handleTimeout();
@@ -4093,7 +4123,7 @@ function runShell(
         void requestStop(false);
         scheduleForceStop();
       }
-      finish(1, "timeout");
+      finish(undefined, "timeout");
     };
     if (signal?.aborted) {
       void onAbort();
@@ -4125,23 +4155,21 @@ function runShell(
     // D.14H Phase 7.5-C：Windows 控制台输出可能为 GBK/GB18030 编码，
     // UTF-8 decode 会产生 � 或 mojibake。优先 UTF-8，检测到问题时回退 GB18030。
     child.stdout.on("data", (chunk: Buffer) => {
-      const text = decodeShellChunk(chunk);
+      const text = stdoutDecoder.push(chunk);
       markOutput();
-      appendSanitizedChunk(text, true);
-      onProgress?.("stdout", text);
+      appendDecodedChunk("stdout", text);
     });
     child.stderr.on("data", (chunk: Buffer) => {
-      const text = decodeShellChunk(chunk);
+      const text = stderrDecoder.push(chunk);
       markOutput();
-      appendSanitizedChunk(text, true);
-      onProgress?.("stderr", text);
+      appendDecodedChunk("stderr", text);
     });
     child.on("close", (code) => {
       childClosed = true;
       if (stoppingOutcome) {
         return;
       }
-      finish(code ?? 1);
+      finish(code ?? undefined);
     });
     child.on("error", (error) => {
       appendSanitizedChunk(`命令执行失败：${error.message}\n`, true);
@@ -4261,12 +4289,12 @@ async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> 
     let forceTimer: NodeJS.Timeout | undefined;
     let outcome: "completed" | "cancelled" = "completed";
 
-    const finish = (exitCode: number, detail?: string) => {
+    const finish = (exitCode: number | undefined, detail?: string) => {
       if (settled) return;
       settled = true;
       if (forceTimer) clearTimeout(forceTimer);
       abortSignal?.removeEventListener("abort", onAbort);
-      const footer = `${detail ? `\n${detail}\n` : ""}\nexit code ${exitCode}\noutcome ${outcome}\n`;
+      const footer = `${detail ? `\n${detail}\n` : ""}\nexit code ${exitCode ?? "unavailable"}\noutcome ${outcome}\n`;
       void appendFile(fullOutputPath, footer, "utf8").finally(() => {
         onComplete?.({
           taskId,
@@ -4298,11 +4326,11 @@ async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> 
       void requestStop(false);
       forceTimer = setTimeout(() => {
         void requestStop(true);
-        setTimeout(() => finish(1), 500);
+        setTimeout(() => finish(undefined), 500);
       }, 3000);
     };
 
-    child.once("close", (code) => finish(code ?? 1));
+    child.once("close", (code) => finish(code ?? undefined));
     child.once("error", (error) => finish(1, `[error] ${error.message}`));
     if (abortSignal?.aborted) onAbort();
     else abortSignal?.addEventListener("abort", onAbort, { once: true });
@@ -4322,6 +4350,16 @@ async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> 
   let stallTimer: NodeJS.Timeout | undefined;
   let settled = false;
   let outcome: "completed" | "timeout" | "cancelled" = "completed";
+  const stdoutDecoder = createShellChunkDecoder();
+  const stderrDecoder = createShellChunkDecoder();
+
+  const writeDecodedChunk = (stream: "stdout" | "stderr", text: string): void => {
+    if (!text) return;
+    fileStream.write(text);
+    tailBuffer = (tailBuffer + text).slice(-2000);
+    resetStallTimer();
+    onProgress?.(stream, text);
+  };
 
   const resetStallTimer = () => {
     lastOutputTime = Date.now();
@@ -4339,14 +4377,16 @@ async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> 
     }
   };
 
-  const finish = (exitCode: number) => {
+  const finish = (exitCode: number | undefined) => {
     if (settled) return;
     settled = true;
+    writeDecodedChunk("stdout", stdoutDecoder.flush());
+    writeDecodedChunk("stderr", stderrDecoder.flush());
     if (stallTimer) clearTimeout(stallTimer);
     clearTimeout(timer);
     abortSignal?.removeEventListener("abort", onAbort);
 
-    const footer = `\nexit code ${exitCode}\noutcome ${outcome}\n`;
+    const footer = `\nexit code ${exitCode ?? "unavailable"}\noutcome ${outcome}\n`;
     fileStream.write(footer);
     fileStream.end();
 
@@ -4377,7 +4417,7 @@ async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> 
   const waitForCloseOrForceKill = () => {
     const forceTimer = setTimeout(() => {
       void requestStop(true);
-      setTimeout(() => finish(1), 500);
+      setTimeout(() => finish(undefined), 500);
     }, FORCE_KILL_WAIT_MS);
     child.once("close", () => { clearTimeout(forceTimer); });
   };
@@ -4403,20 +4443,12 @@ async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> 
   }, timeoutMs);
 
   child.stdout.on("data", (chunk: Buffer) => {
-    const text = decodeShellChunk(chunk);
-    fileStream.write(text);
-    tailBuffer = (tailBuffer + text).slice(-2000);
-    resetStallTimer();
-    onProgress?.("stdout", text);
+    writeDecodedChunk("stdout", stdoutDecoder.push(chunk));
   });
   child.stderr.on("data", (chunk: Buffer) => {
-    const text = decodeShellChunk(chunk);
-    fileStream.write(text);
-    tailBuffer = (tailBuffer + text).slice(-2000);
-    resetStallTimer();
-    onProgress?.("stderr", text);
+    writeDecodedChunk("stderr", stderrDecoder.push(chunk));
   });
-  child.on("close", (code) => { finish(code ?? 1); });
+  child.on("close", (code) => { finish(code ?? undefined); });
   child.on("error", (err) => {
     fileStream.write(`\n[error] ${err.message}\n`);
     finish(1);
@@ -4425,7 +4457,7 @@ async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> 
   else abortSignal?.addEventListener("abort", onAbort, { once: true });
 }
 
-function decodeShellChunk(chunk: Buffer): string {
+function decodeShellBytes(chunk: Buffer): string {
   const utf8 = chunk.toString("utf8");
   if (process.platform !== "win32") return utf8;
   if (!utf8.includes("�")) return utf8;
@@ -4441,6 +4473,244 @@ function decodeShellChunk(chunk: Buffer): string {
   }
 
   return utf8;
+}
+
+function decodeShellChunk(chunk: Buffer): string {
+  return stripPowerShellCliXml(decodeShellBytes(chunk));
+}
+
+function stripPowerShellCliXml(text: string): string {
+  return text.replace(
+    /(^|\r?\n)#<\s*CLIXML\s*(?:\r?\n)?<Objs\b[^>]*\bxmlns=(?:"|')http:\/\/schemas\.microsoft\.com\/powershell\/2004\/04(?:"|')[^>]*>([\s\S]*?)<\/Objs>\s*/gimu,
+    (_match, prefix: string, body: string) =>
+      `${prefix}${formatPowerShellCliXmlMessages(extractPowerShellCliXmlMessages(body))}`,
+  );
+}
+
+function extractPowerShellCliXmlMessages(xml: string): string[] {
+  const messages: string[] = [];
+  const add = (value: string): void => {
+    const text = decodePowerShellCliXmlText(value);
+    if (text && !messages.includes(text)) messages.push(text);
+  };
+  const streamEntry = /<S\b[^>]*\bS=(?:"([^"]+)"|'([^']+)')[^>]*>([\s\S]*?)<\/S>|<Obj\b[^>]*\bS=(?:"([^"]+)"|'([^']+)')[^>]*>([\s\S]*?)<\/Obj>/giu;
+  for (const match of xml.matchAll(streamEntry)) {
+    const stream = match[1] ?? match[2] ?? match[4] ?? match[5] ?? "";
+    if (stream.toLowerCase() === "progress") continue;
+    if (match[3] !== undefined) {
+      add(match[3]);
+      continue;
+    }
+    const body = match[6] ?? "";
+    const detail = /<ToString\b[^>]*>([\s\S]*?)<\/ToString>/iu.exec(body)?.[1]
+      ?? /<S\b[^>]*\bN=(?:"Message(?:Data)?"|'Message(?:Data)?')[^>]*>([\s\S]*?)<\/S>/iu.exec(body)?.[1];
+    if (detail) add(detail);
+  }
+  return messages;
+}
+
+function decodePowerShellCliXmlText(value: string): string {
+  return value
+    .replace(/<[^>]+>/gu, "")
+    .replace(/_x([0-9a-f]{4})_/giu, (_match, hex: string) =>
+      String.fromCharCode(Number.parseInt(hex, 16)),
+    )
+    .replace(/&#x([0-9a-f]+);/giu, (_match, hex: string) =>
+      String.fromCodePoint(Number.parseInt(hex, 16)),
+    )
+    .replace(/&#(\d+);/gu, (_match, decimal: string) =>
+      String.fromCodePoint(Number.parseInt(decimal, 10)),
+    )
+    .replace(/&lt;/giu, "<")
+    .replace(/&gt;/giu, ">")
+    .replace(/&quot;/giu, '"')
+    .replace(/&apos;/giu, "'")
+    .replace(/&amp;/giu, "&")
+    .replace(/\r\n?/gu, "\n")
+    .trim();
+}
+
+function formatPowerShellCliXmlMessages(messages: string[]): string {
+  return messages.length > 0 ? `${messages.join("\n")}\n` : "";
+}
+
+function scanUtf8Prefix(bytes: Buffer): { length: number; status: "complete" | "incomplete" | "invalid" } {
+  let index = 0;
+  while (index < bytes.length) {
+    const first = bytes[index] ?? 0;
+    if (first <= 0x7f) {
+      index += 1;
+      continue;
+    }
+    const width = first >= 0xc2 && first <= 0xdf
+      ? 2
+      : first >= 0xe0 && first <= 0xef
+        ? 3
+        : first >= 0xf0 && first <= 0xf4
+          ? 4
+          : 0;
+    if (width === 0) return { length: index, status: "invalid" };
+    if (index + width > bytes.length) return { length: index, status: "incomplete" };
+    const second = bytes[index + 1] ?? 0;
+    const continuation = (value: number): boolean => value >= 0x80 && value <= 0xbf;
+    if (
+      !continuation(second) ||
+      (first === 0xe0 && second < 0xa0) ||
+      (first === 0xed && second > 0x9f) ||
+      (first === 0xf0 && second < 0x90) ||
+      (first === 0xf4 && second > 0x8f)
+    ) {
+      return { length: index, status: "invalid" };
+    }
+    for (let offset = 2; offset < width; offset += 1) {
+      if (!continuation(bytes[index + offset] ?? 0)) {
+        return { length: index, status: "invalid" };
+      }
+    }
+    index += width;
+  }
+  return { length: index, status: "complete" };
+}
+
+function scanGb18030Prefix(bytes: Buffer): { length: number; status: "complete" | "incomplete" | "invalid" } {
+  let index = 0;
+  while (index < bytes.length) {
+    const first = bytes[index] ?? 0;
+    if (first <= 0x7f) {
+      index += 1;
+      continue;
+    }
+    if (first < 0x81 || first > 0xfe) return { length: index, status: "invalid" };
+    if (index + 2 > bytes.length) return { length: index, status: "incomplete" };
+    const second = bytes[index + 1] ?? 0;
+    if (second >= 0x40 && second <= 0xfe && second !== 0x7f) {
+      index += 2;
+      continue;
+    }
+    if (second < 0x30 || second > 0x39) return { length: index, status: "invalid" };
+    if (index + 4 > bytes.length) return { length: index, status: "incomplete" };
+    const third = bytes[index + 2] ?? 0;
+    const fourth = bytes[index + 3] ?? 0;
+    if (third < 0x81 || third > 0xfe || fourth < 0x30 || fourth > 0x39) {
+      return { length: index, status: "invalid" };
+    }
+    index += 4;
+  }
+  return { length: index, status: "complete" };
+}
+
+export function createShellChunkDecoder(): { push: (chunk: Buffer) => string; flush: () => string } {
+  let pending = "";
+  let pendingBytes: Buffer = Buffer.alloc(0);
+  let mode: "normal" | "candidate" | "clixml" = "normal";
+  let candidateMarker = "";
+  let clixmlMessages: string[] = [];
+  const carryLength = 32;
+  const clixmlCarryLength = 64 * 1024;
+  const maxClixmlPendingLength = 256 * 1024;
+  const decodeStreamChunk = (chunk: Buffer, flush = false): string => {
+    pendingBytes = pendingBytes.length > 0 ? Buffer.concat([pendingBytes, chunk]) : chunk;
+    if (flush) {
+      const decoded = decodeShellBytes(pendingBytes);
+      pendingBytes = Buffer.alloc(0);
+      return decoded;
+    }
+    let decoded = "";
+    while (pendingBytes.length > 0) {
+      const utf8 = scanUtf8Prefix(pendingBytes);
+      let completeLength = utf8.length;
+      if (utf8.status === "invalid" && completeLength === 0) {
+        const gb18030 = scanGb18030Prefix(pendingBytes);
+        completeLength = gb18030.status === "invalid"
+          ? Math.min(pendingBytes.length, gb18030.length + 1)
+          : gb18030.length;
+      }
+      if (completeLength === 0) break;
+      decoded += decodeShellBytes(pendingBytes.subarray(0, completeLength));
+      pendingBytes = pendingBytes.subarray(completeLength);
+    }
+    return decoded;
+  };
+  return {
+    push(chunk: Buffer): string {
+      pending += decodeStreamChunk(chunk);
+      let output = "";
+      while (pending) {
+        if (mode === "clixml") {
+          const end = /<\/Objs\s*>/iu.exec(pending);
+          if (!end) {
+            if (pending.length > maxClixmlPendingLength) {
+              const drainLength = pending.length - clixmlCarryLength;
+              clixmlMessages = [
+                ...new Set([
+                  ...clixmlMessages,
+                  ...extractPowerShellCliXmlMessages(pending.slice(0, drainLength)),
+                ]),
+              ];
+              pending = pending.slice(drainLength);
+            }
+            return output;
+          }
+          clixmlMessages = [
+            ...new Set([...clixmlMessages, ...extractPowerShellCliXmlMessages(pending.slice(0, end.index))]),
+          ];
+          output += formatPowerShellCliXmlMessages(clixmlMessages);
+          pending = pending.slice((end.index ?? 0) + end[0].length);
+          clixmlMessages = [];
+          mode = "normal";
+          continue;
+        }
+        if (mode === "candidate") {
+          const envelope = /^\s*<Objs\b[^>]*\bxmlns=(?:"|')http:\/\/schemas\.microsoft\.com\/powershell\/2004\/04(?:"|')[^>]*>/iu.exec(
+            pending,
+          );
+          if (envelope) {
+            pending = pending.slice(envelope[0].length);
+            candidateMarker = "";
+            mode = "clixml";
+            continue;
+          }
+          const trimmed = pending.trimStart();
+          const couldBeEnvelope =
+            trimmed.length === 0 ||
+            "<Objs".startsWith(trimmed) ||
+            (trimmed.startsWith("<Objs") && !trimmed.includes(">"));
+          if (couldBeEnvelope && pending.length <= 512) return output;
+          output += candidateMarker;
+          candidateMarker = "";
+          mode = "normal";
+          continue;
+        }
+        const marker = /#<\s*CLIXML\s*(?:\r?\n)?/iu.exec(pending);
+        if (marker) {
+          output += pending.slice(0, marker.index);
+          candidateMarker = marker[0];
+          pending = pending.slice(marker.index + marker[0].length);
+          mode = "candidate";
+          continue;
+        }
+        if (pending.length <= carryLength) return output;
+        output += pending.slice(0, -carryLength);
+        pending = pending.slice(-carryLength);
+        return output;
+      }
+      return output;
+    },
+    flush(): string {
+      pending += decodeStreamChunk(Buffer.alloc(0), true);
+      const output =
+        mode === "clixml"
+          ? formatPowerShellCliXmlMessages([
+              ...new Set([...clixmlMessages, ...extractPowerShellCliXmlMessages(pending)]),
+            ])
+          : stripPowerShellCliXml(`${mode === "candidate" ? candidateMarker : ""}${pending}`);
+      pending = "";
+      candidateMarker = "";
+      clixmlMessages = [];
+      mode = "normal";
+      return output;
+    },
+  };
 }
 
 async function stopWindowsProcessTree(rootPid: number, cwd: string): Promise<void> {
@@ -4495,11 +4765,11 @@ $seen = New-Object 'System.Collections.Generic.HashSet[int]'
 $queue.Enqueue($rootPid)
 $pids = @()
 while ($queue.Count -gt 0) {
-  $pid = $queue.Dequeue()
-  if (-not $seen.Add($pid)) { continue }
-  $pids += $pid
-  if ($children.ContainsKey($pid)) {
-    foreach ($childPid in $children[$pid]) { $queue.Enqueue($childPid) }
+  $currentPid = $queue.Dequeue()
+  if (-not $seen.Add($currentPid)) { continue }
+  $pids += $currentPid
+  if ($children.ContainsKey($currentPid)) {
+    foreach ($childPid in $children[$currentPid]) { $queue.Enqueue($childPid) }
   }
 }
 $cwdLower = $cwd.ToLowerInvariant()
@@ -4569,6 +4839,7 @@ function unique(items: string[]): string[] {
 // D.14H Phase 7.5-C test entry points
 export const __testGlobToRegExp = globToRegExp;
 export const __testDecodeShellChunk = decodeShellChunk;
+export const __testCreateShellChunkDecoder = createShellChunkDecoder;
 export const __testParseBashCommandIntent = parseBashCommandIntent;
 export const __testCanSafelyAliasPythonCommand = canSafelyAliasPythonCommand;
 export { interpretCommandResult } from "./tools/Bash/command-semantics.js";

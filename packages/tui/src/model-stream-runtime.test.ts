@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { defaultConfig } from "@linghun/config";
 import { LinghunError, SessionStore } from "@linghun/core";
 import type { ModelGateway } from "@linghun/providers";
-import { createToolContext } from "@linghun/tools";
+import { builtInTools, createToolContext } from "@linghun/tools";
+import { interruptAllActiveWork } from "./background-control-runtime.js";
 import {
   __testApplyPromptCacheKey,
   __testBuildModelMessagesWithRecentContext,
@@ -35,6 +36,7 @@ import {
   isToolBatchFallbackRequired,
   planFinalGateEvidenceGapAction,
   recordInterruptedForegroundTurn,
+  recordSuccessfulToolExecutionProgress,
   shouldRewriteFinalGateClaimAlignment,
   shouldContinueAfterToolFailureWithoutToolCall,
   shouldRetryHighReasoningToolsEmptyResponse,
@@ -49,6 +51,7 @@ import {
 } from "./failure-learning-runtime.js";
 import { createIndexState } from "./index-runtime.js";
 import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
+import { cancelPendingInteraction } from "./permission-approval-runtime.js";
 import { createProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 import { createShellBlockOutputForTest } from "./tui-output-surface.js";
@@ -192,6 +195,645 @@ describe("continuation abort ownership", () => {
     );
 
     expect(providerStarted).toBe(false);
+  });
+
+  it("does not overwrite a replacement owner while ensureSession is pending", async () => {
+    const { context } = await makeSendMessageContext();
+    const store = context.store as SessionStore;
+    const originalResume = store.resume.bind(store);
+    context.sessionStoreVerifiedId = undefined;
+    const oldRequestTurnId = beginForegroundRequestTurn(context, "old-owner");
+    let enterResume: (() => void) | undefined;
+    let releaseResume: (() => void) | undefined;
+    const resumeEntered = new Promise<void>((resolve) => {
+      enterResume = resolve;
+    });
+    const resumeGate = new Promise<void>((resolve) => {
+      releaseResume = resolve;
+    });
+    store.resume = async (sessionId) => {
+      enterResume?.();
+      await resumeGate;
+      return originalResume(sessionId);
+    };
+    const replacementController = new AbortController();
+    const stream = vi.fn(async function* () {
+      yield { type: "message_stop", chunkCount: 0, hadUsage: false } as const;
+    });
+
+    try {
+      const running = continueModelAfterToolResults(
+        {
+          messages: [],
+          provider: "openai-compatible",
+          model: "gpt-test",
+          endpointProfile: "responses",
+          reasoningSent: false,
+          requestTurnId: oldRequestTurnId,
+        },
+        context,
+        { stream } as unknown as ModelGateway,
+        new MemoryOutput(),
+      );
+      await resumeEntered;
+      context.currentRequestTurnId = "replacement-owner";
+      context.activeAbortController = replacementController;
+      context.tools.abortSignal = replacementController.signal;
+      context.interrupt = { type: "running", taskId: "replacement", canCancel: true };
+      releaseResume?.();
+      await running;
+
+      expect(stream).not.toHaveBeenCalled();
+      expect(context.currentRequestTurnId).toBe("replacement-owner");
+      expect(context.activeAbortController).toBe(replacementController);
+      expect(context.tools.abortSignal).toBe(replacementController.signal);
+      expect(context.interrupt).toEqual({ type: "running", taskId: "replacement", canCancel: true });
+    } finally {
+      releaseResume?.();
+      store.resume = originalResume;
+    }
+  });
+
+  it("does not overwrite a same-turn replacement controller while ensureSession is pending", async () => {
+    const { context } = await makeSendMessageContext();
+    const store = context.store as SessionStore;
+    const originalResume = store.resume.bind(store);
+    context.sessionStoreVerifiedId = undefined;
+    const requestTurnId = beginForegroundRequestTurn(context, "same-turn-entry-owner");
+    const entryController = new AbortController();
+    context.activeAbortController = entryController;
+    context.tools.abortSignal = entryController.signal;
+    let enterResume: (() => void) | undefined;
+    let releaseResume: (() => void) | undefined;
+    const resumeEntered = new Promise<void>((resolve) => {
+      enterResume = resolve;
+    });
+    const resumeGate = new Promise<void>((resolve) => {
+      releaseResume = resolve;
+    });
+    store.resume = async (sessionId) => {
+      enterResume?.();
+      await resumeGate;
+      return originalResume(sessionId);
+    };
+    const replacementController = new AbortController();
+    const stream = vi.fn(async function* () {
+      yield { type: "message_stop", chunkCount: 0, hadUsage: false } as const;
+    });
+
+    try {
+      const running = continueModelAfterToolResults(
+        {
+          messages: [],
+          provider: "openai-compatible",
+          model: "gpt-test",
+          endpointProfile: "responses",
+          reasoningSent: false,
+          requestTurnId,
+          abortSignal: entryController.signal,
+        },
+        context,
+        { stream } as unknown as ModelGateway,
+        new MemoryOutput(),
+      );
+      await resumeEntered;
+      context.activeAbortController = replacementController;
+      context.tools.abortSignal = replacementController.signal;
+      context.interrupt = { type: "running", taskId: "same-turn-replacement", canCancel: true };
+      releaseResume?.();
+      await running;
+
+      expect(stream).not.toHaveBeenCalled();
+      expect(context.currentRequestTurnId).toBe(requestTurnId);
+      expect(context.activeAbortController).toBe(replacementController);
+      expect(context.tools.abortSignal).toBe(replacementController.signal);
+      expect(context.interrupt).toEqual({
+        type: "running",
+        taskId: "same-turn-replacement",
+        canCancel: true,
+      });
+    } finally {
+      releaseResume?.();
+      store.resume = originalResume;
+    }
+  });
+
+  it("terminalizes an expired continuation as a wall-clock timeout before provider work", async () => {
+    const { context, events } = await makeSendMessageContext();
+    const requestTurnId = beginForegroundRequestTurn(context, "deadline-user");
+    const stream = vi.fn(async function* () {
+      yield { type: "message_stop", chunkCount: 0, hadUsage: false } as const;
+    });
+
+    await continueModelAfterToolResults(
+      {
+        messages: [{ role: "user", content: "continue" }],
+        provider: "openai-compatible",
+        model: "gpt-test",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        requestTurnId,
+        deadlineAtMs: Date.now() - 1,
+      },
+      context,
+      { stream } as unknown as ModelGateway,
+      new MemoryOutput(),
+    );
+
+    expect(stream).not.toHaveBeenCalled();
+    expect(context.lastInterruptedTurn).toMatchObject({ requestTurnId, reason: "model_timeout" });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "interrupt",
+        status: "cancelled",
+        message: expect.stringContaining("reason=model_timeout"),
+      }),
+    );
+  });
+
+  it("does not clear a newer main-request signal generation with the same turn id", async () => {
+    const { context } = await makeSendMessageContext();
+    const ownerController = new AbortController();
+    const replacementController = new AbortController();
+    let enterStream: (() => void) | undefined;
+    let releaseStream: (() => void) | undefined;
+    const streamEntered = new Promise<void>((resolve) => {
+      enterStream = resolve;
+    });
+    const streamGate = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    const stream = vi.fn(async function* () {
+      enterStream?.();
+      await streamGate;
+      yield { type: "message_stop", chunkCount: 0, hadUsage: false } as const;
+    });
+
+    const running = __testSendMessage(
+      "same-turn main generation",
+      context,
+      { stream } as unknown as ModelGateway,
+      new MemoryOutput(),
+      ownerController,
+    );
+    await streamEntered;
+    const requestTurnId = context.currentRequestTurnId;
+    expect(requestTurnId).toBeTruthy();
+    context.activeAbortController = replacementController;
+    context.tools.abortSignal = replacementController.signal;
+    context.interrupt = { type: "running", taskId: "replacement-main", canCancel: true };
+    ownerController.abort("superseded");
+    releaseStream?.();
+    await running;
+
+    expect(context.currentRequestTurnId).toBe(requestTurnId);
+    expect(context.activeAbortController).toBe(replacementController);
+    expect(context.tools.abortSignal).toBe(replacementController.signal);
+    expect(context.interrupt).toEqual({
+      type: "running",
+      taskId: "replacement-main",
+      canCancel: true,
+    });
+    expect(context.lastInterruptedTurn).toBeUndefined();
+  });
+
+  it("cleans the released main owner after a cooperative interrupt", async () => {
+    const { context } = await makeSendMessageContext();
+    let enterStream: (() => void) | undefined;
+    const streamEntered = new Promise<void>((resolve) => {
+      enterStream = resolve;
+    });
+    const stream = vi.fn(async function* (
+      _providerId: string,
+      _request: unknown,
+      signal: AbortSignal,
+    ) {
+      enterStream?.();
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) {
+          resolve();
+          return;
+        }
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+    });
+
+    const running = __testSendMessage(
+      "interrupt the active main request",
+      context,
+      { stream } as unknown as ModelGateway,
+      new MemoryOutput(),
+    );
+    await streamEntered;
+    const requestTurnId = context.currentRequestTurnId!;
+    context.preEngineFallbackPreference = {
+      projectPath: context.projectPath,
+      requestTurnId,
+      active: true,
+      activatedAt: new Date().toISOString(),
+      reason: "fallback_required",
+    };
+
+    const result = await interruptAllActiveWork(context);
+    await running;
+
+    expect(result.abortSignalsSent).toBe(1);
+    expect(context.lastInterruptedTurn).toMatchObject({ requestTurnId, reason: "user_interrupt" });
+    expect(context.currentRequestTurnId).toBeUndefined();
+    expect(context.currentRequestUserMessageId).toBeUndefined();
+    expect(context.activeAbortController).toBeUndefined();
+    expect(context.tools.abortSignal).toBeUndefined();
+    expect(context.preEngineFallbackPreference).toBeUndefined();
+    expect(context.foregroundAbortPendingUntilMs).toBeUndefined();
+    expect(context.interrupt).toEqual({ type: "idle" });
+  });
+
+  it("does not clear a newer continuation signal generation with the same turn id", async () => {
+    const { context } = await makeSendMessageContext();
+    const requestTurnId = beginForegroundRequestTurn(context, "continuation-owner");
+    const replacementController = new AbortController();
+    let enterStream: (() => void) | undefined;
+    let releaseStream: (() => void) | undefined;
+    const streamEntered = new Promise<void>((resolve) => {
+      enterStream = resolve;
+    });
+    const streamGate = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    const stream = vi.fn(async function* () {
+      enterStream?.();
+      await streamGate;
+      yield { type: "message_stop", chunkCount: 0, hadUsage: false } as const;
+    });
+
+    const running = continueModelAfterToolResults(
+      {
+        messages: [{ role: "user", content: "continue" }],
+        provider: "openai-compatible",
+        model: "gpt-test",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        requestTurnId,
+      },
+      context,
+      { stream } as unknown as ModelGateway,
+      new MemoryOutput(),
+    );
+    await streamEntered;
+    const ownerController = context.activeAbortController;
+    expect(ownerController).toBeTruthy();
+    context.activeAbortController = replacementController;
+    context.tools.abortSignal = replacementController.signal;
+    context.interrupt = { type: "running", taskId: "replacement-continuation", canCancel: true };
+    ownerController?.abort("superseded");
+    releaseStream?.();
+    await running;
+
+    expect(context.currentRequestTurnId).toBe(requestTurnId);
+    expect(context.activeAbortController).toBe(replacementController);
+    expect(context.tools.abortSignal).toBe(replacementController.signal);
+    expect(context.interrupt).toEqual({
+      type: "running",
+      taskId: "replacement-continuation",
+      canCancel: true,
+    });
+    expect(context.lastInterruptedTurn).toBeUndefined();
+  });
+
+  it("cleans the released continuation owner after a cooperative interrupt", async () => {
+    const { context } = await makeSendMessageContext();
+    const requestTurnId = beginForegroundRequestTurn(context, "continuation-interrupt-user");
+    let enterStream: (() => void) | undefined;
+    const streamEntered = new Promise<void>((resolve) => {
+      enterStream = resolve;
+    });
+    const stream = vi.fn(async function* (
+      _providerId: string,
+      _request: unknown,
+      signal: AbortSignal,
+    ) {
+      enterStream?.();
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) {
+          resolve();
+          return;
+        }
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+    });
+
+    const running = continueModelAfterToolResults(
+      {
+        messages: [{ role: "user", content: "continue" }],
+        provider: "openai-compatible",
+        model: "gpt-test",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        requestTurnId,
+      },
+      context,
+      { stream } as unknown as ModelGateway,
+      new MemoryOutput(),
+    );
+    await streamEntered;
+    context.preEngineFallbackPreference = {
+      projectPath: context.projectPath,
+      requestTurnId,
+      active: true,
+      activatedAt: new Date().toISOString(),
+      reason: "fallback_required",
+    };
+
+    const result = await interruptAllActiveWork(context);
+    await running;
+
+    expect(result.abortSignalsSent).toBe(1);
+    expect(context.lastInterruptedTurn).toMatchObject({ requestTurnId, reason: "user_interrupt" });
+    expect(context.currentRequestTurnId).toBeUndefined();
+    expect(context.currentRequestUserMessageId).toBeUndefined();
+    expect(context.activeAbortController).toBeUndefined();
+    expect(context.tools.abortSignal).toBeUndefined();
+    expect(context.preEngineFallbackPreference).toBeUndefined();
+    expect(context.foregroundAbortPendingUntilMs).toBeUndefined();
+    expect(context.interrupt).toEqual({ type: "idle" });
+  });
+
+  it("cleans continuation foreground state when stream initialization throws", async () => {
+    const { context } = await makeSendMessageContext();
+    const requestTurnId = beginForegroundRequestTurn(context, "continuation-init-error");
+    const output = Object.assign(new MemoryOutput(), {
+      beginAssistantStream: () => {
+        throw new Error("stream initialization failed");
+      },
+    });
+    const stream = vi.fn(async function* () {
+      yield { type: "message_stop", chunkCount: 0, hadUsage: false } as const;
+    });
+
+    await expect(
+      continueModelAfterToolResults(
+        {
+          messages: [{ role: "user", content: "continue" }],
+          provider: "openai-compatible",
+          model: "gpt-test",
+          endpointProfile: "responses",
+          reasoningSent: false,
+          requestTurnId,
+        },
+        context,
+        { stream } as unknown as ModelGateway,
+        output,
+      ),
+    ).rejects.toThrow("stream initialization failed");
+
+    expect(stream).not.toHaveBeenCalled();
+    expect(context.currentRequestTurnId).toBeUndefined();
+    expect(context.activeAbortController).toBeUndefined();
+    expect(context.tools.abortSignal).toBeUndefined();
+    expect(context.requestActivity).toBeUndefined();
+    expect(context.interrupt).toEqual({ type: "idle" });
+  });
+
+  it("keeps the foreground owner current while background Bash borrows the tool signal", async () => {
+    const { context } = await makeSendMessageContext();
+    context.permissionMode = "full-access";
+    const originalCall = builtInTools.Bash.call;
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    let enterTool: (() => void) | undefined;
+    const toolEntered = new Promise<void>((resolve) => {
+      enterTool = resolve;
+    });
+    builtInTools.Bash.call = (async () => {
+      expect(context.activeAbortController).toBeTruthy();
+      expect(context.tools.abortSignal).not.toBe(context.activeAbortController?.signal);
+      enterTool?.();
+      await toolGate;
+      return { text: "background command started", data: { exitCode: 0 } };
+    }) as typeof originalCall;
+    let streamRound = 0;
+    const stream = vi.fn(async function* () {
+      streamRound += 1;
+      if (streamRound === 1) {
+        yield {
+          type: "tool_use",
+          id: "call-background-bash",
+          name: "Bash",
+          input: { command: "echo background", runInBackground: true },
+        } as const;
+        await toolEntered;
+        try {
+          yield { type: "message_stop", chunkCount: 1, hadUsage: false } as const;
+        } finally {
+          releaseTool?.();
+        }
+        return;
+      }
+      yield {
+        type: "assistant_text_delta",
+        id: "background-final",
+        text: "后台工具结果已处理。",
+      } as const;
+      yield { type: "message_stop", chunkCount: 1, hadUsage: false } as const;
+    });
+    const output = new MemoryOutput();
+
+    try {
+      await __testSendMessage(
+        "运行后台 Bash 并继续处理结果",
+        context,
+        { stream } as unknown as ModelGateway,
+        output,
+      );
+
+      expect(stream).toHaveBeenCalledTimes(2);
+      expect(output.text).toContain("后台工具结果已处理。");
+      expect(context.currentRequestTurnId).toBeUndefined();
+      expect(context.activeAbortController).toBeUndefined();
+      expect(context.tools.abortSignal).toBeUndefined();
+    } finally {
+      releaseTool?.();
+      builtInTools.Bash.call = originalCall;
+    }
+  });
+
+  it("keeps the continuation owner current while background Bash borrows the tool signal", async () => {
+    const { context } = await makeSendMessageContext();
+    context.permissionMode = "full-access";
+    const requestTurnId = beginForegroundRequestTurn(context, "continuation-background-bash");
+    const originalCall = builtInTools.Bash.call;
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    let enterTool: (() => void) | undefined;
+    const toolEntered = new Promise<void>((resolve) => {
+      enterTool = resolve;
+    });
+    builtInTools.Bash.call = (async () => {
+      expect(context.activeAbortController).toBeTruthy();
+      expect(context.tools.abortSignal).not.toBe(context.activeAbortController?.signal);
+      enterTool?.();
+      await toolGate;
+      return { text: "background command started", data: { exitCode: 0 } };
+    }) as typeof originalCall;
+    let streamRound = 0;
+    const stream = vi.fn(async function* () {
+      streamRound += 1;
+      if (streamRound === 1) {
+        yield {
+          type: "tool_use",
+          id: "call-continuation-background-bash",
+          name: "Bash",
+          input: { command: "echo background", runInBackground: true },
+        } as const;
+        await toolEntered;
+        try {
+          yield { type: "message_stop", chunkCount: 1, hadUsage: false } as const;
+        } finally {
+          releaseTool?.();
+        }
+        return;
+      }
+      yield {
+        type: "assistant_text_delta",
+        id: "continuation-background-final",
+        text: "continuation handled the background result",
+      } as const;
+      yield { type: "message_stop", chunkCount: 1, hadUsage: false } as const;
+    });
+    const output = new MemoryOutput();
+
+    try {
+      await continueModelAfterToolResults(
+        {
+          messages: [{ role: "user", content: "continue with background Bash" }],
+          provider: "openai-compatible",
+          model: "gpt-test",
+          endpointProfile: "responses",
+          reasoningSent: false,
+          requestTurnId,
+        },
+        context,
+        { stream } as unknown as ModelGateway,
+        output,
+      );
+
+      expect(stream).toHaveBeenCalledTimes(2);
+      expect(output.text).toContain("continuation handled the background result");
+      expect(context.currentRequestTurnId).toBeUndefined();
+      expect(context.activeAbortController).toBeUndefined();
+      expect(context.tools.abortSignal).toBeUndefined();
+    } finally {
+      releaseTool?.();
+      builtInTools.Bash.call = originalCall;
+    }
+  });
+
+  it("cleans the foreground owner when interrupt crosses a background Bash signal borrow", async () => {
+    const { context } = await makeSendMessageContext();
+    context.permissionMode = "full-access";
+    const originalCall = builtInTools.Bash.call;
+    let enterTool: (() => void) | undefined;
+    let releaseTool: (() => void) | undefined;
+    let finishTool: (() => void) | undefined;
+    const toolEntered = new Promise<void>((resolve) => {
+      enterTool = resolve;
+    });
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const toolFinished = new Promise<void>((resolve) => {
+      finishTool = resolve;
+    });
+    let observeProviderAbort: (() => void) | undefined;
+    let releaseProvider: (() => void) | undefined;
+    const providerAbortObserved = new Promise<void>((resolve) => {
+      observeProviderAbort = resolve;
+    });
+    const providerGate = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    builtInTools.Bash.call = (async () => {
+      expect(context.activeAbortController).toBeTruthy();
+      expect(context.tools.abortSignal).not.toBe(context.activeAbortController?.signal);
+      enterTool?.();
+      await toolGate;
+      finishTool?.();
+      return { text: "late background result", data: { exitCode: 0 } };
+    }) as typeof originalCall;
+    const stream = vi.fn(async function* (
+      _providerId: string,
+      _request: unknown,
+      signal: AbortSignal,
+    ) {
+      yield {
+        type: "tool_use",
+        id: "call-interrupted-background-bash",
+        name: "Bash",
+        input: { command: "echo background", runInBackground: true },
+      } as const;
+      await toolEntered;
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) {
+          resolve();
+          return;
+        }
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      observeProviderAbort?.();
+      await providerGate;
+    });
+
+    try {
+      const running = __testSendMessage(
+        "interrupt background Bash while it borrows the signal",
+        context,
+        { stream } as unknown as ModelGateway,
+        new MemoryOutput(),
+      );
+      await toolEntered;
+      const requestTurnId = context.currentRequestTurnId!;
+      context.preEngineFallbackPreference = {
+        projectPath: context.projectPath,
+        requestTurnId,
+        active: true,
+        activatedAt: new Date().toISOString(),
+        reason: "fallback_required",
+      };
+
+      const interrupted = interruptAllActiveWork(context);
+      await providerAbortObserved;
+      const result = await interrupted;
+      expect(context.activeAbortController).toBeUndefined();
+      expect(context.foregroundAbortPendingUntilMs).toBeGreaterThan(Date.now());
+      releaseProvider?.();
+      await running;
+
+      expect(context.currentRequestTurnId).toBeUndefined();
+      expect(context.activeAbortController).toBeUndefined();
+      expect(context.tools.abortSignal).toBeUndefined();
+      expect(context.currentRequestUserMessageId).toBeUndefined();
+      expect(context.preEngineFallbackPreference).toBeUndefined();
+      expect(context.foregroundAbortPendingUntilMs).toBeUndefined();
+      expect(context.interrupt).toEqual({ type: "idle" });
+      releaseTool?.();
+      await toolFinished;
+
+      expect(result.abortSignalsSent).toBeGreaterThanOrEqual(1);
+      expect(context.lastInterruptedTurn).toMatchObject({ requestTurnId, reason: "user_interrupt" });
+      expect(context.currentRequestUserMessageId).toBeUndefined();
+      expect(context.tools.abortSignal).toBeUndefined();
+      expect(context.preEngineFallbackPreference).toBeUndefined();
+      expect(context.foregroundAbortPendingUntilMs).toBeUndefined();
+      expect(context.interrupt).toEqual({ type: "idle" });
+    } finally {
+      releaseProvider?.();
+      releaseTool?.();
+      builtInTools.Bash.call = originalCall;
+    }
   });
 });
 
@@ -831,6 +1473,64 @@ describe("model message prompt cache layout", () => {
     });
     expect(messages.at(-2)).toMatchObject({ role: "tool", tool_call_id: "call-late" });
     expect(messages.at(-1)).toMatchObject({ role: "user", content: "current user" });
+  });
+
+  it("resolves 1000 tool-result ledger lookups in one batch while preserving message order", async () => {
+    const events = Array.from({ length: 1_000 }, (_, index) => [
+      {
+        type: "tool_call_start" as const,
+        id: `call-batch-${index}`,
+        name: "Read",
+        input: { path: `src/file-${index}.ts` },
+      },
+      {
+        type: "tool_result" as const,
+        toolUseId: `call-batch-${index}`,
+        toolName: "Read",
+        content: { text: `result-${index}` },
+      },
+    ]).flat();
+    const readRecentTranscriptEvents = vi.fn(
+      async (_sessionId: string, input: { limit: number }) => ({
+        events: input.limit === 1 ? [] : events,
+      }),
+    );
+    const context = {
+      projectPath: "",
+      model: "test-model",
+      cache: { history: [] },
+      evidence: [],
+      toolResultBudgetState: {
+        seenIds: new Set<string>(),
+        replacements: new Map(),
+        hasLegacyArtifactPaths: true,
+      },
+      store: {
+        readRecentTranscriptEvents,
+        appendEvent: async () => undefined,
+      },
+    };
+
+    const messages = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-ledger-batch",
+      "stable system",
+      "current user",
+      {
+        role: "executor",
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        reasoningStatus: "off",
+      },
+    );
+
+    const toolMessages = messages.filter((message) => message.role === "tool");
+    expect(readRecentTranscriptEvents).toHaveBeenCalledTimes(2);
+    expect(toolMessages).toHaveLength(1_000);
+    expect(toolMessages[0]).toMatchObject({ tool_call_id: "call-batch-0" });
+    expect(toolMessages.at(-1)).toMatchObject({ tool_call_id: "call-batch-999" });
   });
 
   it("tracks foreground turn ids and records interrupted turns once", async () => {
@@ -1499,7 +2199,8 @@ describe("model message prompt cache layout", () => {
           (event as { type?: string }).type === "assistant_text_delta",
       )
       .at(-1);
-    expect(final?.text).toContain("部分完成");
+    expect(final?.text).toContain("执行失败");
+    expect(final?.text).not.toContain("部分完成");
     expect(final?.text).toContain("已有 4 条记录");
     expect(final?.text).not.toContain("重新发起请求");
   }, 30_000);
@@ -1536,7 +2237,8 @@ describe("model message prompt cache layout", () => {
       )
       .at(-1);
     expect(attempts).toBe(2);
-    expect(final?.text).toContain("部分完成");
+    expect(final?.text).toContain("执行失败");
+    expect(final?.text).not.toContain("部分完成");
     expect(final?.text).toContain("没有执行任何非结构化工具请求");
     expect(serialized).not.toContain('"type":"tool_result"');
     expect(serialized).not.toContain(rawProtocol);
@@ -1589,7 +2291,8 @@ describe("model message prompt cache layout", () => {
       )
       .at(-1);
     expect(attempts).toBe(2);
-    expect(final?.text).toContain("部分完成");
+    expect(final?.text).toContain("执行失败");
+    expect(final?.text).not.toContain("部分完成");
     expect(final?.text).toContain("没有执行任何非结构化工具请求");
     expect(serialized).not.toContain('"type":"tool_result"');
     expect(serialized).not.toContain(rawProtocol);
@@ -1673,6 +2376,154 @@ describe("model message prompt cache layout", () => {
 
     expect(context.pendingLocalApproval).toBeUndefined();
   }, 30_000);
+
+  it("preserves progress state across main-to-continuation approval without counting unrelated success", async () => {
+    const { context } = await makeSendMessageContext();
+    await writeFile(join(context.projectPath, "source.txt"), "source\n", "utf8");
+    const output = new MemoryOutput();
+    let attempts = 0;
+    const gateway = {
+      async *stream() {
+        attempts += 1;
+        if (attempts === 1) {
+          yield {
+            type: "assistant_text_delta",
+            id: "approval-gap",
+            text: withClaims("测试通过。", [{ kind: "completion_pass", phrase: "测试通过" }]),
+          } as const;
+        } else if (attempts === 2) {
+          yield {
+            type: "tool_use",
+            id: "approval-read",
+            name: "Read",
+            input: { path: "source.txt" },
+          } as const;
+        } else if (attempts === 3) {
+          yield {
+            type: "tool_use",
+            id: "approval-write",
+            name: "Write",
+            input: { path: "approved.txt", content: "approved\n" },
+          } as const;
+        } else {
+          yield {
+            type: "assistant_text_delta",
+            id: "approval-final",
+            text: "已记录审批结果。",
+          } as const;
+        }
+        yield { type: "message_stop", finishReason: attempts >= 2 && attempts <= 3 ? "tool_use" : "stop" } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await __testSendMessage("完成当前修改并验证", context, gateway, output);
+
+    const approval = context.pendingLocalApproval;
+    expect(approval).toMatchObject({ kind: "model_tool_use" });
+    if (!approval || !("continuation" in approval) || !approval.continuation) {
+      throw new Error("expected a model tool approval continuation");
+    }
+    const continuation = approval.continuation;
+    expect(continuation.finalAnswerEvidenceActionRetries).toBe(1);
+    expect(continuation.finalGapProgressState?.attemptedCommandFingerprints.size).toBe(0);
+
+    await handleNaturalInput("yes", context, gateway, output);
+
+    expect(continuation.finalAnswerEvidenceActionRetries).toBe(1);
+    expect(continuation.finalGapProgressState?.attemptedCommandFingerprints.size).toBe(0);
+    expect(attempts).toBe(4);
+  }, 30_000);
+
+  it.each([
+    ["permission denial", "deny", "permission_denied", "用户拒绝权限"],
+    ["user cancellation", "cancel", "user_cancelled", "用户取消"],
+  ] as const)(
+    "reports only the matching final-gap conclusion as blocked after %s",
+    async (_label, decision, expectedReason, expectedText) => {
+      const { context, events } = await makeSendMessageContext();
+      const output = new MemoryOutput();
+      context.permissions.rules.push({
+        id: `ask-bash-${decision}`,
+        effect: "ask",
+        toolName: "Bash",
+      });
+      const originalCall = builtInTools.Bash.call;
+      const execute = vi.fn(async () => ({ text: "must not run", data: { exitCode: 0 } }));
+      builtInTools.Bash.call = execute as typeof originalCall;
+      let attempts = 0;
+      const gateway = {
+        async *stream() {
+          attempts += 1;
+          if (attempts === 2) {
+            yield {
+              type: "tool_use",
+              id: `blocked-test-${decision}`,
+              name: "Bash",
+              input: { command: "pnpm test" },
+            } as const;
+            yield {
+              type: "message_stop",
+              chunkCount: 1,
+              hadUsage: false,
+              finishReason: "tool_use",
+            } as const;
+            return;
+          }
+          yield {
+            type: "assistant_text_delta",
+            text: withClaims("测试已经通过。", [{ kind: "completion_pass", phrase: "测试已经通过" }]),
+          } as const;
+          yield {
+            type: "message_stop",
+            chunkCount: 1,
+            hadUsage: false,
+            finishReason: "stop",
+          } as const;
+        },
+        async countMessagesTokensWithAPI() {
+          return { source: "unavailable", reason: "test" } as const;
+        },
+      } as unknown as ModelGateway;
+      context.modelGateway = gateway;
+
+      try {
+        await __testSendMessage("完成修改并确认测试通过", context, gateway, output);
+        const approval = context.pendingLocalApproval;
+        expect(approval).toMatchObject({ kind: "model_tool_use", toolName: "Bash" });
+        if (!approval || !("continuation" in approval) || !approval.continuation) {
+          throw new Error("expected a Bash final-gap approval continuation");
+        }
+        const continuation = approval.continuation;
+
+        if (decision === "deny") {
+          await handleNaturalInput("no", context, gateway, output);
+        } else {
+          await cancelPendingInteraction(context, output, "Esc");
+        }
+
+        const finalAssistantText = events
+          .filter((event): event is { type: "assistant_text_delta"; text: string } =>
+            typeof event === "object" &&
+            event !== null &&
+            (event as { type?: string }).type === "assistant_text_delta" &&
+            typeof (event as { text?: unknown }).text === "string")
+          .at(-1)?.text ?? "";
+        expect(execute).not.toHaveBeenCalled();
+        expect(attempts).toBe(3);
+        expect(continuation.finalGapProgressState?.externalBlockReason).toBe(expectedReason);
+        expect(finalAssistantText).toContain(expectedText);
+        expect(finalAssistantText).toContain("仅对应的无证据结论受阻");
+        expect(finalAssistantText).not.toContain("所有可用且不重复");
+        expect(finalAssistantText).not.toContain("执行失败");
+      } finally {
+        builtInTools.Bash.call = originalCall;
+      }
+    },
+    30_000,
+  );
 
   it("records an empty provider stream as a structured resumable failure", async () => {
     const { context, events } = await makeSendMessageContext();
@@ -1901,7 +2752,7 @@ describe("model message prompt cache layout", () => {
     expect(attemptedModels).toEqual(["primary-model", "fallback-b", "fallback-c"]);
   });
 
-  it("does not reopen a verification final gap after an unrelated successful Read", async () => {
+  it("does not immediately downgrade a verification directive after an unrelated Read", async () => {
     const { context, events } = await makeSendMessageContext();
     await writeFile(join(context.projectPath, "unrelated.txt"), "unrelated evidence\n", "utf8");
     let attempts = 0;
@@ -1923,7 +2774,10 @@ describe("model message prompt cache layout", () => {
           } as const;
           return;
         }
-        yield { type: "assistant_text_delta", text: "测试已经通过。" } as const;
+        yield {
+          type: "assistant_text_delta",
+          text: attempts < 4 ? "测试已经通过。" : "本请求尚未获得测试通过证据。",
+        } as const;
         yield {
           type: "message_stop",
           chunkCount: 1,
@@ -1938,9 +2792,12 @@ describe("model message prompt cache layout", () => {
 
     await __testSendMessage("确认测试是否通过", context, gateway, new MemoryOutput());
 
-    expect(attempts).toBe(3);
-    expect(JSON.stringify(events)).toContain("final_gate_retry_disabled");
+    expect(attempts).toBe(4);
+    expect(JSON.stringify(events)).toContain("final_answer_gap_returned_to_model_loop");
     expect(JSON.stringify(events)).toContain("unrelated evidence");
+    expect(JSON.stringify(events)).toContain("本请求尚未获得测试通过证据");
+    expect(JSON.stringify(events)).not.toContain("所有可用且不重复");
+    expect(JSON.stringify(events)).not.toContain("执行失败");
   }, 30_000);
 
   it("cuts model history at the latest compact projection boundary", async () => {
@@ -3289,6 +4146,7 @@ describe("final answer gate aggregation", () => {
     expect(answer).not.toContain("下一步");
     expect(answer).not.toContain("完成或验证声明");
     expect(answer).not.toContain("completion_pass");
+    expect(answer).not.toContain("如果继续");
   });
 
   it("routes the legacy downgraded final answer helper through the evidence-backed boundary", () => {
@@ -3476,7 +4334,7 @@ describe("final answer gate aggregation", () => {
     expect((context as { requestActivityPhase?: string }).requestActivityPhase).toBeUndefined();
   });
 
-  it("downgrades raw protocol from the no-tool final stream through the existing partial gate", async () => {
+  it("reports raw protocol from the no-tool final stream as an execution failure", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "linghun-no-tool-raw-protocol-"));
     const { context, events } = makeDispatcherContext(projectPath);
     Object.assign(context, {
@@ -3514,10 +4372,11 @@ describe("final answer gate aggregation", () => {
     );
 
     expect(calls.count).toBe(1);
-    expect(finalText).toContain("部分完成");
+    expect(finalText).toContain("执行失败");
+    expect(finalText).not.toContain("部分完成");
     expect(finalText).toContain("没有执行任何非结构化工具请求");
     expect(finalText).not.toContain(rawProtocol);
-    expect(JSON.stringify(blocks)).toContain("部分完成");
+    expect(JSON.stringify(blocks)).toContain("执行失败");
     expect(JSON.stringify(events)).not.toContain('"type":"tool_result"');
   });
 
@@ -3566,9 +4425,10 @@ describe("final answer gate aggregation", () => {
 
     const serializedBlocks = JSON.stringify(blocks);
     expect(calls.count).toBe(1);
-    expect(finalText).toContain("还需要补充");
+    expect(finalText).toContain("本请求未能证实");
+    expect(finalText).not.toContain("如果继续");
     expect(finalText).not.toContain("LinghunFinalAnswerClaims");
-    expect(serializedBlocks).toContain("还需要补充");
+    expect(serializedBlocks).toContain("本请求未能证实");
     expect(serializedBlocks).not.toContain(rawDraft);
     expect((context as { lastFullOutput?: string }).lastFullOutput ?? "").not.toContain(rawDraft);
   });
@@ -3633,7 +4493,7 @@ describe("final answer gate aggregation", () => {
     );
 
     expect(streamCalls).toBe(1);
-    expect(finalText).toContain("还需要补充");
+    expect(finalText).toContain("本请求未能证实");
     expect(JSON.stringify(blocks)).not.toContain(rawDraft);
     expect(events.some(({ event }) => (event as { type?: string }).type === "assistant_message")).toBe(false);
   }, 15_000);
@@ -3729,13 +4589,19 @@ describe("final answer gate aggregation", () => {
     const eventsText = JSON.stringify(events);
     expect(calls.count).toBe(1);
     expect(eventsText).not.toContain("GitStatusInspect");
-    expect(finalText).toContain("还需要补充");
+    expect(finalText).toContain("本请求未能证实");
     expect(finalText).not.toContain("git_operation");
     expect(JSON.stringify(blocks)).not.toContain(rawDraft);
   });
 
   it("plans completion gaps through minimal verification immediately", () => {
-    const context = { ...makeGateContext(), permissionMode: "default", language: "zh-CN" };
+    const context = {
+      ...makeGateContext(),
+      projectPath: "/test",
+      currentRequestTurnId: "turn-artifact-search",
+      permissionMode: "default",
+      language: "zh-CN",
+    };
     const result = evaluateAggregatedFinalAnswerGate(
       context as never,
       withClaims("已完成。", [{ kind: "completion_claim", phrase: "已完成" }]),
@@ -3761,8 +4627,14 @@ describe("final answer gate aggregation", () => {
     });
   });
 
-  it("downgrades broad completion after one verification attempt", () => {
-    const context = { ...makeGateContext(), permissionMode: "full-access", language: "zh-CN" };
+  it("does not schedule the same broad completion verification twice", () => {
+    const context = {
+      ...makeGateContext(),
+      projectPath: "/test",
+      currentRequestTurnId: "turn-completion-repeat",
+      permissionMode: "full-access",
+      language: "zh-CN",
+    };
     const result = evaluateAggregatedFinalAnswerGate(
       context as never,
       withClaims("已完成。", [{ kind: "completion_claim", phrase: "已完成" }]),
@@ -3771,14 +4643,26 @@ describe("final answer gate aggregation", () => {
 
     expect(result.status).toBe("needs_disclaimer");
     if (result.status !== "needs_disclaimer") return;
+    const first = planFinalGateEvidenceGapAction({
+      result,
+      context: context as never,
+      userText: "继续修复",
+    });
+    const state = __testCaptureFinalGapProgressState(
+      result,
+      context as never,
+      first.evidenceAction,
+    );
+    state.attemptedCommandFingerprints.add(state.commandFingerprint!);
     const plan = planFinalGateEvidenceGapAction({
       result,
       context: context as never,
       userText: "继续修复",
       evidenceActionRetryCount: 1,
+      attemptedEvidenceActionFingerprints: state.attemptedCommandFingerprints,
     });
     expect(plan.action).toBe("downgrade_only");
-    expect(plan.reason).toBe("completion_gap_verified_scope_only");
+    expect(plan.reason).toBe("final_gate_no_new_evidence_path");
   });
 
   it("does not turn a historical question into current-request verification", () => {
@@ -4015,6 +4899,770 @@ describe("final answer gate aggregation", () => {
     expect(JSON.stringify(events)).not.toContain("final_answer_gap_action dispatch");
   });
 
+  it("closes a shrinking final gap identically in main and continuation loops", async () => {
+    const runCase = async (entry: "main" | "continuation") => {
+      const { context, events } = await makeSendMessageContext();
+      context.permissionMode = "full-access";
+      await writeFile(join(context.projectPath, "fact.ts"), "export const answer = () => 42;\n", "utf8");
+      let rounds = 0;
+      const gateway = {
+        async *stream() {
+          rounds += 1;
+          if (rounds === 2) {
+            yield {
+              type: "tool_use",
+              id: `${entry}-read-fact`,
+              name: "Read",
+              input: { path: "fact.ts" },
+            } as const;
+            yield {
+              type: "message_stop",
+              chunkCount: 1,
+              hadUsage: false,
+              finishReason: "tool_use",
+            } as const;
+            return;
+          }
+          yield {
+            type: "assistant_text_delta",
+            text: withClaims("fact.ts 中的 answer 函数返回 42。", [
+              { kind: "code_fact", phrase: "fact.ts 中的 answer 函数返回 42" },
+            ]),
+          } as const;
+          yield {
+            type: "message_stop",
+            chunkCount: 1,
+            hadUsage: false,
+            finishReason: "stop",
+          } as const;
+        },
+        async countMessagesTokensWithAPI() {
+          return { source: "unavailable", reason: "test" } as const;
+        },
+      } as unknown as ModelGateway;
+      const output = new MemoryOutput();
+      const userText = "完成修复并汇报 fact.ts 的结果";
+
+      if (entry === "main") {
+        await __testSendMessage(userText, context, gateway, output);
+      } else {
+        await continueModelAfterToolResults(
+          {
+            messages: [{ role: "user", content: userText }],
+            provider: "deepseek",
+            model: "deepseek-chat",
+            endpointProfile: "chat_completions",
+            reasoningSent: false,
+            originalUserText: userText,
+          },
+          context,
+          gateway,
+          output,
+        );
+      }
+
+      const finalText = events
+        .filter(
+          (event): event is { type: string; text: string } =>
+            (event as { type?: string }).type === "assistant_text_delta" &&
+            typeof (event as { text?: unknown }).text === "string",
+        )
+        .at(-1)?.text ?? "";
+      return { rounds, finalText, output: output.text, events };
+    };
+
+    for (const entry of ["main", "continuation"] as const) {
+      const result = await runCase(entry);
+      expect(result.rounds).toBe(3);
+      expect(result.finalText).toContain("answer 函数返回 42");
+      expect(result.output).toContain("Read(fact.ts)");
+      expect(result.finalText).not.toMatch(/PARTIAL|部分完成|如果继续|round.?limit|轮次上限/iu);
+      expect(JSON.stringify(result.events)).toContain("final_answer_gap_returned_to_model_loop");
+    }
+  }, 30_000);
+
+  it("auto-executes an ignored final-gap directive through the existing executor", async () => {
+    const runCase = async (entry: "main" | "continuation") => {
+      const { context, events } = await makeSendMessageContext();
+      context.permissionMode = "full-access";
+      await writeFile(join(context.projectPath, "ignored.ts"), "export const value = 42;\n", "utf8");
+      let rounds = 0;
+      const gateway = {
+        async *stream() {
+          rounds += 1;
+          if (rounds > 6) throw new Error("final-gap directive auto execution did not converge");
+          yield {
+            type: "assistant_text_delta",
+            text: withClaims("ignored.ts 导出 value 42。", [
+              { kind: "code_fact", phrase: "ignored.ts 已完成修复" },
+            ]),
+          } as const;
+          yield {
+            type: "message_stop",
+            chunkCount: 1,
+            hadUsage: false,
+            finishReason: "stop",
+          } as const;
+        },
+        async countMessagesTokensWithAPI() {
+          return { source: "unavailable", reason: "test" } as const;
+        },
+      } as unknown as ModelGateway;
+      const output = new MemoryOutput();
+      const userText = "完成 ignored.ts 修复并验证";
+
+      if (entry === "main") {
+        await __testSendMessage(userText, context, gateway, output);
+      } else {
+        await continueModelAfterToolResults(
+          {
+            messages: [{ role: "user", content: userText }],
+            provider: "deepseek",
+            model: "deepseek-chat",
+            endpointProfile: "chat_completions",
+            reasoningSent: false,
+            originalUserText: userText,
+          },
+          context,
+          gateway,
+          output,
+        );
+      }
+
+      const finalText = events
+        .filter(
+          (event): event is { type: string; text: string } =>
+            (event as { type?: string }).type === "assistant_text_delta" &&
+            typeof (event as { text?: unknown }).text === "string",
+        )
+        .at(-1)?.text ?? "";
+      return { rounds, finalText, output: output.text, serializedEvents: JSON.stringify(events) };
+    };
+
+    for (const entry of ["main", "continuation"] as const) {
+      const result = await runCase(entry);
+      expect(result.rounds).toBe(3);
+      expect(result.finalText).toContain("ignored.ts 导出 value 42");
+      expect(result.output).not.toContain("所有可用且不重复的真实补证路径均已尝试");
+      expect(result.finalText).not.toMatch(/PARTIAL|部分完成|如果继续|round.?limit|轮次上限/iu);
+      expect(result.serializedEvents).toContain("final_answer_gap_auto_execute");
+      expect(result.serializedEvents).toContain("tool_call_start");
+      expect(result.serializedEvents).toContain("tool_result");
+    }
+  }, 30_000);
+
+  it.each(["main", "continuation"] as const)(
+    "does not commit a synthetic final-gap result after owner replacement in the %s loop",
+    async (entry) => {
+      const { context, events } = await makeSendMessageContext();
+      context.permissionMode = "full-access";
+      await writeFile(join(context.projectPath, "owner.ts"), "export const owner = true;\n", "utf8");
+      const appendEvent = context.store.appendEvent.bind(context.store);
+      context.store.appendEvent = async (sessionId, event, commitGuard) => {
+        await appendEvent(sessionId, event, commitGuard);
+        if (
+          event.type === "tool_call_start" &&
+          event.id.startsWith("final-gate-evidence-")
+        ) {
+          context.currentRequestTurnId = "replacement-owner";
+          context.activeAbortController?.abort("user_interrupt");
+        }
+      };
+      let rounds = 0;
+      const gateway = {
+        async *stream() {
+          rounds += 1;
+          if (rounds > 4) throw new Error("stale synthetic action continued after owner replacement");
+          yield {
+            type: "assistant_text_delta",
+            text: withClaims("owner.ts 导出 owner。", [
+              { kind: "code_fact", phrase: "owner.ts 导出 owner" },
+            ]),
+          } as const;
+          yield { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" } as const;
+        },
+        async countMessagesTokensWithAPI() {
+          return { source: "unavailable", reason: "test" } as const;
+        },
+      } as unknown as ModelGateway;
+      const output = new MemoryOutput();
+      const userText = "确认 owner.ts 的导出";
+
+      if (entry === "main") {
+        await __testSendMessage(userText, context, gateway, output);
+      } else {
+        await continueModelAfterToolResults(
+          {
+            messages: [{ role: "user", content: userText }],
+            provider: "deepseek",
+            model: "deepseek-chat",
+            endpointProfile: "chat_completions",
+            reasoningSent: false,
+            originalUserText: userText,
+          },
+          context,
+          gateway,
+          output,
+        );
+      }
+
+      const syntheticStarts = events.filter(
+        (event): event is { type: "tool_call_start"; id: string } =>
+          typeof event === "object" &&
+          event !== null &&
+          (event as { type?: unknown }).type === "tool_call_start" &&
+          typeof (event as { id?: unknown }).id === "string" &&
+          (event as { id: string }).id.startsWith("final-gate-evidence-"),
+      );
+      expect(syntheticStarts).toHaveLength(1);
+      const syntheticId = syntheticStarts[0]!.id;
+      expect(
+        events.some(
+          (event) =>
+            typeof event === "object" &&
+            event !== null &&
+            (event as { type?: unknown }).type === "tool_result" &&
+            (event as { toolUseId?: unknown }).toolUseId === syntheticId,
+        ),
+      ).toBe(false);
+      expect(context.evidence.some((record) => record.toolUseId === syntheticId)).toBe(false);
+    },
+  );
+
+  it("aborts only the latest running verification for the current request owner", async () => {
+    const { context } = await makeSendMessageContext();
+    context.permissionMode = "full-access";
+    await writeFile(
+      join(context.projectPath, "package.json"),
+      JSON.stringify({ private: true, scripts: { typecheck: "node -e \"process.exit(0)\"" } }),
+      "utf8",
+    );
+    const sessionController = new AbortController();
+    const olderOwnerController = new AbortController();
+    const latestOwnerController = new AbortController();
+    let rounds = 0;
+    const gateway = {
+      async *stream() {
+        rounds += 1;
+        if (rounds === 1) {
+          const requestTurnId = context.currentRequestTurnId!;
+          const ownerKey = `request:${context.sessionId}:${requestTurnId}`;
+          context.backgroundTasks.push(
+            {
+              id: "session-running",
+              kind: "verification",
+              ownerSessionId: context.sessionId,
+              title: "session verification",
+              status: "running",
+              startedAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              heartbeatIntervalMs: 30_000,
+              staleAfterMs: 120_000,
+              hasOutput: false,
+              userVisibleSummary: "session running",
+            },
+            {
+              id: "owner-running-older",
+              kind: "verification",
+              ownerSessionId: context.sessionId,
+              requestTurnId,
+              title: "older owner verification",
+              status: "running",
+              startedAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              heartbeatIntervalMs: 30_000,
+              staleAfterMs: 120_000,
+              hasOutput: false,
+              userVisibleSummary: "older owner running",
+            },
+            {
+              id: "owner-running-latest",
+              kind: "verification",
+              ownerSessionId: context.sessionId,
+              requestTurnId,
+              title: "latest owner verification",
+              status: "running",
+              startedAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              heartbeatIntervalMs: 30_000,
+              staleAfterMs: 120_000,
+              hasOutput: false,
+              userVisibleSummary: "latest owner running",
+            },
+          );
+          context.activeVerificationAbortControllers = new Map([
+            ["session-running", sessionController],
+            ["owner-running-older", olderOwnerController],
+            ["owner-running-latest", latestOwnerController],
+          ]);
+          context.latestVerificationRunIds = new Map([[ownerKey, "owner-running-latest"]]);
+        }
+        yield {
+          type: "assistant_text_delta",
+          text: withClaims("类型检查已通过。", [
+            { kind: "verification_claim", phrase: "类型检查已通过" },
+          ]),
+        } as const;
+        yield { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await __testSendMessage("验证当前类型检查", context, gateway, new MemoryOutput());
+
+    expect(sessionController.signal.aborted).toBe(false);
+    expect(olderOwnerController.signal.aborted).toBe(false);
+    expect(latestOwnerController.signal.aborted).toBe(true);
+  }, 30_000);
+
+  it("keeps a running verification through the synthetic default-mode Bash permission boundary", async () => {
+    const { context, events } = await makeSendMessageContext();
+    await writeFile(
+      join(context.projectPath, "package.json"),
+      JSON.stringify({ private: true, scripts: { typecheck: "node -e \"process.exit(0)\"" } }),
+      "utf8",
+    );
+    const latestOwnerController = new AbortController();
+    const originalCall = builtInTools.Bash.call;
+    const execute = vi.fn(async () => ({ text: "must not run", data: { exitCode: 0 } }));
+    builtInTools.Bash.call = execute as typeof originalCall;
+    let rounds = 0;
+    const gateway = {
+      async *stream() {
+        rounds += 1;
+        if (rounds === 1) {
+          const requestTurnId = context.currentRequestTurnId!;
+          const ownerKey = `request:${context.sessionId}:${requestTurnId}`;
+          context.backgroundTasks.push({
+            id: "default-owner-running-latest",
+            kind: "verification",
+            ownerSessionId: context.sessionId,
+            requestTurnId,
+            title: "latest owner verification",
+            status: "running",
+            startedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            heartbeatIntervalMs: 30_000,
+            staleAfterMs: 120_000,
+            hasOutput: false,
+            userVisibleSummary: "latest owner running",
+          });
+          context.activeVerificationAbortControllers = new Map([
+            ["default-owner-running-latest", latestOwnerController],
+          ]);
+          context.latestVerificationRunIds = new Map([
+            [ownerKey, "default-owner-running-latest"],
+          ]);
+        }
+        yield {
+          type: "assistant_text_delta",
+          text: withClaims("类型检查已通过。", [
+            { kind: "verification_claim", phrase: "类型检查已通过" },
+          ]),
+        } as const;
+        yield { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+    context.modelGateway = gateway;
+
+    try {
+      await __testSendMessage("验证当前类型检查", context, gateway, new MemoryOutput());
+      const approval = context.pendingLocalApproval;
+      expect(approval).toMatchObject({ kind: "model_tool_use", toolName: "Bash" });
+      if (!approval || approval.kind !== "model_tool_use" || !approval.continuation) {
+        throw new Error("expected synthetic Bash approval continuation");
+      }
+      expect(approval.toolCall.id).toMatch(/^final-gate-evidence-/u);
+      expect(approval.continuation.finalGapProgressState?.attemptedCommandFingerprints.size).toBe(0);
+      expect(latestOwnerController.signal.aborted).toBe(false);
+
+      await cancelPendingInteraction(context, new MemoryOutput(), "Esc");
+
+      expect(latestOwnerController.signal.aborted).toBe(false);
+      expect(execute).not.toHaveBeenCalled();
+      expect(approval.continuation.finalGapProgressState?.externalBlockReason).toBe(
+        "user_cancelled",
+      );
+      const syntheticEvidence = context.evidence.filter(
+        (record) => record.toolUseId === approval.toolCall.id,
+      );
+      expect(
+        syntheticEvidence.some((record) => record.supportsClaims.includes("verification_passed")),
+      ).toBe(false);
+      expect(
+        events.some(
+          (event) =>
+            typeof event === "object" &&
+            event !== null &&
+            (event as { type?: unknown }).type === "verification_start",
+        ),
+      ).toBe(false);
+    } finally {
+      builtInTools.Bash.call = originalCall;
+    }
+  }, 30_000);
+
+  it("keeps a running verifier when synthetic default-mode Bash is denied", async () => {
+    const { context, events } = await makeSendMessageContext();
+    await writeFile(
+      join(context.projectPath, "package.json"),
+      JSON.stringify({ private: true, scripts: { typecheck: "node -e \"process.exit(0)\"" } }),
+      "utf8",
+    );
+    context.permissions.rules.push({
+      id: "deny-synthetic-final-gap-bash",
+      effect: "deny",
+      toolName: "Bash",
+    });
+    const latestOwnerController = new AbortController();
+    const originalCall = builtInTools.Bash.call;
+    const execute = vi.fn(async () => ({ text: "must not run", data: { exitCode: 0 } }));
+    builtInTools.Bash.call = execute as typeof originalCall;
+    let rounds = 0;
+    const gateway = {
+      async *stream() {
+        rounds += 1;
+        if (rounds === 1) {
+          const requestTurnId = context.currentRequestTurnId!;
+          const ownerKey = `request:${context.sessionId}:${requestTurnId}`;
+          context.backgroundTasks.push({
+            id: "denied-owner-running-latest",
+            kind: "verification",
+            ownerSessionId: context.sessionId,
+            requestTurnId,
+            title: "latest owner verification",
+            status: "running",
+            startedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            heartbeatIntervalMs: 30_000,
+            staleAfterMs: 120_000,
+            hasOutput: false,
+            userVisibleSummary: "latest owner running",
+          });
+          context.activeVerificationAbortControllers = new Map([
+            ["denied-owner-running-latest", latestOwnerController],
+          ]);
+          context.latestVerificationRunIds = new Map([
+            [ownerKey, "denied-owner-running-latest"],
+          ]);
+        }
+        yield {
+          type: "assistant_text_delta",
+          text: withClaims("类型检查已通过。", [
+            { kind: "verification_claim", phrase: "类型检查已通过" },
+          ]),
+        } as const;
+        yield { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    try {
+      await __testSendMessage("验证当前类型检查", context, gateway, new MemoryOutput());
+
+      expect(latestOwnerController.signal.aborted).toBe(false);
+      expect(context.pendingLocalApproval).toBeUndefined();
+      expect(execute).not.toHaveBeenCalled();
+      const serializedEvents = JSON.stringify(events);
+      expect(serializedEvents).toContain('"decision":"deny"');
+      expect(serializedEvents).toContain("permission deny");
+      expect(serializedEvents).not.toContain('"type":"verification_start"');
+      expect(
+        context.evidence.some((record) =>
+          record.supportsClaims.includes("verification_passed")
+        ),
+      ).toBe(false);
+    } finally {
+      builtInTools.Bash.call = originalCall;
+    }
+  }, 30_000);
+
+  it.each(["main", "continuation"] as const)(
+    "bounds an ignored default verification directive when %s has no executable level",
+    async (entry) => {
+      const { context } = await makeSendMessageContext();
+      await writeFile(join(context.projectPath, "package.json"), JSON.stringify({ private: true }), "utf8");
+      let rounds = 0;
+      const gateway = {
+        async *stream() {
+          rounds += 1;
+          if (rounds > 4) throw new Error("missing verification command looped to wall clock");
+          yield {
+            type: "assistant_text_delta",
+            text: withClaims("类型检查已通过。", [
+              { kind: "verification_claim", phrase: "类型检查已通过" },
+            ]),
+          } as const;
+          yield { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" } as const;
+        },
+        async countMessagesTokensWithAPI() {
+          return { source: "unavailable", reason: "test" } as const;
+        },
+      } as unknown as ModelGateway;
+      const output = new MemoryOutput();
+      const userText = "验证当前类型检查";
+
+      if (entry === "main") {
+        await __testSendMessage(userText, context, gateway, output);
+      } else {
+        await continueModelAfterToolResults(
+          {
+            messages: [{ role: "user", content: userText }],
+            provider: "deepseek",
+            model: "deepseek-chat",
+            endpointProfile: "chat_completions",
+            reasoningSent: false,
+            originalUserText: userText,
+          },
+          context,
+          gateway,
+          output,
+        );
+      }
+
+      expect(rounds).toBe(2);
+      expect(output.text).toContain("没有与所选验证级别匹配的可执行命令");
+      expect(output.text).not.toContain("所有可用且不重复的真实补证路径均已尝试");
+    },
+  );
+
+  it("switches from a repeated Read to SourcePack and completes in both loops", async () => {
+    const runCase = async (
+      entry: "main" | "continuation",
+      schedulerDecision?: TuiContext["lastMetaSchedulerDecision"],
+    ) => {
+      const { context } = await makeSendMessageContext();
+      context.permissionMode = "full-access";
+      if (schedulerDecision) context.lastMetaSchedulerDecision = schedulerDecision;
+      await writeFile(join(context.projectPath, "repeat.txt"), "same result\n", "utf8");
+      let rounds = 0;
+      const gateway = {
+        async *stream() {
+          rounds += 1;
+          if (rounds <= 2) {
+            yield {
+              type: "tool_use",
+              id: `${entry}-read-${rounds}`,
+              name: "Read",
+              input: { path: "repeat.txt", offset: rounds },
+            } as const;
+          } else if (rounds === 3) {
+            yield {
+              type: "tool_use",
+              id: `${entry}-source-pack`,
+              name: "SourcePack",
+              input: { query: "same result", limit: 2 },
+            } as const;
+          } else {
+            yield { type: "assistant_text_delta", text: "repeat.txt 包含 same result。" } as const;
+          }
+          yield {
+            type: "message_stop",
+            chunkCount: 1,
+            hadUsage: false,
+            finishReason: rounds <= 3 ? "tool_use" : "stop",
+          } as const;
+        },
+        async countMessagesTokensWithAPI() {
+          return { source: "unavailable", reason: "test" } as const;
+        },
+      } as unknown as ModelGateway;
+      const output = new MemoryOutput();
+      const userText = "检查 repeat.txt 并据实回答";
+
+      if (entry === "main") {
+        await __testSendMessage(userText, context, gateway, output);
+      } else {
+        await continueModelAfterToolResults(
+          {
+            messages: [{ role: "user", content: userText }],
+            provider: "deepseek",
+            model: "deepseek-chat",
+            endpointProfile: "chat_completions",
+            reasoningSent: false,
+            originalUserText: userText,
+          },
+          context,
+          gateway,
+          output,
+        );
+      }
+      return {
+        rounds,
+        output: output.text,
+        schedulerDecision: context.lastMetaSchedulerDecision,
+      };
+    };
+
+    const main = await runCase("main");
+    const continuation = await runCase("continuation", main.schedulerDecision);
+    expect(main.rounds).toBe(continuation.rounds);
+    for (const result of [main, continuation]) {
+      expect(result.rounds).toBe(4);
+      expect(result.output).toContain("SourcePack");
+      expect(result.output).toContain("repeat.txt 包含 same result");
+      expect(result.output).not.toMatch(/PARTIAL|部分完成|如果继续|round.?limit|轮次上限/iu);
+    }
+  }, 30_000);
+
+  it.each(["main", "continuation"] as const)(
+    "allows focused FAIL then Edit then same-level PASS in the %s loop",
+    async (entry) => {
+      const { context, events } = await makeSendMessageContext();
+      context.permissionMode = "full-access";
+      await writeFile(
+        join(context.projectPath, "package.json"),
+        JSON.stringify({ private: true, scripts: { test: "node focused-check.cjs" } }),
+        "utf8",
+      );
+      await writeFile(join(context.projectPath, "focused-check.cjs"), "process.exit(1);\n", "utf8");
+      let rounds = 0;
+      const gateway = {
+        async *stream() {
+          rounds += 1;
+          if (rounds === 2) {
+            yield {
+              type: "tool_use",
+              id: `${entry}-verify-${rounds}`,
+              name: "RunVerification",
+              input: { level: "test" },
+            } as const;
+          } else if (rounds === 3) {
+            yield {
+              type: "tool_use",
+              id: `${entry}-read-check`,
+              name: "Read",
+              input: { path: "focused-check.cjs" },
+            } as const;
+          } else if (rounds === 4) {
+            yield {
+              type: "tool_use",
+              id: `${entry}-edit-check`,
+              name: "Edit",
+              input: {
+                path: "focused-check.cjs",
+                oldText: "process.exit(1);",
+                newText: "process.exit(0);",
+              },
+            } as const;
+          } else {
+            yield {
+              type: "assistant_text_delta",
+              text: withClaims("测试已通过。", [
+                { kind: "completion_pass", phrase: "测试已通过" },
+              ]),
+            } as const;
+          }
+          yield {
+            type: "message_stop",
+            chunkCount: 1,
+            hadUsage: false,
+            finishReason: [2, 3, 4].includes(rounds) ? "tool_use" : "stop",
+          } as const;
+        },
+        async countMessagesTokensWithAPI() {
+          return { source: "unavailable", reason: "test" } as const;
+        },
+      } as unknown as ModelGateway;
+      const output = new MemoryOutput();
+      const userText = "修复 focused check 并验证";
+
+      if (entry === "main") {
+        await __testSendMessage(userText, context, gateway, output);
+      } else {
+        await continueModelAfterToolResults(
+          {
+            messages: [{ role: "user", content: userText }],
+            provider: "deepseek",
+            model: "deepseek-chat",
+            endpointProfile: "chat_completions",
+            reasoningSent: false,
+            originalUserText: userText,
+          },
+          context,
+          gateway,
+          output,
+        );
+      }
+
+      expect(rounds).toBeLessThanOrEqual(8);
+      expect(
+        await readFile(join(context.projectPath, "focused-check.cjs"), "utf8"),
+        output.text,
+      ).toContain("process.exit(0)");
+      const serializedEvents = JSON.stringify(events);
+      expect(serializedEvents).toContain("Verification FAIL");
+      expect(serializedEvents).toContain("Verification PASS");
+      expect(serializedEvents).toContain("final_answer_gap_auto_execute");
+      expect(serializedEvents).not.toMatch(/PARTIAL|部分完成|如果继续|round.?limit|轮次上限/iu);
+    },
+    60_000,
+  );
+
+  it("keeps a mixed duplicate and fresh readonly batch running in both loops", async () => {
+    const runCase = async (entry: "main" | "continuation") => {
+      const { context, events } = await makeSendMessageContext();
+      context.permissionMode = "full-access";
+      await writeFile(join(context.projectPath, "repeat-a.txt"), "same result\n", "utf8");
+      await writeFile(join(context.projectPath, "repeat-b.txt"), "fresh result\n", "utf8");
+      let rounds = 0;
+      const gateway = {
+        async *stream() {
+          rounds += 1;
+          if (rounds === 1) {
+            yield { type: "tool_use", id: `${entry}-seed-a`, name: "Read", input: { path: "repeat-a.txt" } } as const;
+            yield { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "tool_use" } as const;
+            return;
+          }
+          if (rounds === 2) {
+            yield { type: "tool_use", id: `${entry}-repeat-a`, name: "Read", input: { path: "repeat-a.txt" } } as const;
+            yield { type: "tool_use", id: `${entry}-fresh-b`, name: "Read", input: { path: "repeat-b.txt" } } as const;
+            yield { type: "message_stop", chunkCount: 2, hadUsage: false, finishReason: "tool_use" } as const;
+            return;
+          }
+          yield { type: "assistant_text_delta", text: "已读取两条不同证据。" } as const;
+          yield { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" } as const;
+        },
+        async countMessagesTokensWithAPI() {
+          return { source: "unavailable", reason: "test" } as const;
+        },
+      } as unknown as ModelGateway;
+      const output = new MemoryOutput();
+
+      if (entry === "main") {
+        await __testSendMessage("读取两份证据并回答", context, gateway, output);
+      } else {
+        await continueModelAfterToolResults(
+          {
+            messages: [{ role: "user", content: "读取两份证据并回答" }],
+            provider: "deepseek",
+            model: "deepseek-chat",
+            endpointProfile: "chat_completions",
+            reasoningSent: false,
+            originalUserText: "读取两份证据并回答",
+          },
+          context,
+          gateway,
+          output,
+        );
+      }
+
+      expect(rounds).toBe(3);
+      expect(output.text).toContain("repeat-b.txt");
+      expect(JSON.stringify(events)).not.toContain("repeated_readonly_evidence_path_stopped");
+    };
+
+    await runCase("main");
+    await runCase("continuation");
+  }, 30_000);
+
   it("keeps claim-alignment rewrite reachable after evidence_recorded and in continuation", async () => {
     const source = await readFile(new URL("./model-stream-runtime.ts", import.meta.url), "utf8");
     expect(source).not.toContain("if (!finalAnswerClaimRetried && assistantText)");
@@ -4151,10 +5799,9 @@ describe("final answer gate aggregation", () => {
     });
 
     expect(plan.action).toBe("readonly_check");
-    expect(plan.directive).toContain("Read, Grep, Glob");
+    expect(plan.directive).toContain("Read, ReadSnippets, SourcePack, Grep, Glob");
     expect(plan.directive).toContain("不要运行 Bash");
-    expect(plan.evidenceAction?.toolName).toBe("Glob");
-    expect(JSON.stringify(plan.evidenceAction?.input)).toContain("md,txt,json,log");
+    expect(plan.evidenceAction?.toolName).toBe("SourcePack");
   });
 
   it("keeps artifact readonly evidence available when the user only forbids tests", () => {
@@ -4168,7 +5815,7 @@ describe("final answer gate aggregation", () => {
     });
 
     expect(plan.action).toBe("readonly_check");
-    expect(plan.evidenceAction?.toolName).toBe("Glob");
+    expect(plan.evidenceAction?.toolName).toBe("SourcePack");
   });
 
   it("plans artifact gaps from changed files before broad globbing", () => {
@@ -4196,15 +5843,33 @@ describe("final answer gate aggregation", () => {
     });
   });
 
-  it("continues artifact evidence search with grep after a miss retry", () => {
+  it("continues artifact evidence search with grep after SourcePack executes", () => {
+    const result = {
+      status: "needs_disclaimer" as const,
+      unsupportedKinds: ["engineering_missing_artifact"],
+    };
+    const context = {
+      ...makeGateContext(),
+      projectPath: "/test",
+      currentRequestTurnId: "turn-artifact-search",
+      permissionMode: "default",
+      language: "zh-CN",
+    };
+    const first = planFinalGateEvidenceGapAction({
+      result,
+      context: context as never,
+      userText: "继续确认产物",
+    });
+    const state = __testCaptureFinalGapProgressState(result, context as never, first.evidenceAction);
+    state.attemptedCommandFingerprints.add(state.commandFingerprint!);
     const plan = planFinalGateEvidenceGapAction({
       result: {
         status: "needs_disclaimer",
         unsupportedKinds: ["engineering_missing_artifact"],
       },
-      context: { ...makeGateContext(), permissionMode: "default", language: "zh-CN" } as never,
+      context: context as never,
       userText: "继续确认产物",
-      evidenceActionRetryCount: 1,
+      attemptedEvidenceActionFingerprints: state.attemptedCommandFingerprints,
     });
 
     expect(plan.action).toBe("readonly_check");
@@ -4214,23 +5879,68 @@ describe("final answer gate aggregation", () => {
     });
   });
 
-  it("downgrades artifact gaps after the evidence retry budget is spent", () => {
-    const plan = planFinalGateEvidenceGapAction({
-      result: {
-        status: "needs_disclaimer",
-        unsupportedKinds: ["engineering_missing_artifact"],
-      },
-      context: { ...makeGateContext(), permissionMode: "default", language: "zh-CN" } as never,
+  it("stops artifact recovery only after each distinct readonly path was tried", () => {
+    const result = {
+      status: "needs_disclaimer" as const,
+      unsupportedKinds: ["engineering_missing_artifact"],
+    };
+    const context = {
+      ...makeGateContext(),
+      projectPath: "/test",
+      currentRequestTurnId: "turn-artifact-exhaustion",
+      permissionMode: "default",
+      language: "zh-CN",
+    };
+    const first = planFinalGateEvidenceGapAction({
+      result,
+      context: context as never,
       userText: "继续确认产物",
-      retryBudgetRemaining: false,
-      evidenceActionRetryCount: 3,
+    });
+    const firstState = __testCaptureFinalGapProgressState(result, context as never, first.evidenceAction);
+    firstState.attemptedCommandFingerprints.add(firstState.commandFingerprint!);
+    const second = planFinalGateEvidenceGapAction({
+      result,
+      context: context as never,
+      userText: "继续确认产物",
+      attemptedEvidenceActionFingerprints: firstState.attemptedCommandFingerprints,
+    });
+    const secondState = __testCaptureFinalGapProgressState(
+      result,
+      context as never,
+      second.evidenceAction,
+      firstState,
+    );
+    secondState.attemptedCommandFingerprints.add(secondState.commandFingerprint!);
+    const third = planFinalGateEvidenceGapAction({
+      result,
+      context: context as never,
+      userText: "继续确认产物",
+      attemptedEvidenceActionFingerprints: secondState.attemptedCommandFingerprints,
+    });
+    const thirdState = __testCaptureFinalGapProgressState(
+      result,
+      context as never,
+      third.evidenceAction,
+      secondState,
+    );
+    thirdState.attemptedCommandFingerprints.add(thirdState.commandFingerprint!);
+    const plan = planFinalGateEvidenceGapAction({
+      result,
+      context: context as never,
+      userText: "继续确认产物",
+      attemptedEvidenceActionFingerprints: thirdState.attemptedCommandFingerprints,
     });
 
+    expect(first.evidenceAction?.toolName).toBe("SourcePack");
+    expect(second.evidenceAction?.toolName).toBe("Grep");
+    expect(third.evidenceAction?.toolName).toBe("Glob");
     expect(plan.action).toBe("downgrade_only");
-    expect(plan.reason).toBe("final_gate_retry_disabled");
+    expect(plan.reason).toBe("final_gate_no_new_evidence_path");
   });
 
-  it("downgrades immediately while background verification is resumable", () => {
+  it.each(["running", "failed", "cancelled", "timeout", "stale"] as const)(
+    "keeps current-scope verification runnable after a %s verification task",
+    (status) => {
     const plan = planFinalGateEvidenceGapAction({
       result: {
         status: "needs_disclaimer",
@@ -4249,25 +5959,26 @@ describe("final answer gate aggregation", () => {
             ownerSessionId: "session-stale-verification",
             requestTurnId: "request-stale-verification",
             title: "Verification Runner",
-            status: "stale",
+            status,
             startedAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
             heartbeatIntervalMs: 30_000,
             staleAfterMs: 120_000,
             hasOutput: false,
-            userVisibleSummary: "stale/resumable",
+            userVisibleSummary: `${status}/resumable`,
           },
         ],
       } as never,
       userText: "继续输出当前结论",
     });
 
-    expect(plan).toMatchObject({
-      action: "downgrade_only",
-      reason: "verification_background_resumable",
-    });
-    expect(plan.evidenceAction).toBeUndefined();
-  });
+      expect(plan.action).toBe("verification_request");
+      expect(plan.evidenceAction).toMatchObject({
+        toolName: "RunVerification",
+        input: { level: "typecheck" },
+      });
+    },
+  );
 
   it("only accepts verification evidence owned by the current request scope", () => {
     const context = {
@@ -4445,20 +6156,34 @@ describe("final answer gate aggregation", () => {
     });
   });
 
-  it("downgrades git gaps after the evidence retry budget is spent", () => {
-    const plan = planFinalGateEvidenceGapAction({
-      result: {
-        status: "needs_disclaimer",
-        unsupportedKinds: ["git_operation"],
-      },
-      context: { ...makeGateContext(), permissionMode: "default", language: "zh-CN" } as never,
+  it("does not schedule the same git inspection twice", () => {
+    const result = {
+      status: "needs_disclaimer" as const,
+      unsupportedKinds: ["git_operation"],
+    };
+    const context = {
+      ...makeGateContext(),
+      projectPath: "/test",
+      currentRequestTurnId: "turn-git-repeat",
+      permissionMode: "default",
+      language: "zh-CN",
+    };
+    const first = planFinalGateEvidenceGapAction({
+      result,
+      context: context as never,
       userText: "确认 git 状态",
-      retryBudgetRemaining: false,
-      evidenceActionRetryCount: 3,
+    });
+    const state = __testCaptureFinalGapProgressState(result, context as never, first.evidenceAction);
+    state.attemptedCommandFingerprints.add(state.commandFingerprint!);
+    const plan = planFinalGateEvidenceGapAction({
+      result,
+      context: context as never,
+      userText: "确认 git 状态",
+      attemptedEvidenceActionFingerprints: state.attemptedCommandFingerprints,
     });
 
     expect(plan.action).toBe("downgrade_only");
-    expect(plan.reason).toBe("final_gate_retry_disabled");
+    expect(plan.reason).toBe("final_gate_no_new_evidence_path");
   });
 
   it("plans service/runtime gaps as readonly evidence checks, not verification passes", () => {
@@ -4627,7 +6352,283 @@ describe("api token count diagnostics", () => {
 });
 
 describe("Final Gap Progress Detection (Stage 4)", () => {
+  it.each([
+    [
+      { toolName: "Read", input: { path: "src/a.ts", offset: 1, limit: 20 } },
+      { toolName: "Read", input: { path: "src/a.ts", offset: 200, limit: 5 } },
+    ],
+    [
+      { toolName: "ReadSnippets", input: { ranges: [{ path: "src/a.ts", start: 1, end: 20 }] } },
+      { toolName: "ReadSnippets", input: { ranges: [{ path: "src/a.ts", start: 200, end: 240 }] } },
+    ],
+    [
+      { toolName: "SourcePack", input: { query: "first query", limit: 2 } },
+      { toolName: "SourcePack", input: { query: "second query", limit: 10 } },
+    ],
+    [
+      { toolName: "Grep", input: { path: "src", pattern: "first", limit: 20 } },
+      { toolName: "Grep", input: { path: "src", pattern: "second", limit: 200 } },
+    ],
+    [
+      { toolName: "Glob", input: { path: "src", pattern: "**/*.ts", limit: 20 } },
+      { toolName: "Glob", input: { path: "src", pattern: "**/*.tsx", limit: 200 } },
+    ],
+  ])("normalizes dynamic readonly inputs for one final-gap evidence path", (left, right) => {
+    const context = {
+      evidence: [],
+      currentRequestTurnId: "turn-path-hash",
+      sessionId: "session-path-hash",
+      projectPath: "/test",
+      tools: { changedFiles: [] },
+    } as unknown as TuiContext;
+    const result = {
+      status: "needs_disclaimer" as const,
+      unsupportedKinds: ["artifact_claim"],
+    };
+    const makeAction = (action: typeof left) => ({
+      ...action,
+      strategy: "artifact_readonly_check" as const,
+      summary: "inspect artifact evidence",
+    });
+
+    const leftState = __testCaptureFinalGapProgressState(result, context, makeAction(left));
+    const rightState = __testCaptureFinalGapProgressState(result, context, makeAction(right));
+
+    expect(leftState.commandFingerprint).toBe(rightState.commandFingerprint);
+  });
+
+  it("records a matching readonly path without treating it as final-gap progress", () => {
+    const context = {
+      evidence: [
+        {
+          id: "matching-read",
+          kind: "source_read",
+          summary: "read src/a.ts",
+          source: "Read",
+          supportsClaims: [],
+          createdAt: new Date(0).toISOString(),
+          ownerScope: {
+            ownerSessionId: "session-1",
+            requestTurnId: "turn-1",
+            cwd: "/test",
+            targets: ["src/a.ts"],
+          },
+        },
+      ],
+      currentRequestTurnId: "turn-1",
+      sessionId: "session-1",
+      projectPath: "/test",
+    } as unknown as TuiContext;
+    const continuation = {
+      finalGapProgressState: {
+        unsupportedKinds: ["artifact_claim"],
+        relevantEvidenceIds: new Set<string>(),
+        evidenceAction: {
+          toolName: "Read",
+          input: { path: "src/a.ts" },
+          summary: "read claimed artifact",
+        },
+        attemptedCommandFingerprints: new Set<string>(),
+      },
+    };
+    const toolCall = { name: "Read", input: { path: "src/a.ts" } };
+    const result = {
+      ok: true,
+      tool: "Read",
+      text: "Read(src/a.ts) 10 lines",
+      evidenceId: "matching-read",
+    };
+
+    expect(recordSuccessfulToolExecutionProgress(continuation, toolCall, result, context)).toBe(false);
+    expect(continuation.finalGapProgressState.attemptedCommandFingerprints.size).toBe(1);
+
+    expect(recordSuccessfulToolExecutionProgress(continuation, toolCall, result, context)).toBe(false);
+  });
+
+  it("does not count unrelated evidence and records an attempted path only when it executes", () => {
+    const context = {
+      evidence: [],
+      currentRequestTurnId: "turn-1",
+      sessionId: "session-1",
+      projectPath: "/test",
+    } as unknown as TuiContext;
+    const makeContinuation = () => ({
+      finalGapProgressState: {
+        unsupportedKinds: ["artifact_claim"],
+        relevantEvidenceIds: new Set<string>(),
+        evidenceAction: {
+          toolName: "Read",
+          input: { path: "src/required.ts" },
+          strategy: "artifact_readonly_check" as const,
+          summary: "read required artifact",
+        },
+        attemptedCommandFingerprints: new Set<string>(),
+      },
+    });
+    const unrelated = makeContinuation();
+
+    expect(recordSuccessfulToolExecutionProgress(
+      unrelated,
+      { name: "Read", input: { path: "src/unrelated.ts" } },
+      { ok: true, tool: "Read", text: "unrelated", evidenceId: "unrelated-read" },
+      context,
+    )).toBe(false);
+    expect(unrelated.finalGapProgressState.attemptedCommandFingerprints.size).toBe(1);
+
+    const failed = makeContinuation();
+    expect(recordSuccessfulToolExecutionProgress(
+      failed,
+      { name: "Read", input: { path: "src/required.ts" } },
+      { ok: false, tool: "Read", text: "read failed" },
+      context,
+    )).toBe(false);
+    expect(failed.finalGapProgressState.attemptedCommandFingerprints.size).toBe(1);
+  });
+
+  it("matches real Bash verification and normalizes Grep patterns by evidence path", () => {
+    const context = {
+      evidence: [],
+      currentRequestTurnId: "turn-1",
+      sessionId: "session-1",
+      projectPath: "/test",
+    } as unknown as TuiContext;
+    const continuationFor = (evidenceAction: {
+      toolName: string;
+      input: unknown;
+      strategy?: "minimal_bash_verification" | "artifact_readonly_check";
+      summary: string;
+    }) => ({
+      finalGapProgressState: {
+        unsupportedKinds: ["verification_claim"],
+        relevantEvidenceIds: new Set<string>(),
+        evidenceAction,
+        attemptedCommandFingerprints: new Set<string>(),
+      },
+    });
+    const bash = continuationFor({
+      toolName: "Bash",
+      input: { level: "test" },
+      strategy: "minimal_bash_verification",
+      summary: "run one focused test",
+    });
+    context.evidence.push({
+      id: "pwd-attempt",
+      kind: "command_output",
+      summary: "Bash: pwd",
+      source: "Bash",
+      supportsClaims: ["Bash", "command_ran", "bash_exit_nonzero"],
+      createdAt: new Date(0).toISOString(),
+      ownerScope: {
+        ownerSessionId: "session-1",
+        requestTurnId: "turn-1",
+        cwd: "/test",
+      },
+    });
+    recordSuccessfulToolExecutionProgress(
+      bash,
+      { name: "Bash", input: { command: "pwd" } },
+      { ok: false, tool: "Bash", text: "failed", evidenceId: "pwd-attempt" },
+      context,
+    );
+    expect(bash.finalGapProgressState.attemptedCommandFingerprints.size).toBe(0);
+    context.evidence.push({
+      id: "test-attempt",
+      kind: "command_output",
+      summary: "Bash: corepack pnpm test",
+      source: "Bash",
+      supportsClaims: ["Bash", "command_ran", "bash_exit_nonzero", "test_attempted"],
+      createdAt: new Date(1).toISOString(),
+      ownerScope: {
+        ownerSessionId: "session-1",
+        requestTurnId: "turn-1",
+        cwd: "/test",
+      },
+    });
+    recordSuccessfulToolExecutionProgress(
+      bash,
+      { name: "Bash", input: { command: "corepack pnpm test", description: "focused test" } },
+      { ok: false, tool: "Bash", text: "failed", evidenceId: "test-attempt" },
+      context,
+    );
+    expect(bash.finalGapProgressState.attemptedCommandFingerprints.size).toBe(1);
+
+    const grep = continuationFor({
+      toolName: "Grep",
+      input: { path: "src", pattern: "required-symbol" },
+      strategy: "artifact_readonly_check",
+      summary: "find required symbol",
+    });
+    recordSuccessfulToolExecutionProgress(
+      grep,
+      { name: "Grep", input: { path: "src", pattern: "unrelated-symbol" } },
+      { ok: false, tool: "Grep", text: "no matches" },
+      context,
+    );
+    expect(grep.finalGapProgressState.attemptedCommandFingerprints.size).toBe(1);
+    recordSuccessfulToolExecutionProgress(
+      grep,
+      { name: "Grep", input: { path: "src", pattern: "required-symbol", limit: 20 } },
+      { ok: false, tool: "Grep", text: "no matches" },
+      context,
+    );
+    expect(grep.finalGapProgressState.attemptedCommandFingerprints.size).toBe(1);
+  });
+
+  it("does not count rotating pre-gap Read evidence without an active gap", () => {
+    const context = {
+      evidence: [],
+      currentRequestTurnId: "turn-scope",
+      sessionId: "session-scope",
+      projectPath: "/test",
+    } as unknown as TuiContext;
+    const continuation = {};
+
+    for (let index = 0; index < 250; index += 1) {
+      const evidenceId = `scope-${index}`;
+      context.evidence.push({
+        id: evidenceId,
+        kind: "file_read",
+        summary: `read src/file-${index}.ts`,
+        source: "Read",
+        supportsClaims: ["code_fact"],
+        createdAt: new Date(index).toISOString(),
+        ownerScope: {
+          ownerSessionId: "session-scope",
+          requestTurnId: "turn-scope",
+          cwd: "/test",
+          targets: [`src/file-${index}.ts`],
+        },
+      });
+      expect(recordSuccessfulToolExecutionProgress(
+        continuation,
+        { name: "Read", input: { path: `src/file-${index}.ts` } },
+        {
+          ok: true,
+          tool: "Read",
+          text: `content-${index}`,
+          evidenceId,
+        },
+        context,
+      )).toBe(false);
+    }
+  });
+
   describe("finalGapHasProgress", () => {
+    it("does not treat the first observed gap as progress", () => {
+      const context = {
+        evidence: [],
+        currentRequestTurnId: "turn-1",
+        sessionId: "session-1",
+        projectPath: "/test",
+      } as unknown as TuiContext;
+      const result = {
+        status: "needs_disclaimer" as const,
+        unsupportedKinds: ["test_claim"],
+      };
+
+      expect(__testFinalGapHasProgress(result, context, undefined)).toBe(false);
+    });
+
     it("returns true when gap shrinks (fewer unsupported kinds)", () => {
       const context = {
         evidence: [],
@@ -4650,7 +6651,7 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
       expect(__testFinalGapHasProgress(result, context, previous)).toBe(true);
     });
 
-    it("allows a new owner-matching readonly result to advance to another strategy", () => {
+    it("does not treat a changed readonly range as gap progress", () => {
       const context = {
         evidence: [
           {
@@ -4687,51 +6688,47 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
         unsupportedKinds: ["test_claim"],
       };
 
-      expect(__testFinalGapHasProgress(result, context, previous)).toBe(true);
+      expect(__testFinalGapHasProgress(result, context, previous)).toBe(false);
     });
 
-    it("returns false when matching verification evidence leaves the same level gap", () => {
+    it("allows same-level verification after owner-scoped freshness changes", () => {
       const context = {
-        evidence: [
-          {
-            id: "new-test",
-            kind: "test_result",
-            source: "Bash",
-            supportsClaims: ["test_passed"],
-            ownerScope: { requestTurnId: "turn-1", ownerSessionId: "session-1", cwd: "/test" },
-            data: {
-              verificationScope: {
-                ownerKey: "request:session-1:turn-1",
-                ownerSessionId: "session-1",
-                requestTurnId: "turn-1",
-                cwd: "/test",
-                changedFiles: [],
-              },
-            },
-          },
-        ],
+        evidence: [],
         currentRequestTurnId: "turn-1",
         sessionId: "session-1",
         projectPath: "/test",
       } as unknown as TuiContext;
 
-      const previous = {
-        unsupportedKinds: ["test_claim"],
-        relevantEvidenceIds: new Set<string>(),
-        evidenceAction: {
-          toolName: "Bash",
-          input: { level: "test" },
-          summary: "run test",
-        },
-        attemptedCommandFingerprints: new Set<string>(),
-      };
-
       const result = {
         status: "needs_disclaimer" as const,
         unsupportedKinds: ["test_claim"],
       };
+      const evidenceAction = {
+        toolName: "RunVerification",
+        input: { level: "test" },
+        summary: "run focused test",
+      } as const;
+      const previous = __testCaptureFinalGapProgressState(
+        result,
+        context,
+        evidenceAction,
+      );
+      previous.attemptedCommandFingerprints.add(previous.commandFingerprint!);
+      context.evidence.push({
+        id: "file-written",
+        kind: "command_output",
+        source: "Edit",
+        summary: "Edit: src/a.ts",
+        supportsClaims: ["Edit", "file_written"],
+        ownerScope: {
+          requestTurnId: "turn-1",
+          ownerSessionId: "session-1",
+          cwd: "/test",
+          targets: ["src/a.ts"],
+        },
+      } as unknown as EvidenceRecord);
 
-      expect(__testFinalGapHasProgress(result, context, previous)).toBe(false);
+      expect(__testFinalGapHasProgress(result, context, previous)).toBe(true);
     });
 
     it("returns false when the same action fingerprint already made no gap progress", () => {
@@ -4865,7 +6862,7 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
   });
 
   describe("captureFinalGapProgressState", () => {
-    it("remembers the previous action fingerprint when scheduling another action", () => {
+    it("records the planned action fingerprint without consuming it", () => {
       const context = {
         evidence: [],
         currentRequestTurnId: "turn-1",
@@ -4888,7 +6885,7 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
         unsupportedKinds: ["test_claim"],
         relevantEvidenceIds: new Set<string>(),
         commandFingerprint: "previous-action",
-        attemptedCommandFingerprints: new Set<string>(),
+        attemptedCommandFingerprints: new Set(["previous-action"]),
       };
 
       const state = __testCaptureFinalGapProgressState(
@@ -4900,9 +6897,10 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
 
       expect(state.commandFingerprint).toBeDefined();
       expect(state.attemptedCommandFingerprints.has("previous-action")).toBe(true);
+      expect(state.attemptedCommandFingerprints.has(state.commandFingerprint!)).toBe(false);
     });
 
-    it("starts with no prior action fingerprints", () => {
+    it("does not mark the first scheduled action as attempted", () => {
       const context = {
         evidence: [],
         currentRequestTurnId: "turn-1",
@@ -4927,10 +6925,11 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
         evidenceAction,
       );
 
-      expect(state.attemptedCommandFingerprints.size).toBe(0);
+      expect(state.commandFingerprint).toBeDefined();
+      expect(state.attemptedCommandFingerprints).toEqual(new Set());
     });
 
-    it("marks a repeated action fingerprint as already attempted", () => {
+    it("does not consume a repeated plan until its tool executes", () => {
       const context = {
         evidence: [],
         currentRequestTurnId: "turn-123",
@@ -4957,7 +6956,52 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
       const state = __testCaptureFinalGapProgressState(result, context, evidenceAction, first);
 
       expect(state.commandFingerprint).toBe(first.commandFingerprint);
-      expect(state.attemptedCommandFingerprints.has(first.commandFingerprint!)).toBe(true);
+      expect(state.attemptedCommandFingerprints.has(first.commandFingerprint!)).toBe(false);
+      expect(state.attemptedCommandFingerprints.size).toBe(0);
+    });
+
+    it("keeps an ignored directive available until a real tool result records the attempt", () => {
+      const context = {
+        evidence: [],
+        currentRequestTurnId: "turn-ignored-directive",
+        sessionId: "session-1",
+        projectPath: "/test",
+      } as unknown as TuiContext;
+      const result = {
+        status: "needs_disclaimer" as const,
+        unsupportedKinds: ["test_claim"],
+      };
+      const evidenceAction = {
+        toolName: "RunVerification",
+        input: { level: "test" },
+        summary: "run focused verification",
+      } as const;
+
+      const first = __testCaptureFinalGapProgressState(
+        result,
+        context,
+        evidenceAction,
+      );
+
+      const reissued = __testCaptureFinalGapProgressState(
+        result,
+        context,
+        evidenceAction,
+        first,
+      );
+      expect(reissued.attemptedCommandFingerprints).toEqual(new Set());
+
+      const stillRunnable = planFinalGateEvidenceGapAction({
+        result,
+        context: {
+          ...context,
+          language: "zh-CN",
+          permissionMode: "full-access",
+        },
+        attemptedEvidenceActionFingerprints: reissued.attemptedCommandFingerprints,
+      });
+      expect(stillRunnable.action).toBe("verification_request");
+      expect(stillRunnable.evidenceAction?.toolName).toBe("RunVerification");
     });
   });
 });

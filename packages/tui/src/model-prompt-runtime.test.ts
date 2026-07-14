@@ -311,16 +311,16 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(second.cacheable).toEqual(first.cacheable);
   });
 
-  it("does not inject deferred pre-engine guidance during pre fallback recovery", () => {
-    const context = createPromptTestContext({
-      preEngineFallbackPreference: {
-        projectPath: "F:\\synthetic-project",
-        active: true,
-        activatedAt: "2026-01-01T00:00:00.000Z",
-        reason: "fallback_required",
-      },
-    });
-
+  it("keeps cacheable pre-engine guidance stable during request-local fallback", () => {
+    const context = createPromptTestContext({ currentRequestTurnId: "request-a" });
+    const before = createModelSystemPromptSegments("继续", context, { runtime: "test" });
+    context.preEngineFallbackPreference = {
+      projectPath: "F:\\synthetic-project",
+      requestTurnId: "request-a",
+      active: true,
+      activatedAt: "2026-01-01T00:00:00.000Z",
+      reason: "fallback_required",
+    };
     const segments = createModelSystemPromptSegments("继续", context, { runtime: "test" });
     const allPromptText = [
       segments.stable,
@@ -329,9 +329,10 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
       ...segments.volatile.map((segment) => segment.content),
     ].join("\n");
 
-    expect(allPromptText).not.toContain("DeferredToolsReminder=");
-    expect(allPromptText).not.toContain("PreEngineRepositoryTools=");
-    expect(allPromptText).not.toContain("RepositoryAnalysisWorkflow=");
+    expect(segments.cacheable).toEqual(before.cacheable);
+    expect(allPromptText).toContain("PreEngineRepositoryTools=");
+    expect(allPromptText).toContain("RepositoryAnalysisWorkflow=");
+    expect(allPromptText).not.toContain("fallback_required");
     expect(context.discoveredDeferredToolNames.size).toBe(0);
   });
 

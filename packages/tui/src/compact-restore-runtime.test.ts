@@ -42,15 +42,19 @@ describe("post compact restore runtime", () => {
   it("restores recent workspace file content with plan and active runtime status", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-compact-restore-"));
     await mkdir(join(project, "src"));
-    await writeFile(join(project, "src", "current.ts"), "export const current = 42;\n", "utf8");
+    await writeFile(
+      join(project, "src", "current.ts"),
+      'export const current = {"requestTurnId":"source-turn"};\n',
+      "utf8",
+    );
 
     const context = makeContext(project, {
       recentlyMentionedFiles: ["src/current.ts"],
       tools: { changedFiles: ["src/current.ts"], todos: [], workspaceRoot: project },
       activePlan: {
         id: "plan-1",
-        title: "Finish restore",
-        options: [{ id: "a", title: "Main", steps: ["Read file"], risks: ["none"] }],
+        title: "Finish restore requestTurnId=turn-plan-42",
+        options: [{ id: "a", title: "Main", steps: ["Read file ownerId=owner-plan-42"], risks: ["none"] }],
       },
       agents: [
         {
@@ -58,7 +62,7 @@ describe("post compact restore runtime", () => {
           type: "worker",
           role: "executor",
           provider: "test",
-          task: "continue restore work",
+          task: "continue restore work ownerId=owner-agent-42",
           model: "test-model",
           permissionMode: "auto-review",
           status: "running",
@@ -84,7 +88,7 @@ describe("post compact restore runtime", () => {
         disabledIds: [],
         activeRun: {
           id: "wf-1",
-          goal: "ship restore",
+          goal: "ship restore fallbackUsed=true",
           planId: "plan-wf",
           status: "running",
           steps: [],
@@ -99,10 +103,17 @@ describe("post compact restore runtime", () => {
     expect(message?.role).toBe("user");
     expect(message?.content).toContain("Post-compact restored context");
     expect(message?.content).toContain("file src/current.ts");
-    expect(message?.content).toContain("export const current = 42;");
-    expect(message?.content).toContain("PlanProposal plan-1: Finish restore");
-    expect(message?.content).toContain("agent agent-1: running");
-    expect(message?.content).toContain("workflow wf-1: running");
+    expect(message?.content).toContain('export const current = {"requestTurnId":"source-turn"};');
+    expect(message?.content).toContain("PlanProposal: Finish restore");
+    expect(message?.content).toContain("agent: running; task continue restore work");
+    expect(message?.content).toContain("workflow: running; goal ship restore");
+    expect(message?.content).not.toContain("plan-1");
+    expect(message?.content).not.toContain("agent-1");
+    expect(message?.content).not.toContain("wf-1");
+    expect(message?.content).not.toContain("turn-plan-42");
+    expect(message?.content).not.toContain("owner-plan-42");
+    expect(message?.content).not.toContain("owner-agent-42");
+    expect(message?.content).not.toContain("fallbackUsed=true");
   });
 
   it("skips missing and out-of-workspace files without failing", async () => {

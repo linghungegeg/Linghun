@@ -72,6 +72,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Test pre-engine
+        run: cargo test --manifest-path prototypes/pre-engine/Cargo.toml
       - name: Install Linux musl target
         if: matrix.platform_arch == 'linux-x64'
         shell: bash
@@ -98,6 +100,34 @@ jobs:
           if [[ "${{ runner.os }}" != "Windows" ]]; then
             chmod +x "runtime-artifacts/pre-engine/${{ matrix.platform_arch }}/${{ matrix.binary }}"
           fi
+      - name: Verify native protocol snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="$PWD/runtime-artifacts/pre-engine/${{ matrix.platform_arch }}/${{ matrix.binary }}"
+          output="$(printf '%s\n' \
+            '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"rootUri":"prototypes/pre-engine/fixtures/structural-languages"}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+            '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | "$binary")"
+          node -e '
+          const a=require("node:assert/strict"),fs=require("node:fs");
+          const rows=fs.readFileSync(0,"utf8").trim().split(/\r?\n/).map(line=>JSON.parse(line));
+          a.equal(rows.length,2);
+          const result=id=>{const matches=rows.filter(row=>row.id===id);a.equal(matches.length,1,`response ${id}`);a.equal(matches[0].error,undefined,JSON.stringify(matches[0].error));a.ok(Object.hasOwn(matches[0],"result"));return matches[0].result};
+          const init=result(0);
+          a.equal(init.protocolVersion,"2025-06-18");
+          a.deepEqual(init.serverInfo,{name:"linghun-pre-engine",version:"0.1.0"});
+          a.deepEqual(init.capabilities,{tools:{}});
+          const strip=value=>Array.isArray(value)?value.map(strip):value&&typeof value==="object"?Object.fromEntries(Object.entries(value).filter(([key])=>key!=="description").map(([key,item])=>[key,strip(item)])):value;
+          const tools=result(1).tools;
+          a.deepEqual(tools.map(tool=>tool.name),["pre_context","pre_impact","pre_plan","pre_verify"]);
+          a.deepEqual(tools.map(tool=>strip(tool.inputSchema)),[
+            {type:"object",additionalProperties:false,properties:{symbol:{type:"string"},path:{type:"string"},depth:{type:"number"}},required:["symbol"]},
+            {type:"object",additionalProperties:false,properties:{changes:{type:"array",items:{type:"object",additionalProperties:false,properties:{path:{type:"string"},symbols:{type:"array",items:{type:"string"}}},required:["path"]}}},required:["changes"]},
+            {type:"object",additionalProperties:false,properties:{task:{type:"string"},target_symbols:{type:"array",items:{type:"string"}},target_files:{type:"array",items:{type:"string"}}},required:["task"]},
+            {type:"object",additionalProperties:false,properties:{changed_files:{type:"array",items:{type:"string"}}},required:["changed_files"]}
+          ]);
+          ' <<<"$output"
       - name: Verify Linux compatibility and protocol
         if: matrix.platform_arch == 'linux-x64'
         shell: bash
@@ -111,15 +141,21 @@ jobs:
           {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"rootUri":"/workspace"}}
           {"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
           {"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}
-          {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"pre_context","arguments":{"symbol":"shared","path":"python/shared.py","depth":2}}}
+          {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"pre_context","arguments":{"symbol":"MessageBuilder","path":"python/shared.py","depth":2}}}
           EOF
           for image in debian:11-slim debian:12-slim alexgshaw/build-cython-ext:20251031; do
             output="$(docker run --rm -i --network none \
               -v "$binary:/runtime/linghun-pre-engine:ro" \
               -v "$PWD/prototypes/pre-engine/fixtures/structural-languages:/workspace:ro" \
               "$image" /runtime/linghun-pre-engine < /tmp/pre-engine-smoke.jsonl)"
-            grep -q '"id":1' <<<"$output"
-            grep -q '"id":2' <<<"$output"
+            node -e '
+            const a=require("node:assert/strict"),fs=require("node:fs");
+            const rows=fs.readFileSync(0,"utf8").trim().split(/\r?\n/).map(line=>JSON.parse(line));
+            a.deepEqual(rows.map(row=>row.id),[0,1,2]);
+            for(const row of rows){a.equal(row.error,undefined,JSON.stringify(row.error));a.ok(Object.hasOwn(row,"result"))}
+            const call=rows[2].result;a.notEqual(call.isError,true);a.ok(Array.isArray(call.content)&&call.content.length>0);
+            a.ok(call.content.some(part=>part.type==="text"&&typeof part.text==="string"&&part.text.trim()));
+            ' <<<"$output"
           done
       - uses: actions/upload-artifact@v4
         with:
@@ -175,6 +211,56 @@ jobs:
       - run: corepack pnpm install --no-frozen-lockfile
       - run: git checkout -- apps/cli/package.json pnpm-lock.yaml
       - run: node scripts/bundle-cli-binaries.mjs --skip-native-runner --native-runner-artifacts runtime-artifacts/native-runner --pre-engine-artifacts runtime-artifacts/pre-engine --all-codebase-memory
+      - name: Verify CLI and optional-package pre-engine parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          helpers=(
+            ts-deep-layer.cjs py-deep-layer.cjs rust-deep-layer.cjs go-deep-layer.cjs
+            java-deep-layer.cjs sql-deep-layer.cjs shell-deep-layer.cjs csharp-deep-layer.cjs
+            php-deep-layer.cjs ruby-deep-layer.cjs kotlin-deep-layer.cjs dart-deep-layer.cjs
+            swift-deep-layer.cjs cpp-deep-layer.cjs
+          )
+          for platform_arch in win32-x64 linux-x64 darwin-x64 darwin-arm64; do
+            binary=linghun-pre-engine
+            if [[ "$platform_arch" == "win32-x64" ]]; then binary=linghun-pre-engine.exe; fi
+            cli="apps/cli/bundled/pre-engine/$platform_arch"
+            pkg="packages/pre-engine-$platform_arch/bundled/pre-engine/$platform_arch"
+            cmp "$cli/$binary" "$pkg/$binary"
+            for helper in "${helpers[@]}"; do
+              cmp "$cli/$helper" "$pkg/$helper"
+            done
+          done
+      - name: Smoke bundled Python semantic helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="$PWD/packages/pre-engine-linux-x64/bundled/pre-engine/linux-x64/linghun-pre-engine"
+          output="$(printf '%s\n' \
+            '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"rootUri":"prototypes/pre-engine/fixtures/structural-languages"}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+            '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"pre_context","arguments":{"symbol":"MessageBuilder","path":"python/shared.py","depth":2}}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"pre_verify","arguments":{"changed_files":["python/shared.py"]}}}' | "$binary")"
+          node -e '
+          const a=require("node:assert/strict"),fs=require("node:fs");
+          const rows=fs.readFileSync(0,"utf8").trim().split(/\r?\n/).map(line=>JSON.parse(line));a.deepEqual(rows.map(row=>row.id),[0,1,2]);
+          const tool=(id,name)=>{const row=rows.find(item=>item.id===id);a.equal(row.error,undefined,JSON.stringify(row.error));a.ok(row.result&&row.result.isError!==true);a.ok(Array.isArray(row.result.content)&&row.result.content.length>0);const text=row.result.content.find(part=>part.type==="text"&&typeof part.text==="string"&&part.text.trim());a.ok(text);const payload=JSON.parse(text.text);a.equal(payload.capability_summary?.tool,name);return payload};
+          const context=tool(1,"pre_context");a.equal(context.definition?.name,"MessageBuilder");
+          const verify=tool(2,"pre_verify");a.equal(verify.status,"pass",`pre_verify status: ${verify.status}`);
+          const python=verify.verification?.language_results?.find(item=>item.language==="Python");a.ok(python,"missing Python verification");a.equal(python.status,"verified",JSON.stringify(python));
+          a.equal(verify.py_deep_layer?.status,"verified",JSON.stringify(verify.py_deep_layer));
+          ' <<<"$output"
+          tsx_output="$(printf '%s\n' \
+            '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"rootUri":"prototypes/pre-engine/fixtures/smoke-tsx/valid"}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+            '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"pre_verify","arguments":{"changed_files":["component.tsx"]}}}' | "$binary")"
+          node -e '
+          const a=require("node:assert/strict"),fs=require("node:fs");
+          const rows=fs.readFileSync(0,"utf8").trim().split(/\r?\n/).map(line=>JSON.parse(line));a.deepEqual(rows.map(row=>row.id),[0,1]);
+          const row=rows[1];a.equal(row.error,undefined,JSON.stringify(row.error));a.ok(row.result&&row.result.isError!==true);a.ok(Array.isArray(row.result.content)&&row.result.content.length>0);
+          const text=row.result.content.find(part=>part.type==="text"&&typeof part.text==="string"&&part.text.trim());a.ok(text);const payload=JSON.parse(text.text);
+          a.equal(payload.capability_summary?.tool,"pre_verify");a.equal(payload.status,"pass");a.equal(payload.verification?.status,"verified");
+          ' <<<"$tsx_output"
       - run: corepack pnpm --filter @linghun/shared build
       - run: corepack pnpm --filter @linghun/config build
       - run: corepack pnpm --filter @linghun/core build
@@ -192,6 +278,59 @@ jobs:
           (cd packages/pre-engine-linux-x64 && corepack pnpm pack --pack-destination "$GITHUB_WORKSPACE/dist-pack")
           (cd packages/pre-engine-darwin-x64 && corepack pnpm pack --pack-destination "$GITHUB_WORKSPACE/dist-pack")
           (cd packages/pre-engine-darwin-arm64 && corepack pnpm pack --pack-destination "$GITHUB_WORKSPACE/dist-pack")
+      - name: Smoke installed CLI and optional pre-engine tarballs
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_root="$(mktemp -d)"
+          trap 'rm -rf "$install_root"' EXIT
+          cli_tgz="$(realpath dist-pack/linghun-cli-*.tgz)"
+          pre_engine_tgz="$(realpath dist-pack/linghun-pre-engine-linux-x64-*.tgz)"
+          npm init --yes --prefix "$install_root" >/dev/null
+          npm install --prefix "$install_root" "$cli_tgz" "$pre_engine_tgz"
+          binary="$(INSTALL_ROOT="$install_root" node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import { realpathSync } from "node:fs";
+          import { join } from "node:path";
+          import { pathToFileURL } from "node:url";
+
+          const installRoot = process.env.INSTALL_ROOT;
+          assert.ok(installRoot, "missing temporary npm install root");
+          delete process.env.LINGHUN_CLI_BUNDLED_ROOT;
+          delete process.env.LINGHUN_CODEBASE_MEMORY_BUNDLED_DIR;
+          delete process.env.LINGHUN_NATIVE_RUNNER_BUNDLED_DIR;
+          delete process.env.LINGHUN_PRE_ENGINE_BUNDLED_DIR;
+          const cliEntry = join(installRoot, "node_modules", "@linghun", "cli", "dist", "main.js");
+          const { runCli } = await import(pathToFileURL(cliEntry).href);
+          await runCli([], AbortSignal.abort("installed CLI bundled-root smoke"));
+          const expectedRoot = realpathSync(join(
+            installRoot,
+            "node_modules",
+            "@linghun",
+            "pre-engine-linux-x64",
+            "bundled",
+            "pre-engine",
+          ));
+          const configuredRoot = realpathSync(process.env.LINGHUN_PRE_ENGINE_BUNDLED_DIR ?? "");
+          assert.equal(configuredRoot, expectedRoot);
+          console.log(join(configuredRoot, "linux-x64", "linghun-pre-engine"));
+          NODE
+          )"
+          test -x "$binary"
+          output="$(printf '%s\n' \
+            '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"rootUri":"prototypes/pre-engine/fixtures/structural-languages"}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+            '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"pre_context","arguments":{"symbol":"MessageBuilder","path":"python/shared.py","depth":2}}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"pre_verify","arguments":{"changed_files":["python/shared.py"]}}}' | "$binary")"
+          node -e '
+          const a=require("node:assert/strict"),fs=require("node:fs");
+          const rows=fs.readFileSync(0,"utf8").trim().split(/\r?\n/).map(line=>JSON.parse(line));a.deepEqual(rows.map(row=>row.id),[0,1,2]);
+          const tool=(id,name)=>{const row=rows.find(item=>item.id===id);a.equal(row.error,undefined,JSON.stringify(row.error));a.ok(row.result&&row.result.isError!==true);a.ok(Array.isArray(row.result.content)&&row.result.content.length>0);const text=row.result.content.find(part=>part.type==="text"&&typeof part.text==="string"&&part.text.trim());a.ok(text);const payload=JSON.parse(text.text);a.equal(payload.capability_summary?.tool,name);return payload};
+          const context=tool(1,"pre_context");a.equal(context.definition?.name,"MessageBuilder");
+          const verify=tool(2,"pre_verify");a.equal(verify.status,"pass",`pre_verify status: ${verify.status}`);
+          const python=verify.verification?.language_results?.find(item=>item.language==="Python");a.ok(python,"missing Python verification");a.equal(python.status,"verified",JSON.stringify(python));
+          a.equal(verify.py_deep_layer?.status,"verified",JSON.stringify(verify.py_deep_layer));
+          ' <<<"$output"
       - uses: actions/upload-artifact@v4
         with:
           name: linghun-cli-bundled-runtime

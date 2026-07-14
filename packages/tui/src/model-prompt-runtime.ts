@@ -1,11 +1,11 @@
 import { formatAgentCompletionMainChainContext } from "./agent-completion-finalizer.js";
 import {
   formatDeferredToolsSystemReminder,
-  registerPreEngineDeferredToolsForRuntime,
   snapshotDeferredTools,
 } from "./deferred-tools-catalog.js";
 import type { TuiContext } from "./index.js";
 import {
+  createPreEngineToolDefinitions,
   createSolutionCompletenessStatus,
   projectRuntimeStatusForPrompt,
 } from "./model-loop-runtime.js";
@@ -98,27 +98,16 @@ export function createModelSystemPromptSegments(
   const solutionCompletenessWarning = updateSolutionCompletenessGate(text, context);
   // D.13I：仅当 deferred 列表非空时注入 SearchExtraTools/ExecuteExtraTool 提示。built-in
   // 工具继续直接调用；不暴露 raw schema/secret/参数，仅提示发现-执行两步约束。
-  const preEngineFallbackPreferenceActive =
-    context.preEngineFallbackPreference?.active === true &&
-    context.preEngineFallbackPreference.projectPath === context.projectPath;
   const deferredSnapshot = snapshotDeferredTools(context);
-  const preEngineToolNames = preEngineFallbackPreferenceActive
-    ? []
-    : registerPreEngineDeferredToolsForRuntime(context, deferredSnapshot);
-  const deferredReminder = preEngineFallbackPreferenceActive
-    ? undefined
-    : preEngineToolNames.length > 0
-      ? "Discover non-builtin tools with SearchExtraTools, then invoke them with ExecuteExtraTool."
-      : formatDeferredToolsSystemReminder(context.language, deferredSnapshot);
+  const preEngineToolNames = createPreEngineToolDefinitions().map((tool) => tool.name);
+  const deferredReminder = formatDeferredToolsSystemReminder(context.language, deferredSnapshot);
   const preEngineRepositoryTools = {
     tools: preEngineToolNames,
-    invocation: preEngineFallbackPreferenceActive
-      ? "These pre-engine tools are still available, but this repository previously returned fallback_required; use real workspace tools first and call pre-engine only as a secondary check after real-tool evidence."
-      : "These pre-engine tools are first-class readonly model tools; call them directly when useful. ExecuteExtraTool remains available for deferred-tool dispatch.",
+    invocation:
+      "These pre-engine tools are first-class readonly model tools; call them directly when useful. ExecuteExtraTool remains available for deferred-tool dispatch.",
   };
-  const repositoryAnalysisWorkflow = preEngineFallbackPreferenceActive
-    ? "RepositoryAnalysisWorkflow=Pre-engine fallback is active. Use real workspace tools first (ReadSnippets/Read, SourcePack/Grep/Glob, Bash/Diff/RunVerification); use pre-engine only as a secondary precision check after real-tool evidence."
-    : "RepositoryAnalysisWorkflow=Use index tools for broad discovery when ready, then pre-engine for AST precision; otherwise start with pre-engine. For a named symbol or file anchor call pre_context; use pre_plan only when no anchor is known. Treat a high/medium-confidence answer_pack as the evidence map and read only suggested ranges unless evidence is missing.";
+  const repositoryAnalysisWorkflow =
+    "RepositoryAnalysisWorkflow=Use index tools for broad discovery when ready, then pre-engine for AST precision; otherwise start with pre-engine. For a named symbol or file anchor call pre_context; use pre_plan only when no anchor is known. Treat a high/medium-confidence answer_pack as the evidence map and read only suggested ranges unless evidence is missing.";
   const preEngineToolsLine =
     preEngineToolNames.length > 0
       ? `\nPreEngineRepositoryTools=${JSON.stringify(preEngineRepositoryTools)}\n${repositoryAnalysisWorkflow}`

@@ -74,7 +74,7 @@ function makeUsage(overrides: Partial<ModelUsage> = {}): ModelUsage {
 }
 
 describe("cache-policy-runtime", () => {
-  it("creates stable fingerprints when only tool order changes", () => {
+  it("detects provider-visible tool order changes", () => {
     const first = observeCacheSafeRequest({
       kind: "main",
       provider: "anthropic",
@@ -89,8 +89,12 @@ describe("cache-policy-runtime", () => {
       now: new Date("2026-01-01T00:00:01.000Z"),
     });
 
-    expect(second.fingerprint.toolSchemaHash).toBe(first.fingerprint.toolSchemaHash);
-    expect(second.fingerprint.changedKeys).toEqual([]);
+    expect(second.fingerprint.toolSchemaHash).not.toBe(first.fingerprint.toolSchemaHash);
+    expect(second.fingerprint.changedKeys).toEqual([
+      "requestHash",
+      "toolSchemaHash",
+      "stableToolSchemaHash",
+    ]);
   });
 
   it("separates stable built-in tool schema from dynamic discovered tools", () => {

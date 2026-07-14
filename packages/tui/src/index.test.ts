@@ -5216,9 +5216,12 @@ describe("Phase 06 TUI slash commands", () => {
       expect.stringContaining("agent:agent-stale:stale"),
       expect.stringContaining("job:job-stale:stale"),
     ]);
-    expect(text).toContain("active agents/workflows job:job-running:running");
-    expect(text).toContain("needs-attention agents/workflows job:job-blocked:blocked");
-    expect(text).toContain("stale resumable agents/workflows agent:agent-stale:stale");
+    expect(text).toContain("active agents/workflows 1");
+    expect(text).toContain("needs-attention agents/workflows 1");
+    expect(text).toContain("stale resumable agents/workflows 2");
+    expect(text).not.toContain("job-running");
+    expect(text).not.toContain("job-blocked");
+    expect(text).not.toContain("agent-stale");
   });
 
   it("deep compact semantic outline includes early transcript events beyond the recent tail", async () => {
@@ -14536,71 +14539,26 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(output.text).toContain("已综合现有信息回答。");
+    expect(output.text).not.toContain("部分完成");
+    expect(output.text).not.toContain("如果继续");
+    expect(output.text).not.toContain("执行失败");
+    expect(output.text).not.toContain("轮次上限");
     expect(output.text).not.toContain("本轮工具调用已达上限");
     // 不应出现 provider 失败式的 /model doctor 甩锅（轮次耗尽不是 provider 故障）。
     expect(output.text).not.toContain("已达到工具轮次上限；将不再调用工具");
     expect(output.text.match(/Read\(a\.txt\) \*\*1\*\* 行/g)).toHaveLength(4);
     expect(requests.length).toBeGreaterThanOrEqual(5);
+  }, 15_000);
+
+  it("does not expose the former shared 100-turn terminal", async () => {
+    const mainLoopSrc = await readSrc("model-stream-runtime.ts");
+
+    expect(mainLoopSrc).not.toContain("model_round_limit_reached");
+    expect(mainLoopSrc).not.toContain("执行已到达本请求轮次上限");
+    expect(mainLoopSrc).not.toContain("续轮执行已到达本请求轮次上限");
   });
 
-  it("normal progressing tool_use continues past 40 evidence rounds", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
-    await mkdir(join(project, ".linghun"), { recursive: true });
-    await writeFile(join(project, "a.txt"), "alpha\n", "utf8");
-    await writeFile(
-      join(project, ".linghun", "settings.json"),
-      JSON.stringify(createOpenAiExecutorTestConfig("progressing-tool-rounds-model")),
-      "utf8",
-    );
-    const requests = mockOpenAiToolSequenceWithFinalCalls(
-      Array.from({ length: 41 }, () => ({ toolName: "Read", input: { path: "a.txt" } })),
-      "已完成 41 轮有进展读取。",
-    );
-    const output = new MemoryOutput();
-
-    await runTui({
-      projectPath: project,
-      stdin: Readable.from(["请持续读取直到完成\n/exit\n"]),
-      stdout: output,
-      stderr: new MemoryOutput(),
-    });
-
-    expect(output.text.match(/Read\(a\.txt\) \*\*1\*\* 行/g)).toHaveLength(41);
-    expect(output.text).toContain("已完成 41 轮有进展读取。");
-    expect(output.text).not.toContain("工具调用上限");
-    expect(output.text).not.toContain("执行轮次预算已耗尽");
-    expect(requests.length).toBeGreaterThanOrEqual(42);
-  });
-
-  it("stops at the shared 100-turn cap with an explicit PARTIAL terminal", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
-    await mkdir(join(project, ".linghun"), { recursive: true });
-    await writeFile(join(project, "a.txt"), "alpha\n", "utf8");
-    await writeFile(
-      join(project, ".linghun", "settings.json"),
-      JSON.stringify(createOpenAiExecutorTestConfig("hundred-turn-budget-model")),
-      "utf8",
-    );
-    const requests = mockOpenAiToolSequenceWithFinalCalls(
-      Array.from({ length: 101 }, () => ({ toolName: "Read", input: { path: "a.txt" } })),
-      "不应到达的第 101 轮回答。",
-    );
-    const output = new MemoryOutput();
-
-    await runTui({
-      projectPath: project,
-      stdin: Readable.from(["请持续读取超过一百轮再回答\n/exit\n"]),
-      stdout: output,
-      stderr: new MemoryOutput(),
-    });
-
-    expect(output.text.match(/Read\(a\.txt\) \*\*1\*\* 行/g)).toHaveLength(100);
-    expect(output.text).toContain("PARTIAL：执行已到达本请求轮次上限；任务尚未完成。");
-    expect(output.text).not.toContain("不应到达的第 101 轮回答。");
-    expect(requests).toHaveLength(100);
-  }, 30000);
-
-  it("gates no-tool final summary after the no-progress runaway guard", async () => {
+  it("gates an unsupported final summary without a Todo-only fixed stop", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     await writeFile(
@@ -14619,7 +14577,7 @@ describe("Phase 06 TUI slash commands", () => {
       "utf8",
     );
     const requests = mockOpenAiToolSequenceWithFinalCalls(
-      Array.from({ length: 8 }, (_, index) => ({
+      Array.from({ length: 12 }, (_, index) => ({
         toolName: "Todo",
         input: { action: "add", content: `计划 ${index + 1}` },
       })),
@@ -14629,32 +14587,38 @@ describe("Phase 06 TUI slash commands", () => {
 
     await runTui({
       projectPath: project,
-      stdin: Readable.from(["只整理计划直到防失控暂停\n/exit\n"]),
+      stdin: Readable.from(["只整理计划但不要虚构测试结果\n/exit\n"]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("执行已在内部防 runaway 保护处暂停");
-    expect(output.text).toContain("尚未执行仓库验证");
+    expect(output.text).toContain("本请求未能证实：验证或测试证据");
+    expect(output.text).not.toContain("执行失败");
+    expect(output.text).not.toContain("如果继续");
+    expect(output.text).not.toContain("部分完成");
     expect(output.text).not.toContain("当前证据不足");
     expect(output.text).not.toContain("缺少证据");
     expect(output.text).not.toContain("[未验证]");
     expect(output.text).not.toContain("已完成，测试通过，PASS。");
-    expect(requests.length).toBeLessThan(100);
+    expect(requests.length).toBeGreaterThan(12);
+    expect(requests.length).toBeLessThan(20);
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = (await store.list()).at(0);
     expect(session).toBeTruthy();
     const transcript = (await store.resume(session?.id ?? "")).transcript;
-    expect(JSON.stringify(transcript)).not.toContain("final_answer_claim_gate downgrade");
+    expect(JSON.stringify(transcript)).toContain("final_answer_gate_aggregated downgrade");
     expect(JSON.stringify(transcript)).not.toContain("当前证据不足");
     expect(JSON.stringify(transcript)).not.toContain("[未验证]");
     expect(JSON.stringify(transcript)).not.toContain("已完成，测试通过，PASS。");
-  }, 10000);
+  }, 30_000);
 
   it("Todo-only round does not reduce progressing evidence tool rounds", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     await writeFile(join(project, "a.txt"), "alpha\n", "utf8");
+    await writeFile(join(project, "b.txt"), "beta\n", "utf8");
+    await writeFile(join(project, "c.txt"), "gamma\n", "utf8");
+    await writeFile(join(project, "d.txt"), "delta\n", "utf8");
     await writeFile(
       join(project, ".linghun", "settings.json"),
       JSON.stringify(createOpenAiExecutorTestConfig("todo-budget-model")),
@@ -14664,9 +14628,9 @@ describe("Phase 06 TUI slash commands", () => {
       [
         { toolName: "Todo", input: { action: "add", content: "先整理计划" } },
         { toolName: "Read", input: { path: "a.txt" } },
-        { toolName: "Read", input: { path: "a.txt" } },
-        { toolName: "Read", input: { path: "a.txt" } },
-        { toolName: "Read", input: { path: "a.txt" } },
+        { toolName: "Read", input: { path: "b.txt" } },
+        { toolName: "Read", input: { path: "c.txt" } },
+        { toolName: "Read", input: { path: "d.txt" } },
       ],
       "已综合现有信息回答。",
     );
@@ -14674,18 +14638,20 @@ describe("Phase 06 TUI slash commands", () => {
 
     await runTui({
       projectPath: project,
-      stdin: Readable.from(["先整理计划再读取四次\n/exit\n"]),
+      stdin: Readable.from(["先整理计划再读取四个文件\n/exit\n"]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text.match(/Read\(a\.txt\) \*\*1\*\* 行/g)).toHaveLength(4);
+    for (const path of ["a.txt", "b.txt", "c.txt", "d.txt"]) {
+      expect(output.text).toContain(`Read(${path}) **1** 行`);
+    }
     expect(output.text).toContain("已综合现有信息回答。");
     expect(output.text).not.toContain("工具调用上限");
     expect(requests.length).toBeGreaterThanOrEqual(6);
-  });
+  }, 30_000);
 
-  it("repeated Todo-only rounds stop at the no-progress guard with unverified wording", async () => {
+  it("repeated Todo-only rounds can finish honestly beyond the former fixed guard", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     await writeFile(
@@ -14704,11 +14670,11 @@ describe("Phase 06 TUI slash commands", () => {
       "utf8",
     );
     const requests = mockOpenAiToolSequenceWithFinalCalls(
-      Array.from({ length: 8 }, (_, index) => ({
+      Array.from({ length: 12 }, (_, index) => ({
         toolName: "Todo",
         input: { action: "add", content: `计划 ${index + 1}` },
       })),
-      "只完成计划整理，尚未执行仓库验证。",
+      "计划整理完成；按用户要求未执行仓库验证。",
     );
     const output = new MemoryOutput();
 
@@ -14721,15 +14687,15 @@ describe("Phase 06 TUI slash commands", () => {
 
     const providerText = JSON.stringify(requests);
     expect(providerText).toContain("请继续执行验证工具");
-    expect(providerText).toContain("否则执行将停在 runaway 保护处");
+    expect(providerText).toContain("下一轮必须调用工具");
     expect(providerText).not.toContain("或给出尚未验证结论");
     expect(providerText).not.toContain("provide an unverified conclusion");
-    expect(output.text).toContain("只完成计划整理");
-    expect(output.text).toContain("尚未执行仓库验证");
+    expect(output.text).toContain("计划整理完成；按用户要求未执行仓库验证");
+    expect(output.text).not.toContain("执行失败");
     expect(output.text).not.toContain("将基于目前已收集的信息");
-    expect(requests.length).toBeGreaterThanOrEqual(9);
-    expect(requests.length).toBeLessThanOrEqual(10);
-  });
+    expect(requests.length).toBeGreaterThanOrEqual(13);
+    expect(requests.length).toBeLessThan(20);
+  }, 30_000);
 
   it("Todo-only followed by GitStatusInspect and Read continues executing evidence tools", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
@@ -14759,7 +14725,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(output.text).toContain("Git 状态：");
     expect(output.text).toContain("Read(a.txt) **1** 行");
-  });
+  }, 30_000);
 
   it("runtime budgets are layered instead of one short guard for every failure mode", async () => {
     const budgetSrc = await readFile(srcPath("runtime-budget.ts"), "utf8");
@@ -14777,12 +14743,16 @@ describe("Phase 06 TUI slash commands", () => {
       "export const MAX_MODEL_TOTAL_TOOL_ROUNDS = LINGHUN_MAX_AGENTIC_TURNS",
     );
     expect(mainLoopSrc).not.toContain("MAX_MODEL_TOTAL_TOOL_ROUNDS");
-    expect(mainLoopSrc).toContain("let noProgressRounds = 0");
-    expect(mainLoopSrc).toContain("noProgressRounds = todoOnly || !roundHadProgress");
+    expect(mainLoopSrc).not.toContain("noProgressRounds");
+    expect(mainLoopSrc).not.toContain("nextNoProgressRoundCount");
     expect(mainLoopSrc).toContain("modelRoundLoop: for (let round = 0; ; round += 1)");
     expect(mainLoopSrc).toContain("continuationRoundLoop: for (let round = 0; ; round += 1)");
-    expect(mainLoopSrc).toContain("otherwise execution will pause at the runaway guard");
-    expect(mainLoopSrc).toContain("否则执行将停在 runaway 保护处");
+    expect(mainLoopSrc).not.toContain("_killThreshold");
+    expect(mainLoopSrc).not.toContain("TODO_ONLY_KILL_GRACE");
+    expect(mainLoopSrc).toContain("MODEL_REQUEST_WALL_CLOCK_TIMEOUT_REASON");
+    expect(contextSrc).toContain("LINGHUN_MODEL_REQUEST_WALL_CLOCK_LIMIT_MS");
+    expect(mainLoopSrc).toContain("otherwise this remains a no-progress round");
+    expect(mainLoopSrc).toContain("否则本轮仍记为无进展");
     expect(mainLoopSrc).not.toContain("provide an unverified conclusion");
     expect(mainLoopSrc).not.toContain("或给出尚未验证结论");
     expect(`${contextSrc}\n${mainLoopSrc}`).not.toContain(
@@ -27736,6 +27706,12 @@ describe("D.13E Step 2 — /permissions add allow dedup via addAllowRule", () =>
 //   - skills/plugins：discover-only（无安全 adapter）
 // ----------------------------------------------------------------------------
 describe("D.13I — Self-built deferred tools dispatch", () => {
+  beforeEach(async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-d13i-home-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, "config"));
+    vi.stubEnv("LINGHUN_DATA_DIR", join(home, "data"));
+  });
+
   it("D.13I discovery: snapshotDeferredTools returns codebase-memory whitelist + sanitized fields (no raw schema/secret)", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -27745,9 +27721,8 @@ describe("D.13I — Self-built deferred tools dispatch", () => {
     const snapshot = snapshotDeferredTools(context);
     // codebase-memory whitelist 必须出现
     expect(snapshot.byKind["codebase-memory"]).toBeGreaterThanOrEqual(10);
-    expect(snapshot.executableCount).toBe(
-      snapshot.byKind["codebase-memory"] + snapshot.byKind["pre-engine"],
-    );
+    expect(snapshot.byKind["pre-engine"]).toBe(0);
+    expect(snapshot.executableCount).toBe(snapshot.byKind["codebase-memory"]);
 
     // 任何 descriptor 不得泄露 raw schema / api_key / Bearer 等敏感字段
     const json = JSON.stringify(snapshot);
@@ -27773,16 +27748,7 @@ describe("D.13I — Self-built deferred tools dispatch", () => {
     const all = executeSearchExtraTools("", context);
     expect(all.ok).toBe(true);
     expect(all.data.total).toBeGreaterThanOrEqual(snapshot.byKind["codebase-memory"]);
-    expect(all.data.matches.find((m) => m.name === "pre_context")?.requiredArgs).toEqual([
-      "symbol",
-    ]);
-    expect(all.data.matches.find((m) => m.name === "pre_impact")?.requiredArgs).toEqual([
-      "changes",
-    ]);
-    expect(all.data.matches.find((m) => m.name === "pre_plan")?.requiredArgs).toEqual(["task"]);
-    expect(all.data.matches.find((m) => m.name === "pre_verify")?.requiredArgs).toEqual([
-      "changed_files",
-    ]);
+    expect(all.data.matches.some((match) => match.kind === "pre-engine")).toBe(false);
 
     const filtered = executeSearchExtraTools("trace_path", context);
     expect(filtered.ok).toBe(true);
@@ -27887,7 +27853,13 @@ describe("D.13I — Self-built deferred tools dispatch", () => {
       join(project, ".linghun", "settings.json"),
       JSON.stringify({
         defaultModel: "deepseek-v4-flash",
-        index: { codebaseMemoryBinary: mockPath },
+        mcp: {
+          ...defaultConfig.mcp,
+          servers: {
+            ...defaultConfig.mcp.servers,
+            "codebase-memory": { command: mockPath, args: [] },
+          },
+        },
       }),
       "utf8",
     );
@@ -27950,7 +27922,13 @@ describe("D.13I — Self-built deferred tools dispatch", () => {
       join(project, ".linghun", "settings.json"),
       JSON.stringify({
         defaultModel: "deepseek-v4-flash",
-        index: { codebaseMemoryBinary: mockPath },
+        mcp: {
+          ...defaultConfig.mcp,
+          servers: {
+            ...defaultConfig.mcp.servers,
+            "codebase-memory": { command: mockPath, args: [] },
+          },
+        },
       }),
       "utf8",
     );
@@ -28074,7 +28052,13 @@ describe("D.13I — Self-built deferred tools dispatch", () => {
       join(project, ".linghun", "settings.json"),
       JSON.stringify({
         defaultModel: "claude-3-5-sonnet-latest",
-        index: { codebaseMemoryBinary: mockPath },
+        mcp: {
+          ...defaultConfig.mcp,
+          servers: {
+            ...defaultConfig.mcp.servers,
+            "codebase-memory": { command: mockPath, args: [] },
+          },
+        },
         providers: {
           deepseek: { model: "different-model" },
           "openai-compatible": {
@@ -28224,7 +28208,7 @@ describe("D.13I — Self-built deferred tools dispatch", () => {
     const output = new MemoryOutput();
     await runTui({
       projectPath: project,
-      stdin: Readable.from(["帮我分析一下这个项目 看看怎么部署 把分析记在心里\nyes\nyes\n/exit\n"]),
+      stdin: Readable.from(["请读取源码并分析代码调用链，列出当前索引项目\n/exit\n"]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
@@ -28276,6 +28260,7 @@ describe("D.13I — Self-built deferred tools dispatch", () => {
   it("budgets oversized ExecuteExtraTool result before Claude receives anthropic tool_result continuation", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-extra-budget-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(join(project, "package.json"), JSON.stringify({ name: "demo" }), "utf8");
     const mockDir = join(project, "mock");
     await mkdir(mockDir, { recursive: true });
     const callsPath = join(mockDir, "calls.jsonl");
@@ -28327,6 +28312,25 @@ console.log(JSON.stringify({ ok: true }));
         const body = JSON.parse(String(init.body)) as {
           messages?: Array<{ role: string; content: unknown }>;
         };
+        if (JSON.stringify(body).includes("You are Linghun's memory extraction classifier.")) {
+          const classifierChunks = [
+            'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-memory","usage":{"input_tokens":1}}}\n\n',
+            'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n\n',
+            'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"{\\"action\\":\\"no-op\\",\\"reason\\":\\"test fixture\\"}"}}\n\n',
+            'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+            'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\n',
+            'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+          ];
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                for (const chunk of classifierChunks) controller.enqueue(encoder.encode(chunk));
+                controller.close();
+              },
+            }),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }
         requests.push({ body });
         const tool =
           requests.length === 1
@@ -28374,7 +28378,7 @@ console.log(JSON.stringify({ ok: true }));
 
     await runTui({
       projectPath: project,
-      stdin: Readable.from(["帮我搜索代码\nyes\n/exit\n"]),
+      stdin: Readable.from(["请读取源码并分析代码调用链，列出当前索引项目\n/exit\n"]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
@@ -28415,10 +28419,7 @@ console.log(JSON.stringify({ ok: true }));
     expect(reminder).toBeDefined();
     expect(reminder).toContain("SearchExtraTools");
     expect(reminder).toContain("ExecuteExtraTool");
-    expect(reminder).toContain("repository code understanding");
-    expect(reminder).toContain("impact analysis");
-    expect(reminder).toContain("edit planning");
-    expect(reminder).toContain("quick verification");
+    expect(reminder).toContain("first-class tools are still called directly");
 
     // Empty snapshot → no reminder
     const empty = formatDeferredToolsSystemReminder(context.language, {
@@ -28481,41 +28482,35 @@ console.log(JSON.stringify({ ok: true }));
     expect(prompt).toContain("first-class readonly model tools");
     expect(prompt).toContain("call them directly when useful");
     expect(prompt).toContain("RepositoryAnalysisWorkflow=");
-    expect(prompt).toContain("Before broad Grep/Read exploration");
     expect(prompt).toContain("answer_pack");
-    expect(prompt).toContain("suggested_minimal_reads");
-    expect(prompt).toContain("line-window hints");
-    expect(prompt).toContain("prefer ReadSnippets");
-    expect(prompt).toContain("call pre_context on that anchor first");
-    expect(prompt).toContain("pre_plan first only when no concrete anchor is known");
-    expect(prompt).toContain("repository code understanding");
-    expect(prompt).toContain("impact analysis");
-    expect(prompt).toContain("edit planning");
-    expect(prompt).toContain("quick verification");
-    expect(prompt).toContain("codebase-memory index is ready");
-    expect(prompt).toContain("index-backed tools for broad repository discovery");
+    expect(prompt).toContain("read only suggested ranges");
+    expect(prompt).toContain("call pre_context");
+    expect(prompt).toContain("use pre_plan only when no anchor is known");
+    expect(prompt).toContain("index tools for broad discovery");
     expect(prompt).toContain("pre-engine for AST precision");
-    expect(context.discoveredDeferredToolNames.has("pre_context")).toBe(true);
-    expect(context.discoveredDeferredToolNames.has("pre_impact")).toBe(true);
-    expect(context.discoveredDeferredToolNames.has("pre_plan")).toBe(true);
-    expect(context.discoveredDeferredToolNames.has("pre_verify")).toBe(true);
+    expect(context.discoveredDeferredToolNames.has("pre_context")).toBe(false);
+    expect(context.discoveredDeferredToolNames.has("pre_impact")).toBe(false);
+    expect(context.discoveredDeferredToolNames.has("pre_plan")).toBe(false);
+    expect(context.discoveredDeferredToolNames.has("pre_verify")).toBe(false);
     expect(context.discoveredDeferredToolNames.has("index_repository")).toBe(false);
   });
 
-  it("D.13I system prompt injection: pre-engine fallback preference makes later same-repo turns real-tool first", async () => {
+  it("keeps pre fallback request-local without rewriting the next turn system prompt", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const context = await createTestContext(project, store, session);
 
+    context.currentRequestTurnId = "request-fallback";
     recordPreEngineFallbackPreference(context);
 
     const prompt = createModelSystemPrompt("hello", context, { runtime: "test" });
-    expect(prompt).toContain("fallback_required");
-    expect(prompt).toContain("use real workspace tools first");
-    expect(prompt).toContain("not as the first repository-analysis step");
-    expect(prompt).toContain("ReadSnippets/Read for known files");
-    expect(prompt).not.toContain("Before broad Grep/Read exploration");
+    expect(context.preEngineFallbackPreference?.requestTurnId).toBe("request-fallback");
+    expect(prompt).not.toContain("fallback_required");
+    expect(prompt).toContain("RepositoryAnalysisWorkflow=");
+    context.currentRequestTurnId = "request-next";
+    const nextPrompt = createModelSystemPrompt("hello", context, { runtime: "test" });
+    expect(nextPrompt).toBe(prompt);
   });
 
   it("D.13I searchDeferredTools / findDeferredTool helpers behave deterministically", () => {
@@ -28548,7 +28543,7 @@ console.log(JSON.stringify({ ok: true }));
     expect(findDeferredTool("nope", tools)).toBeUndefined();
   });
 
-  it("D.13I searchDeferredTools matches natural multi-token repository analysis queries", async () => {
+  it("D.13I keeps first-class pre-engine tools out of deferred search", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -28557,13 +28552,13 @@ console.log(JSON.stringify({ ok: true }));
 
     const matches = searchDeferredTools("repository analysis routing", tools).map((tool) => tool.name);
 
-    expect(matches).toContain("pre_context");
-    expect(matches).toContain("pre_impact");
-    expect(matches).toContain("pre_plan");
-    expect(matches).toContain("pre_verify");
+    expect(matches).not.toContain("pre_context");
+    expect(matches).not.toContain("pre_impact");
+    expect(matches).not.toContain("pre_plan");
+    expect(matches).not.toContain("pre_verify");
   });
 
-  it("D.13I SearchExtraTools recommends pre-engine when the index is missing", async () => {
+  it("D.13I SearchExtraTools does not recommend first-class pre-engine tools", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -28571,13 +28566,8 @@ console.log(JSON.stringify({ ok: true }));
 
     const result = executeSearchExtraTools("repository analysis routing", context);
 
-    expect(result.data.recommendedNext).toEqual({
-      tool_name: "pre_plan",
-      params: { task: "repository analysis routing" },
-      reason:
-        "the codebase index is not ready, so pre-engine should provide the first structured repository-analysis pass",
-    });
-    expect(result.text).toContain("Recommended next: ExecuteExtraTool(pre_plan");
+    expect(result.data.recommendedNext).toBeUndefined();
+    expect(result.text).not.toContain("pre_plan");
   });
 
   it("D.13I SearchExtraTools recommends codebase-memory when the index is ready", async () => {

@@ -20,7 +20,10 @@ export type TranscriptSourceCell = {
 
 export type TranscriptSource = {
   cells: TranscriptSourceCell[];
+  retainedCellId?: string;
 };
+
+export const TRANSCRIPT_SOURCE_RECENT_CELL_LIMIT = 80;
 
 export function createTranscriptSource(): TranscriptSource {
   return { cells: [] };
@@ -34,6 +37,7 @@ export function appendTranscriptSourceCell(
     ...cell,
     block: cloneTranscriptSourceBlock(cell.block),
   });
+  pruneTranscriptSourceCells(source);
 }
 
 export function upsertTranscriptSourceCell(
@@ -53,13 +57,39 @@ export function upsertTranscriptSourceCell(
         ? previous?.rawText
         : cell.rawText,
     };
+    pruneTranscriptSourceCells(source);
     return;
   }
   source.cells.push(next);
+  pruneTranscriptSourceCells(source);
 }
 
 export function clearTranscriptSource(source: TranscriptSource): void {
   source.cells.splice(0, source.cells.length);
+  source.retainedCellId = undefined;
+}
+
+export function pruneTranscriptSourceCells(source: TranscriptSource): void {
+  const { cells } = source;
+  if (cells.length <= TRANSCRIPT_SOURCE_RECENT_CELL_LIMIT) return;
+  const recentStart = cells.length - TRANSCRIPT_SOURCE_RECENT_CELL_LIMIT;
+  let latestBoundaryIndex = -1;
+  let retainedCellIndex = -1;
+  for (let index = cells.length - 1; index >= 0; index -= 1) {
+    const cell = cells[index];
+    if (latestBoundaryIndex < 0 && cell?.kind === "compact_boundary") {
+      latestBoundaryIndex = index;
+    }
+    if (retainedCellIndex < 0 && cell?.id === source.retainedCellId) {
+      retainedCellIndex = index;
+    }
+    if (latestBoundaryIndex >= 0 && retainedCellIndex >= 0) break;
+  }
+  const retained = cells.filter(
+    (_cell, index) =>
+      index >= recentStart || index === latestBoundaryIndex || index === retainedCellIndex,
+  );
+  cells.splice(0, cells.length, ...retained);
 }
 
 export function snapshotTranscriptSourceCells(source: TranscriptSource): TranscriptSourceCell[] {

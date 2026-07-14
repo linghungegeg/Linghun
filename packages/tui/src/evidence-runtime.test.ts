@@ -14,6 +14,7 @@ import {
   recordToolEvidence,
   recordToolResultBudgetEvidence,
   recordVerificationEvidence,
+  resolveToolResultBudgetLedgerRecords,
   stringifyToolResultContentForBudget,
 } from "./evidence-runtime.js";
 import { readRuntimeLedgerRecords } from "./runtime-storage.js";
@@ -139,6 +140,72 @@ describe("evidence-runtime", () => {
         }),
       }),
     );
+  });
+
+  it("reuses budget ledger evidence across a compact boundary after hot state loss", async () => {
+    const sessionRootDir = await mkdtemp(join(tmpdir(), "linghun-budget-ledger-root-"));
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-budget-ledger-project-"));
+    const store = new SessionStore({ sessionRootDir, projectPath });
+    const session = await store.create({ model: "test-model" });
+    const sessionId = session.id;
+    const context = {
+      projectPath,
+      sessionId,
+      currentRequestTurnId: "request-budget-ledger",
+      evidence: [],
+      store,
+    } as unknown as TuiContext;
+    const messages = [
+      {
+        role: "tool" as const,
+        tool_call_id: "call-before-compact",
+        content: `RESULT_BEFORE_COMPACT:${"x".repeat(256)}`,
+      },
+    ];
+    const applyBudget = () =>
+      applyToolResultBudgetToMessages(messages, {
+        projectPath,
+        sessionId,
+        state: (context.toolResultBudgetState ??= {
+          seenIds: new Set(),
+          replacements: new Map(),
+        }),
+        singleResultChars: 1,
+        resolveLedgerRecords: (lookups) =>
+          resolveToolResultBudgetLedgerRecords(context, sessionId, lookups),
+      });
+
+    const first = await applyBudget();
+    expect(first.records).toHaveLength(1);
+    await recordToolResultBudgetEvidence(context, sessionId, first.records[0]!);
+    const firstReplacement = first.messages[0]?.role === "tool" ? first.messages[0].content : "";
+    await store.appendEvent(sessionId, {
+      type: "system_event",
+      id: "compact-after-budget-ledger",
+      level: "info",
+      message: 'compact_projection:{"summary":"stable compact boundary"}',
+      createdAt: new Date().toISOString(),
+    });
+
+    context.evidence = [];
+    context.toolResultBudgetState = undefined;
+    const replay = await applyBudget();
+    for (const record of replay.records) {
+      await recordToolResultBudgetEvidence(context, sessionId, record);
+    }
+    const replayReplacement = replay.messages[0]?.role === "tool" ? replay.messages[0].content : "";
+    const transcript = (await store.resume(sessionId)).transcript;
+
+    expect(replay.records).toHaveLength(0);
+    expect(replayReplacement).toBe(firstReplacement);
+    expect(
+      transcript.filter(
+        (event) =>
+          event.type === "evidence_record" &&
+          event.toolUseId === "call-before-compact" &&
+          event.supportsClaims.includes("tool_result_budget"),
+      ),
+    ).toHaveLength(1);
   });
 
   it("persists owner scope before guarded tool failure evidence append", async () => {
@@ -640,6 +707,18 @@ describe("isToolOutputFailure", () => {
     const output = { text: "error", data: { exitCode: 1 } };
     expect(isToolOutputFailure("Bash", output)).toBe(true);
   });
+
+  it.each(["timeout", "cancelled"] as const)(
+    "treats Bash outcome=%s as failure without a synthetic exit code",
+    (outcome) => {
+      expect(
+        isToolOutputFailure("Bash", {
+          text: "stopped",
+          data: { outcome, isError: false },
+        }),
+      ).toBe(true);
+    },
+  );
 
   it("returns false for Bash exit code 0", () => {
     const output = { text: "ok", data: { exitCode: 0 } };

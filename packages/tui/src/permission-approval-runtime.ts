@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Writable } from "node:stream";
-import type { ModelGateway, ModelMessage } from "@linghun/providers";
+import type { ModelGateway, ModelMessage, ModelToolCall } from "@linghun/providers";
 import type { PermissionMode } from "@linghun/shared";
 import { type ToolName, builtInTools } from "@linghun/tools";
 import {
@@ -17,6 +17,7 @@ import {
   getToolResultBudgetState,
   recordToolFailureEvidence,
   recordToolResultBudgetEvidence,
+  resolveToolResultBudgetLedgerRecords,
 } from "./evidence-runtime.js";
 import { appendSystemEvent, recordModelToolFailureForMetaScheduler } from "./evidence-runtime.js";
 import {
@@ -32,8 +33,13 @@ import { executeMemoryMutation } from "./memory-command-runtime.js";
 import { WRITE_REPORT_TOOL_NAME } from "./model-loop-runtime.js";
 import {
   beginForegroundRequestTurn,
+  clearForegroundRequestState,
   continueModelAfterToolResults,
   handleNaturalInput,
+  ownsForegroundRequestState,
+  recordFinalGapExternalBlock,
+  recordInterruptedForegroundTurn,
+  recordSuccessfulToolExecutionProgress,
 } from "./model-stream-runtime.js";
 import {
   executeApprovedIndexToolUse,
@@ -65,8 +71,15 @@ import { writeLine } from "./startup-runtime.js";
 import { applyToolResultBudgetToMessages } from "./tool-result-budget.js";
 import { truncateDisplay } from "./startup-runtime.js";
 import { isRuntimeActiveBackgroundTask } from "./tui-agent-job-runtime.js";
-import type { PendingLocalApproval, TuiContext } from "./tui-context-runtime.js";
-import { createSingleToolCallContinuation } from "./tui-context-runtime.js";
+import type {
+  PendingLocalApproval,
+  PendingModelContinuation,
+  TuiContext,
+} from "./tui-context-runtime.js";
+import {
+  createSingleToolCallContinuation,
+  MODEL_REQUEST_WALL_CLOCK_TIMEOUT_REASON,
+} from "./tui-context-runtime.js";
 import type { PendingAutopilotRequest } from "./tui-context-runtime.js";
 import type { PlanProposal } from "./tui-data-types.js";
 import {
@@ -79,13 +92,21 @@ import {
 async function appendBudgetedToolResultToContinuation(
   context: TuiContext,
   sessionId: string,
-  messages: ModelMessage[],
-  toolCallId: string,
-  result: unknown,
+  continuation: PendingModelContinuation,
+  toolCall: ModelToolCall,
+  result: {
+    ok: boolean;
+    tool: string;
+    text: string;
+    data?: unknown;
+    modelContent?: unknown;
+  },
+  commitGuard?: () => boolean,
 ): Promise<void> {
+  if (commitGuard && !commitGuard()) return;
   const toolMessage: ModelMessage = {
     role: "tool",
-    tool_call_id: toolCallId,
+    tool_call_id: toolCall.id,
     content: JSON.stringify(result),
   };
   const budgeted = await applyToolResultBudgetToMessages([toolMessage], {
@@ -93,11 +114,21 @@ async function appendBudgetedToolResultToContinuation(
     sessionId,
     state: getToolResultBudgetState(context),
     singleResultChars: LINGHUN_PROVIDER_TOOL_RESULT_CHARS,
+    resolveLedgerRecords: (lookups) =>
+      resolveToolResultBudgetLedgerRecords(context, sessionId, lookups),
   });
+  if (commitGuard && !commitGuard()) return;
   for (const record of budgeted.records) {
-    await recordToolResultBudgetEvidence(context, sessionId, record);
+    await recordToolResultBudgetEvidence(context, sessionId, record, commitGuard);
   }
-  messages.push(...budgeted.messages);
+  if (commitGuard && !commitGuard()) return;
+  recordSuccessfulToolExecutionProgress(
+    continuation,
+    toolCall,
+    result,
+    context,
+  );
+  continuation.messages.push(...budgeted.messages);
 }
 
 export async function handleTuiKeypress(
@@ -485,9 +516,21 @@ export async function executePermissionApprove(
   gateway: ModelGateway | undefined,
   output: Writable,
 ): Promise<void> {
-  await recordPermissionUserDecision(context, approval, "approved", "approve");
   let foregroundRequestOwner: { requestTurnId: string; signal: AbortSignal } | undefined;
   let foregroundApprovalController: AbortController | undefined;
+  let approvalDeadlineTimer: NodeJS.Timeout | undefined;
+  let foregroundTimeoutRecorded = false;
+  const foregroundApprovalGenerationIsOwned = (): boolean =>
+    !foregroundRequestOwner ||
+    Boolean(
+      foregroundApprovalController &&
+        ownsForegroundRequestState(
+          context,
+          foregroundRequestOwner.requestTurnId,
+          foregroundApprovalController,
+        ),
+    );
+  try {
   if (gateway && "continuation" in approval && approval.continuation) {
     const invokingRequestTurnId = approval.continuation.requestTurnId;
     const hasConflictingOwner = Boolean(
@@ -495,6 +538,7 @@ export async function executePermissionApprove(
         context.currentRequestTurnId &&
         context.currentRequestTurnId !== invokingRequestTurnId,
     );
+    if (hasConflictingOwner) return;
     if (!hasConflictingOwner) {
       const requestTurnId = invokingRequestTurnId ?? beginForegroundRequestTurn(context);
       if (invokingRequestTurnId) {
@@ -503,44 +547,80 @@ export async function executePermissionApprove(
       }
       const previousSignal = approval.continuation.abortSignal;
       foregroundApprovalController = new AbortController();
-      const signal = previousSignal
-        ? AbortSignal.any([previousSignal, foregroundApprovalController.signal])
-        : foregroundApprovalController.signal;
+      const approvalDeadlineController = new AbortController();
+      const deadlineAtMs = approval.continuation.deadlineAtMs;
+      if (deadlineAtMs !== undefined) {
+        const remainingMs = deadlineAtMs - Date.now();
+        if (remainingMs <= 0) {
+          approvalDeadlineController.abort(MODEL_REQUEST_WALL_CLOCK_TIMEOUT_REASON);
+        } else {
+          approvalDeadlineTimer = setTimeout(
+            () => approvalDeadlineController.abort(MODEL_REQUEST_WALL_CLOCK_TIMEOUT_REASON),
+            remainingMs,
+          );
+        }
+      }
+      const signals = [foregroundApprovalController.signal];
+      if (previousSignal) signals.push(previousSignal);
+      if (deadlineAtMs !== undefined) signals.push(approvalDeadlineController.signal);
+      const signal = signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
       approval.continuation.requestTurnId = requestTurnId;
       approval.continuation.abortSignal = signal;
       context.activeAbortController = foregroundApprovalController;
       context.tools.abortSignal = signal;
       context.interrupt = { type: "running", taskId: "approved-model-tool", canCancel: true };
       foregroundRequestOwner = { requestTurnId, signal };
-    } else if (invokingRequestTurnId && approval.continuation.abortSignal) {
-      foregroundRequestOwner = {
-        requestTurnId: invokingRequestTurnId,
-        signal: approval.continuation.abortSignal,
-      };
     }
   }
+  const foregroundApprovalIsCurrent = (): boolean =>
+    !foregroundRequestOwner ||
+    (!foregroundRequestOwner.signal.aborted &&
+      context.currentRequestTurnId === foregroundRequestOwner.requestTurnId &&
+      context.activeAbortController === foregroundApprovalController);
   const stopStaleForegroundApproval = (): boolean => {
-    const stale = Boolean(
-      foregroundRequestOwner &&
-        (foregroundRequestOwner.signal.aborted ||
-          context.currentRequestTurnId !== foregroundRequestOwner.requestTurnId),
-    );
+    const stale = !foregroundApprovalIsCurrent();
     if (
       stale &&
       foregroundRequestOwner &&
-      context.currentRequestTurnId === foregroundRequestOwner.requestTurnId
+      foregroundApprovalController
     ) {
-      if (context.activeAbortController === foregroundApprovalController) {
-        context.activeAbortController = undefined;
-      }
-      if (context.tools.abortSignal === foregroundRequestOwner.signal) {
-        context.tools.abortSignal = undefined;
-      }
-      context.interrupt = { type: "idle" };
-      context.currentRequestTurnId = undefined;
+      clearForegroundRequestState(
+        context,
+        foregroundRequestOwner.requestTurnId,
+        foregroundApprovalController,
+      );
     }
     return stale;
   };
+  const stopStaleForegroundApprovalWithRecord = async (): Promise<boolean> => {
+    const generationWasOwned = foregroundApprovalGenerationIsOwned();
+    const stale = stopStaleForegroundApproval();
+    if (
+      stale &&
+      generationWasOwned &&
+      !foregroundTimeoutRecorded &&
+      foregroundRequestOwner?.signal.reason === MODEL_REQUEST_WALL_CLOCK_TIMEOUT_REASON
+    ) {
+      foregroundTimeoutRecorded = true;
+      await recordInterruptedForegroundTurn(
+        context,
+        context.sessionId ?? await ensureSession(context),
+        { requestTurnId: foregroundRequestOwner.requestTurnId, reason: "model_timeout" },
+      );
+    }
+    return stale;
+  };
+  if (await stopStaleForegroundApprovalWithRecord()) return;
+  await recordPermissionUserDecision(
+    context,
+    approval,
+    "approved",
+    "approve",
+    foregroundRequestOwner
+      ? () => !stopStaleForegroundApproval()
+      : undefined,
+  );
+  if (await stopStaleForegroundApprovalWithRecord()) return;
   if (approval.kind === "agent_tool_use") {
     const agent = context.agents.find((item) => item.id === approval.agentId);
     if (!agent) {
@@ -612,8 +692,14 @@ export async function executePermissionApprove(
       approval.continuation?.reportWriteGuard,
       foregroundRequestOwner,
     );
-    if (stopStaleForegroundApproval()) return;
-    await recordModelToolFailureForMetaScheduler(context, approval.sessionId, result);
+    if (await stopStaleForegroundApprovalWithRecord()) return;
+    await recordModelToolFailureForMetaScheduler(
+      context,
+      approval.sessionId,
+      result,
+      foregroundApprovalIsCurrent,
+    );
+    if (await stopStaleForegroundApprovalWithRecord()) return;
     const reportWriteGuard = approval.continuation?.reportWriteGuard;
     if (doesWriteSatisfyReportGuard(reportWriteGuard, approval.toolCall, result)) {
       reportWriteGuard.completed = true;
@@ -622,10 +708,12 @@ export async function executePermissionApprove(
       await appendBudgetedToolResultToContinuation(
         context,
         approval.sessionId,
-        approval.continuation.messages,
-        approval.toolCall.id,
+        approval.continuation,
+        approval.toolCall,
         result,
+        foregroundApprovalIsCurrent,
       );
+      if (await stopStaleForegroundApprovalWithRecord()) return;
       await continueModelAfterToolResults(approval.continuation, context, gateway, output);
     } else if (approval.continuation) {
       await appendApprovalContinuationWarning(
@@ -652,7 +740,7 @@ export async function executePermissionApprove(
       approval.continuation?.reportWriteGuard,
       foregroundRequestOwner,
     );
-    if (stopStaleForegroundApproval()) return;
+    if (await stopStaleForegroundApprovalWithRecord()) return;
     const reportWriteGuard = approval.continuation?.reportWriteGuard;
     if (doesWriteSatisfyReportGuard(reportWriteGuard, approval.toolCall, result)) {
       reportWriteGuard.completed = true;
@@ -661,10 +749,12 @@ export async function executePermissionApprove(
       await appendBudgetedToolResultToContinuation(
         context,
         approval.sessionId,
-        approval.continuation.messages,
-        approval.toolCall.id,
+        approval.continuation,
+        approval.toolCall,
         result,
+        foregroundApprovalIsCurrent,
       );
+      if (await stopStaleForegroundApprovalWithRecord()) return;
       await continueModelAfterToolResults(approval.continuation, context, gateway, output);
     } else if (approval.continuation) {
       await appendApprovalContinuationWarning(
@@ -683,8 +773,12 @@ export async function executePermissionApprove(
       approval,
       context,
       output,
-      createWorktreeRemoveResolveDeps(gateway),
+      {
+        ...createWorktreeRemoveResolveDeps(gateway),
+        recordSuccessfulToolExecutionProgress,
+      },
     );
+    if (await stopStaleForegroundApprovalWithRecord()) return;
     return;
   }
   if (approval.kind === "git_stable_point") {
@@ -693,8 +787,12 @@ export async function executePermissionApprove(
       approval,
       context,
       output,
-      createWorktreeRemoveResolveDeps(gateway),
+      {
+        ...createWorktreeRemoveResolveDeps(gateway),
+        recordSuccessfulToolExecutionProgress,
+      },
     );
+    if (await stopStaleForegroundApprovalWithRecord()) return;
     return;
   }
   if (approval.kind === "index_tool") {
@@ -708,21 +806,17 @@ export async function executePermissionApprove(
       output,
       approval.continuation,
     );
-    if (
-      approval.continuation?.abortSignal?.aborted === true ||
-      (approval.continuation?.requestTurnId &&
-        context.currentRequestTurnId !== approval.continuation.requestTurnId)
-    ) {
-      return;
-    }
+    if (await stopStaleForegroundApprovalWithRecord()) return;
     if (gateway && approval.continuation) {
       await appendBudgetedToolResultToContinuation(
         context,
         approval.sessionId,
-        approval.continuation.messages,
-        approval.toolCall.id,
+        approval.continuation,
+        approval.toolCall,
         result,
+        foregroundApprovalIsCurrent,
       );
+      if (await stopStaleForegroundApprovalWithRecord()) return;
       await continueModelAfterToolResults(approval.continuation, context, gateway, output);
     } else if (approval.continuation) {
       await appendApprovalContinuationWarning(
@@ -749,7 +843,7 @@ export async function executePermissionApprove(
       approval.continuation?.reportWriteGuard,
       foregroundRequestOwner,
     );
-    if (stopStaleForegroundApproval()) return;
+    if (await stopStaleForegroundApprovalWithRecord()) return;
     const reportWriteGuard = approval.continuation?.reportWriteGuard;
     if (doesWriteSatisfyReportGuard(reportWriteGuard, approval.toolCall, result)) {
       reportWriteGuard.completed = true;
@@ -758,10 +852,12 @@ export async function executePermissionApprove(
       await appendBudgetedToolResultToContinuation(
         context,
         approval.sessionId,
-        approval.continuation.messages,
-        approval.toolCall.id,
+        approval.continuation,
+        approval.toolCall,
         result,
+        foregroundApprovalIsCurrent,
       );
+      if (await stopStaleForegroundApprovalWithRecord()) return;
       await continueModelAfterToolResults(approval.continuation, context, gateway, output);
     } else if (approval.continuation) {
       await appendApprovalContinuationWarning(
@@ -792,6 +888,23 @@ export async function executePermissionApprove(
     if (!context.isInkSession) writeStatus(output, context);
     return;
   }
+  } finally {
+    if (approvalDeadlineTimer) clearTimeout(approvalDeadlineTimer);
+    if (
+      foregroundRequestOwner &&
+      foregroundApprovalController &&
+      foregroundApprovalGenerationIsOwned()
+    ) {
+      if (!foregroundApprovalController.signal.aborted) {
+        foregroundApprovalController.abort("approval_terminal");
+      }
+      clearForegroundRequestState(
+        context,
+        foregroundRequestOwner.requestTurnId,
+        foregroundApprovalController,
+      );
+    }
+  }
 }
 
 /**
@@ -807,6 +920,7 @@ export async function executePermissionDeny(
   cancelled: boolean,
   decisionSource = cancelled ? "cancel" : "deny",
 ): Promise<void> {
+  let denyCommitGuard: (() => boolean) | undefined;
   if (gateway && "continuation" in approval && approval.continuation) {
     const invokingRequestTurnId = approval.continuation.requestTurnId;
     if (
@@ -821,15 +935,37 @@ export async function executePermissionDeny(
       context.runtimeContextId = invokingRequestTurnId;
       context.currentRequestTurnId = invokingRequestTurnId;
     }
+    denyCommitGuard = () =>
+      approval.continuation?.abortSignal?.aborted !== true &&
+      (!invokingRequestTurnId || context.currentRequestTurnId === invokingRequestTurnId);
   }
+  if (denyCommitGuard && !denyCommitGuard()) return;
   const sessionId = await ensureSession(context);
+  if (denyCommitGuard && !denyCommitGuard()) return;
   const outcomeText = cancelled ? "permission cancelled by user" : "permission denied by user";
   await recordPermissionUserDecision(
     context,
     approval,
     cancelled ? "cancelled" : "denied",
     decisionSource,
+    denyCommitGuard,
   );
+  if (denyCommitGuard && !denyCommitGuard()) return;
+  if (
+    gateway &&
+    "continuation" in approval &&
+    approval.continuation &&
+    (approval.kind === "architecture_drift" ||
+      approval.kind === "model_tool_use" ||
+      approval.kind === "index_tool" ||
+      approval.kind === "report_write_tool")
+  ) {
+    recordFinalGapExternalBlock(
+      approval.continuation,
+      approval.toolCall,
+      cancelled ? "user_cancelled" : "permission_denied",
+    );
+  }
   if (approval.kind === "agent_tool_use") {
     const agent = context.agents.find((item) => item.id === approval.agentId);
     if (!agent) {
@@ -901,7 +1037,10 @@ export async function executePermissionDeny(
       approval.sessionId,
       approval.toolName,
       `${outcomeText}: architecture drift confirmation required`,
+      denyCommitGuard,
+      approval.toolCall.id,
     );
+    if (denyCommitGuard && !denyCommitGuard()) return;
     const deniedResult = {
       ok: false,
       tool: approval.toolName,
@@ -918,7 +1057,9 @@ export async function executePermissionDeny(
       deniedResult.text,
       true,
       evidence.id,
+      denyCommitGuard,
     );
+    if (denyCommitGuard && !denyCommitGuard()) return;
     if (gateway && approval.continuation) {
       writeLine(output, formatPermissionDenialPrimary(context.language));
       if (
@@ -946,7 +1087,10 @@ export async function executePermissionDeny(
       approval.sessionId,
       approval.toolName,
       `${outcomeText}: ${approval.toolName}`,
+      denyCommitGuard,
+      approval.toolCall.id,
     );
+    if (denyCommitGuard && !denyCommitGuard()) return;
     const deniedResult = {
       ok: false,
       tool: approval.toolName,
@@ -967,7 +1111,9 @@ export async function executePermissionDeny(
       deniedResult.text,
       true,
       evidence.id,
+      denyCommitGuard,
     );
+    if (denyCommitGuard && !denyCommitGuard()) return;
     if (gateway && approval.continuation) {
       writeLine(output, formatPermissionDenialPrimary(context.language));
       if (
@@ -1018,7 +1164,10 @@ export async function executePermissionDeny(
       approval.sessionId,
       "Write",
       `${outcomeText}: index ${approval.indexAction}`,
+      denyCommitGuard,
+      approval.toolCall.id,
     );
+    if (denyCommitGuard && !denyCommitGuard()) return;
     const deniedResult = {
       ok: false,
       tool: approval.toolCall.name,
@@ -1034,7 +1183,9 @@ export async function executePermissionDeny(
       deniedResult.text,
       true,
       evidence.id,
+      denyCommitGuard,
     );
+    if (denyCommitGuard && !denyCommitGuard()) return;
     if (gateway && approval.continuation) {
       writeLine(output, formatPermissionDenialPrimary(context.language));
       approval.continuation.messages.push({
@@ -1055,7 +1206,10 @@ export async function executePermissionDeny(
       approval.sessionId,
       "Write",
       `${outcomeText}: WriteReport`,
+      denyCommitGuard,
+      approval.toolCall.id,
     );
+    if (denyCommitGuard && !denyCommitGuard()) return;
     const deniedResult = {
       ok: false,
       tool: WRITE_REPORT_TOOL_NAME,
@@ -1071,7 +1225,9 @@ export async function executePermissionDeny(
       deniedResult.text,
       true,
       evidence.id,
+      denyCommitGuard,
     );
+    if (denyCommitGuard && !denyCommitGuard()) return;
     if (gateway && approval.continuation) {
       writeLine(output, formatPermissionDenialPrimary(context.language));
       approval.continuation.messages.push({
@@ -1171,8 +1327,11 @@ async function recordPermissionUserDecision(
   approval: PendingLocalApproval,
   decision: "approved" | "denied" | "cancelled",
   source: string,
+  commitGuard?: () => boolean,
 ): Promise<void> {
+  if (commitGuard && !commitGuard()) return;
   const sessionId = await ensureSession(context);
+  if (commitGuard && !commitGuard()) return;
   const toolName = permissionApprovalToolName(approval);
   const continuation =
     "continuation" in approval && approval.continuation ? "available" : "none";
@@ -1181,6 +1340,7 @@ async function recordPermissionUserDecision(
     sessionId,
     `permission_user_decision: decision=${decision}; source=${source}; kind=${approval.kind}; tool=${toolName}; continuation=${continuation}`,
     decision === "approved" ? "info" : "warning",
+    commitGuard,
   );
 }
 

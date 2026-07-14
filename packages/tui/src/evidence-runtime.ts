@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { stat } from "node:fs/promises";
+import { join } from "node:path";
 import type { TranscriptEvent } from "@linghun/core";
 import type { DiffSummary, TodoItem, ToolName, ToolOutput } from "@linghun/tools";
 import type { ArchitectureCard } from "./architecture-runtime.js";
@@ -15,12 +17,17 @@ import { LINGHUN_DEFAULT_TOOL_RESULT_CHARS } from "./runtime-budget.js";
 import { truncateDisplay } from "./startup-runtime.js";
 import { formatToolDiagnosticsSummary } from "./tool-output-presenter.js";
 import {
+  type ToolResultBudgetLedgerEntry,
   type ToolResultBudgetRecord,
+  type ToolResultBudgetLedgerLookup,
+  type ToolResultBudgetLedgerResolution,
   type ToolResultBudgetState,
   applyToolResultBudgetToMessages,
   createToolResultBudgetLedgerData,
+  createToolResultBudgetRecordFingerprint,
   formatToolResultBudgetEvidenceSummary,
   formatToolResultBudgetSystemEvent,
+  parseToolResultBudgetLedgerData,
 } from "./tool-result-budget.js";
 import { MAX_EVIDENCE_RECORDS, type TuiContext } from "./tui-context-runtime.js";
 import type {
@@ -402,7 +409,9 @@ export async function recordModelToolFailureForMetaScheduler(
     pendingApproval?: boolean;
     evidenceId?: string;
   },
+  commitGuard?: () => boolean,
 ): Promise<void> {
+  if (commitGuard && !commitGuard()) return;
   if (result.ok || result.pendingApproval) return;
   if (isUserDecisionToolStop(result.text)) return;
   await appendSystemEvent(
@@ -410,7 +419,9 @@ export async function recordModelToolFailureForMetaScheduler(
     sessionId,
     `meta scheduler tool failure: tool ${result.tool}; evidence ${result.evidenceId ?? "none"}`,
     "warning",
+    commitGuard,
   );
+  if (commitGuard && !commitGuard()) return;
   await captureFailureLearning(context, sessionId, {
     category: "tool_failure",
     failureSummary: `tool failed: ${result.tool}: ${truncateDisplay(result.text, 180)}`,
@@ -420,7 +431,7 @@ export async function recordModelToolFailureForMetaScheduler(
     sourceRef: result.evidenceId ? `evidence:${result.evidenceId}` : `tool:${result.tool}`,
     relatedTarget: result.tool,
     severity: "medium",
-  });
+  }, commitGuard);
 }
 
 function isUserDecisionToolStop(text: string): boolean {
@@ -845,36 +856,243 @@ export async function recordToolResultBudgetEvidence(
   record: ToolResultBudgetRecord,
   commitGuard?: () => boolean,
 ): Promise<string> {
-  const existing = context.evidence.find(
-    (item) =>
-      item.fullOutputPath === record.artifact.path ||
-      item.outputPath === record.artifact.path ||
-      item.summary.includes(record.artifact.relativePath),
-  );
+  const existing = findToolResultBudgetEvidence(context.evidence, record, sessionId);
   if (existing) return existing.id;
-
-  const evidence = {
-    ...createEvidenceRecord(
-      "command_output",
-      formatToolResultBudgetEvidenceSummary(record),
-      record.artifact.relativePath,
-      ["tool_result_budget", "artifact", `toolUseId:${record.toolUseId}`],
-    ),
+  const state = getToolResultBudgetState(context);
+  const fingerprint = createToolResultBudgetRecordFingerprint(sessionId, record);
+  for (;;) {
+    const pending = state.pendingEvidenceRecords?.get(fingerprint);
+    if (!pending) break;
+    await pending.catch(() => undefined);
+    const committed = findToolResultBudgetEvidence(context.evidence, record, sessionId);
+    if (committed) return committed.id;
+  }
+  const [persisted] = await resolveToolResultBudgetLedgerRecords(context, sessionId, [{
     toolUseId: record.toolUseId,
-    fullOutputPath: record.artifact.path,
-    outputPath: record.artifact.path,
-    data: createToolResultBudgetLedgerData(record),
+    contentSha256: record.artifact.sha256,
+  }]);
+  if (persisted?.identity) return fingerprint;
+
+  const write = (async () => {
+    const current = findToolResultBudgetEvidence(context.evidence, record, sessionId);
+    if (current) return current.id;
+    const evidence = {
+      ...createEvidenceRecord(
+        "command_output",
+        formatToolResultBudgetEvidenceSummary(record),
+        record.artifact.relativePath,
+        ["tool_result_budget", "artifact", `toolUseId:${record.toolUseId}`],
+      ),
+      toolUseId: record.toolUseId,
+      fullOutputPath: record.artifact.path,
+      outputPath: record.artifact.path,
+      data: createToolResultBudgetLedgerData(record),
+    };
+    scopeEvidenceToContext(context, evidence);
+    evidence.ownerScope = { ...evidence.ownerScope, ownerSessionId: sessionId };
+    if (commitGuard && !commitGuard()) return evidence.id;
+    await context.store.appendEvent(sessionId, {
+      type: "evidence_record",
+      ...evidence,
+    }, commitGuard);
+    if (commitGuard && !commitGuard()) return evidence.id;
+    rememberEvidence(context, evidence);
+    await appendSystemEvent(
+      context,
+      sessionId,
+      formatToolResultBudgetSystemEvent(record),
+      "info",
+      commitGuard,
+    );
+    return evidence.id;
+  })();
+  (state.pendingEvidenceRecords ??= new Map()).set(fingerprint, write);
+  try {
+    return await write;
+  } finally {
+    if (state.pendingEvidenceRecords?.get(fingerprint) === write) {
+      state.pendingEvidenceRecords.delete(fingerprint);
+    }
+  }
+}
+
+export async function resolveToolResultBudgetLedgerRecords(
+  context: TuiContext,
+  sessionId: string,
+  lookups: readonly ToolResultBudgetLedgerLookup[],
+): Promise<readonly ToolResultBudgetLedgerResolution[]> {
+  const memoryIndex = buildToolResultBudgetLedgerIndex(context.evidence, sessionId, true);
+  const memoryResolutions = lookups.map((lookup) =>
+    resolveToolResultBudgetLedgerLookup(memoryIndex, lookup),
+  );
+  if (memoryResolutions.every((resolution) => resolution.identity)) return memoryResolutions;
+  const readRecent = context.store.readRecentTranscriptEvents;
+  if (typeof readRecent !== "function") return memoryResolutions;
+  const hasLegacyArtifacts = context.toolResultBudgetState?.hasLegacyArtifactPaths === true;
+  const artifactExistence = new Map<string, Promise<boolean>>();
+  const canonicalArtifactExists = await Promise.all(
+    lookups.map((lookup) => {
+      if (typeof context.projectPath !== "string" || !context.projectPath) {
+        return false;
+      }
+      let pending = artifactExistence.get(lookup.contentSha256);
+      if (!pending) {
+        pending = stat(
+          join(
+            context.projectPath,
+            ".linghun",
+            "session",
+            "tool-results",
+            sessionId,
+            `${lookup.contentSha256}.txt`,
+          ),
+        )
+          .then((value) => value.isFile())
+          .catch((error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return false;
+            throw error;
+          });
+        artifactExistence.set(lookup.contentSha256, pending);
+      }
+      return pending;
+    }),
+  );
+  const scanTargets = new Map<string, ToolResultBudgetLedgerLookup>();
+  lookups.forEach((lookup, index) => {
+    if (
+      !memoryResolutions[index]?.identity &&
+      (hasLegacyArtifacts || canonicalArtifactExists[index])
+    ) {
+      scanTargets.set(`${lookup.toolUseId}\0${lookup.contentSha256}`, lookup);
+    }
+  });
+  if (scanTargets.size === 0) return memoryResolutions;
+  const transcriptIndex: ToolResultBudgetLedgerIndex = {
+    identities: new Map(),
+    contents: new Map(),
   };
-  scopeEvidenceToContext(context, evidence);
-  if (commitGuard && !commitGuard()) return evidence.id;
-  await context.store.appendEvent(sessionId, {
-    type: "evidence_record",
-    ...evidence,
-  }, commitGuard);
-  if (commitGuard && !commitGuard()) return evidence.id;
-  rememberEvidence(context, evidence);
-  await appendSystemEvent(context, sessionId, formatToolResultBudgetSystemEvent(record), "info");
-  return evidence.id;
+  const relevantContent = new Set(lookups.map((lookup) => lookup.contentSha256));
+  const boundedIdentities = new Set<string>();
+  await readRecent.call(context.store, sessionId, {
+    limit: 1,
+    predicate: () => false,
+    stopPredicate: (event) => {
+      if (event.type === "evidence_record") {
+        const entry = readToolResultBudgetLedgerEntry(
+          event as unknown as ToolResultBudgetEvidenceLike,
+        );
+        if (entry && relevantContent.has(entry.record.artifact.sha256)) {
+          rememberToolResultBudgetLedgerRecord(transcriptIndex, entry);
+        }
+      }
+      if (event.type === "tool_call_start") {
+        for (const [identity, lookup] of scanTargets) {
+          if (event.id === lookup.toolUseId) boundedIdentities.add(identity);
+        }
+      }
+      for (const identity of scanTargets.keys()) {
+        if (
+          !transcriptIndex.identities.has(identity) &&
+          !boundedIdentities.has(identity)
+        ) return false;
+      }
+      return true;
+    },
+  });
+  return lookups.map((lookup, index) => {
+    const transcriptResolution = resolveToolResultBudgetLedgerLookup(transcriptIndex, lookup);
+    const memoryResolution = memoryResolutions[index];
+    return {
+      identity: transcriptResolution.identity ?? memoryResolution?.identity,
+      content: transcriptResolution.content ?? memoryResolution?.content,
+    };
+  });
+}
+
+type ToolResultBudgetEvidenceLike = Pick<
+  EvidenceRecord,
+  "id" | "toolUseId" | "fullOutputPath" | "outputPath" | "ownerScope" | "data"
+>;
+
+function findToolResultBudgetEvidence(
+  evidence: readonly ToolResultBudgetEvidenceLike[],
+  record: ToolResultBudgetRecord,
+  sessionId: string,
+): ToolResultBudgetEvidenceLike | undefined {
+  return [...evidence].reverse().find((item) => {
+    if (item.ownerScope?.ownerSessionId !== sessionId) return false;
+    const restored = readToolResultBudgetLedgerEntry(item)?.record;
+    return (
+      restored?.toolUseId === record.toolUseId &&
+      restored.artifact.sha256 === record.artifact.sha256
+    );
+  });
+}
+
+type ToolResultBudgetLedgerIndex = {
+  identities: Map<string, ToolResultBudgetLedgerEntry>;
+  contents: Map<string, ToolResultBudgetLedgerEntry>;
+};
+
+function buildToolResultBudgetLedgerIndex(
+  evidence: readonly ToolResultBudgetEvidenceLike[],
+  sessionId: string,
+  requireSessionOwner: boolean,
+): ToolResultBudgetLedgerIndex {
+  const identities = new Map<string, ToolResultBudgetLedgerEntry>();
+  const contents = new Map<string, ToolResultBudgetLedgerEntry>();
+  for (let index = evidence.length - 1; index >= 0; index -= 1) {
+    const item = evidence[index];
+    if (requireSessionOwner && item?.ownerScope?.ownerSessionId !== sessionId) continue;
+    const entry = readToolResultBudgetLedgerEntry(item);
+    if (!entry) continue;
+    rememberToolResultBudgetLedgerRecord({ identities, contents }, entry);
+  }
+  return { identities, contents };
+}
+
+function rememberToolResultBudgetLedgerRecord(
+  index: ToolResultBudgetLedgerIndex,
+  entry: ToolResultBudgetLedgerEntry,
+): void {
+  const record = entry.record;
+  const identityKey = `${record.toolUseId}\0${record.artifact.sha256}`;
+  if (!index.identities.has(identityKey)) index.identities.set(identityKey, entry);
+  if (!index.contents.has(record.artifact.sha256)) {
+    index.contents.set(record.artifact.sha256, entry);
+  }
+}
+
+function resolveToolResultBudgetLedgerLookup(
+  index: ToolResultBudgetLedgerIndex,
+  lookup: ToolResultBudgetLedgerLookup,
+): ToolResultBudgetLedgerResolution {
+  return {
+    identity: index.identities.get(`${lookup.toolUseId}\0${lookup.contentSha256}`),
+    content: index.contents.get(lookup.contentSha256),
+  };
+}
+
+function readToolResultBudgetLedgerEntry(
+  evidence: ToolResultBudgetEvidenceLike | undefined,
+): ToolResultBudgetLedgerEntry | undefined {
+  if (!evidence) return undefined;
+  const ledger = parseToolResultBudgetLedgerData(evidence.data);
+  if (!ledger) return undefined;
+  const path =
+    evidence.fullOutputPath ?? evidence.outputPath ?? ledger.record.artifact.relativePath;
+  return {
+    replacement: ledger.replacement,
+    replacementSha256: ledger.replacementSha256,
+    record: {
+      ...ledger.record,
+      artifact: {
+        ...ledger.record.artifact,
+        toolUseId: ledger.record.toolUseId,
+        path,
+      },
+    },
+  };
 }
 
 export async function appendBackgroundTaskEvent(
@@ -1089,7 +1307,12 @@ function readCompactDiagnosticTargetFields(
 
 export function isToolOutputFailure(name: ToolName, output: ToolOutput): boolean {
   if (name === "Bash") {
-    const data = output.data as { exitCode?: unknown; isError?: unknown } | undefined;
+    const data = output.data as {
+      exitCode?: unknown;
+      isError?: unknown;
+      outcome?: unknown;
+    } | undefined;
+    if (data?.outcome === "timeout" || data?.outcome === "cancelled") return true;
     if (data?.isError === false) return false;
     const exitCode = data?.exitCode;
     return typeof exitCode === "number" && exitCode !== 0;
@@ -1397,8 +1620,11 @@ export async function budgetToolResultTranscriptContent(
     {
       projectPath: context.projectPath,
       sessionId,
+      state: getToolResultBudgetState(context),
       singleResultChars: TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS,
       singleResultBytes: TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS,
+      resolveLedgerRecords: (lookups) =>
+        resolveToolResultBudgetLedgerRecords(context, sessionId, lookups),
     },
   );
   for (const record of budgeted.records) {

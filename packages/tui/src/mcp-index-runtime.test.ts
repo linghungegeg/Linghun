@@ -5,12 +5,14 @@ import { join } from "node:path";
 import { defaultConfig } from "@linghun/config";
 import { createIndexState } from "./index-runtime.js";
 import { summarizeIndexResult } from "./index-result-presenter.js";
+import { evidenceMatchesRequestOwner } from "./evidence-runtime.js";
 import {
   configureMcpIndexRuntime,
   executeExtraTool,
   findBundledCodebaseMemoryBinary,
   refreshIndexStatus,
   isSupportiveIndexEvidence,
+  recordIndexEvidence,
   runIndexRepository,
 } from "./mcp-index-runtime.js";
 
@@ -98,7 +100,50 @@ function restoreEnv(name: string, value: string | undefined): void {
 }
 
 describe("mcp-index-runtime", () => {
-  test("pre-engine deferred tools degrade when the binary is unavailable", async () => {
+  test("persists index evidence with its original request owner before resume", async () => {
+    const persisted: Array<Record<string, unknown>> = [];
+    const context = {
+      ...createIndexContext("F:/repo"),
+      sessionId: "session-owner",
+      currentRequestTurnId: "turn-original",
+      evidence: [],
+      store: {
+        appendEvent: async (_sessionId: string, event: Record<string, unknown>) => {
+          persisted.push(structuredClone(event));
+        },
+      },
+    };
+    configureMcpIndexRuntime({
+      getCurrentFreshness: () => ({} as never),
+      writeStatus: () => undefined,
+      checkBackgroundStartGuard: () => null,
+      ensureSession: async () => "session-owner",
+      rememberBackgroundTask: () => undefined,
+      appendBackgroundTaskEvent: async () => undefined,
+      rememberEvidence: () => undefined,
+    });
+
+    await recordIndexEvidence(
+      context as never,
+      "search Widget",
+      "file: src/widget.ts symbol: Widget",
+      ["index_operation"],
+    );
+
+    const evidence = persisted[0] as never;
+    expect(evidence).toMatchObject({
+      ownerScope: {
+        ownerSessionId: "session-owner",
+        requestTurnId: "turn-original",
+        cwd: "F:/repo",
+      },
+    });
+    expect(evidenceMatchesRequestOwner(evidence, context as never)).toBe(true);
+    context.currentRequestTurnId = "turn-resumed";
+    expect(evidenceMatchesRequestOwner(evidence, context as never)).toBe(false);
+  });
+
+  test("first-class pre-engine tools degrade when the binary is unavailable", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "linghun-pre-engine-degrade-"));
     const context = {
       ...createIndexContext(projectPath),
@@ -121,6 +166,7 @@ describe("mcp-index-runtime", () => {
     const result = await executeExtraTool(
       { tool_name: "pre_plan", params: { task: "inspect repository" } },
       context as never,
+      { firstClassPreEngine: true },
     );
 
     expect(result.ok).toBe(true);
@@ -129,7 +175,7 @@ describe("mcp-index-runtime", () => {
     expect(result.text).toContain("已跳过 AST 预分析");
   });
 
-  test("pre-engine deferred tools degrade when analysis returns low confidence", async () => {
+  test("first-class pre-engine tools degrade when analysis returns low confidence", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "linghun-pre-engine-low-confidence-"));
     const context = {
       ...createIndexContext(projectPath),
@@ -172,6 +218,7 @@ describe("mcp-index-runtime", () => {
     const result = await executeExtraTool(
       { tool_name: "pre_plan", params: { task: "inspect unsupported repository" } },
       context as never,
+      { firstClassPreEngine: true },
     );
 
     expect(result.ok).toBe(true);
@@ -226,6 +273,7 @@ describe("mcp-index-runtime", () => {
     const result = await executeExtraTool(
       { tool_name: "pre_verify", params: { changed_files: ["README.md"] } },
       context as never,
+      { firstClassPreEngine: true },
     );
 
     expect(result.ok).toBe(true);
@@ -278,6 +326,7 @@ describe("mcp-index-runtime", () => {
     const result = await executeExtraTool(
       { tool_name: "pre_verify", params: { changed_files: ["app/src/main/java/Foo.java"] } },
       context as never,
+      { firstClassPreEngine: true },
     );
 
     expect(result.ok).toBe(true);
@@ -288,6 +337,77 @@ describe("mcp-index-runtime", () => {
         reason: "pre-engine-verifier-unavailable",
       },
     });
+  });
+
+  test("classifies canonical pre-engine status, confidence, and verification fields", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-pre-engine-canonical-"));
+    const context = {
+      ...createIndexContext(projectPath),
+      discoveredDeferredToolNames: new Set<string>(["pre_verify"]),
+      mcp: { enabled: false, servers: [], tools: [] },
+      skills: { enabled: false, skills: [], trustedIds: [], disabledIds: [] },
+      plugins: { enabled: false, plugins: [], trustedIds: [], disabledIds: [] },
+    };
+    let payload: Record<string, unknown> = {};
+    configureMcpIndexRuntime({
+      getCurrentFreshness: () => ({} as never),
+      writeStatus: () => undefined,
+      checkBackgroundStartGuard: () => null,
+      ensureSession: async () => "session-test",
+      rememberBackgroundTask: () => undefined,
+      appendBackgroundTaskEvent: async () => undefined,
+      rememberEvidence: () => undefined,
+      resolvePreEngineBinary: async () => "mock-pre-engine",
+      callPreEngineTool: async () => ({
+        ok: true,
+        summary: "ok",
+        data: { content: [{ type: "text", text: JSON.stringify(payload) }] },
+      }),
+    });
+    const cases = [
+      {
+        name: "verified pass",
+        payload: { status: "pass", verification: { status: "verified", fully_verified: true } },
+        degraded: false,
+      },
+      {
+        name: "verified issues",
+        payload: {
+          status: "issues_found",
+          issues: [{ type: "type_error" }],
+          verification: { status: "verified", fully_verified: true },
+        },
+        degraded: false,
+      },
+      { name: "top confidence", payload: { status: "pass", confidence: "low" }, degraded: true },
+      ...["partially_verified", "fallback_used", "tool_missing", "not_covered"].map(
+        (status) => ({ name: `top ${status}`, payload: { status }, degraded: true }),
+      ),
+      ...["partially_verified", "fallback_used", "tool_missing", "not_covered"].map(
+        (status) => ({
+          name: `verification ${status}`,
+          payload: { status: "pass", verification: { status, fully_verified: false } },
+          degraded: true,
+        }),
+      ),
+      {
+        name: "contradictory fully verified",
+        payload: { status: "pass", verification: { status: "verified", fully_verified: false } },
+        degraded: true,
+      },
+    ];
+
+    for (const testCase of cases) {
+      payload = testCase.payload;
+      const result = await executeExtraTool(
+        { tool_name: "pre_verify", params: { changed_files: ["src/a.ts"] } },
+        context as never,
+        { firstClassPreEngine: true },
+      );
+      expect(result.ok, testCase.name).toBe(true);
+      if (!result.ok) throw new Error(`unexpected pre-engine failure: ${testCase.name}`);
+      expect(result.degraded === true, testCase.name).toBe(testCase.degraded);
+    }
   });
 
   test("findBundledCodebaseMemoryBinary resolves platform optional package binaries", async () => {
