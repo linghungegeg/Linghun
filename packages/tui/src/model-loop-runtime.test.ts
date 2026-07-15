@@ -20,6 +20,7 @@ import {
   formatFileCandidates,
   formatSolutionCompletenessTrigger,
   hasModelSynthesisIntent,
+  hasStructuredFinalAnswerClaimContract,
   inferSolutionCompletenessImpactAreas,
   inferVisibleFinalAnswerClaims,
   isEvidenceStaleForClaim,
@@ -910,6 +911,12 @@ describe("model-loop-runtime", () => {
   });
 
   describe("D.13U evaluateFinalAnswerClaims", () => {
+    const evaluateVisibleFinalAnswerClaims = (
+      text: string,
+      evidence: EvidenceRecord[],
+      now = new Date(),
+    ) => evaluateFinalAnswerClaims(text, evidence, now, { visibleClaimInference: "full" });
+
     it("passes when there is no high-risk claim", () => {
       const verdict = evaluateFinalAnswerClaims("可以，我来解释这个概念", []);
       expect(verdict.status).toBe("passed");
@@ -931,14 +938,31 @@ describe("model-loop-runtime", () => {
       const verdict = evaluateFinalAnswerClaims(
         "我的能力包括修改文件和执行命令；刚才我已经写入 report.md。",
         [],
+        new Date(),
+        { visibleClaimInference: "full" },
       );
 
       expect(verdict.status).toBe("needs_disclaimer");
       expect(verdict.unsupportedKinds).toContain("file_change_claim");
     });
 
+    it("does not infer visible completion claims unless explicitly requested", () => {
+      const defaultVerdict = evaluateFinalAnswerClaims("我已经完成当前修改。测试通过。", []);
+      expect(defaultVerdict.status).toBe("passed");
+      expect(defaultVerdict.matchedClaims).toEqual([]);
+
+      const fullInferenceVerdict = evaluateFinalAnswerClaims(
+        "我已经完成当前修改。测试通过。",
+        [],
+        new Date(),
+        { visibleClaimInference: "full" },
+      );
+      expect(fullInferenceVerdict.status).toBe("needs_disclaimer");
+      expect(fullInferenceVerdict.unsupportedKinds).toContain("test_claim");
+    });
+
     it("matches parallel Write and Read claims to their own evidence targets", () => {
-      const verdict = evaluateFinalAnswerClaims("已写入 report.md 并读取 package.json。", [
+      const verdict = evaluateVisibleFinalAnswerClaims("已写入 report.md 并读取 package.json。", [
         makeEvidence({
           kind: "command_output",
           source: "Write",
@@ -969,7 +993,7 @@ describe("model-loop-runtime", () => {
     });
 
     it("does not let a meta explanation hide an unquoted real completion claim", () => {
-      const verdict = evaluateFinalAnswerClaims("反幻觉系统会检测我已完成所有修改", []);
+      const verdict = evaluateVisibleFinalAnswerClaims("反幻觉系统会检测我已完成所有修改", []);
       expect(verdict.status).toBe("needs_disclaimer");
       expect(verdict.unsupportedKinds).toContain("completion_claim");
     });
@@ -991,7 +1015,7 @@ describe("model-loop-runtime", () => {
         "反幻觉声明示例：‘已完成’而且我已经修复实际问题",
         'Claim examples: "completed" and I have fixed the actual issue',
       ]) {
-        const verdict = evaluateFinalAnswerClaims(text, []);
+        const verdict = evaluateVisibleFinalAnswerClaims(text, []);
         expect(verdict.status).toBe("needs_disclaimer");
         expect(verdict.unsupportedKinds).toContain("completion_claim");
       }
@@ -1008,7 +1032,7 @@ describe("model-loop-runtime", () => {
         'The word "example" is a label and status is "completed"',
         "“示例”是标签而状态是“已完成”",
       ]) {
-        expect(evaluateFinalAnswerClaims(text, []).status).toBe("needs_disclaimer");
+        expect(evaluateVisibleFinalAnswerClaims(text, []).status).toBe("needs_disclaimer");
       }
     });
 
@@ -1027,16 +1051,16 @@ describe("model-loop-runtime", () => {
     });
 
     it("keeps broad completion and verification claims blocked outside the readonly audit clause", () => {
-      const broadCompletion = evaluateFinalAnswerClaims(
+      const broadCompletion = evaluateVisibleFinalAnswerClaims(
         withClaims("只读审计完成；任务完成。", [{ kind: "completion_claim", phrase: "任务完成" }]),
         [],
       );
       expect(broadCompletion.unsupportedKinds).toContain("completion_claim");
 
-      const fixedClaim = evaluateFinalAnswerClaims("只读检查完；已修复。", []);
+      const fixedClaim = evaluateVisibleFinalAnswerClaims("只读检查完；已修复。", []);
       expect(fixedClaim.unsupportedKinds).toContain("completion_claim");
 
-      const testClaim = evaluateFinalAnswerClaims("只读检查完；测试通过。", []);
+      const testClaim = evaluateVisibleFinalAnswerClaims("只读检查完；测试通过。", []);
       expect(testClaim.unsupportedKinds).toContain("test_claim");
     });
 
@@ -1049,7 +1073,7 @@ describe("model-loop-runtime", () => {
           summary: "Bash: echo hello",
         }),
       ];
-      const verdict = evaluateFinalAnswerClaims(
+      const verdict = evaluateVisibleFinalAnswerClaims(
         withClaims("已完成，测试通过，PASS。", [{ kind: "completion_pass", phrase: "测试通过" }]),
         evidence,
       );
@@ -1092,7 +1116,7 @@ describe("model-loop-runtime", () => {
     });
 
     it("does not let focused test evidence support an all-tests claim", () => {
-      const verdict = evaluateFinalAnswerClaims(
+      const verdict = evaluateVisibleFinalAnswerClaims(
         withClaims("全部测试通过。", [{ kind: "completion_pass", phrase: "全部测试通过" }]),
         [
           makeEvidence({
@@ -1320,10 +1344,10 @@ describe("model-loop-runtime", () => {
         ],
       });
 
-      expect(evaluateFinalAnswerClaims(claim, [emptyPreContext, scopedNoMatch]).status).toBe(
+      expect(evaluateVisibleFinalAnswerClaims(claim, [emptyPreContext, scopedNoMatch]).status).toBe(
         "needs_disclaimer",
       );
-      expect(evaluateFinalAnswerClaims(claim, [emptyPreContext, workspaceNoMatch]).status).toBe(
+      expect(evaluateVisibleFinalAnswerClaims(claim, [emptyPreContext, workspaceNoMatch]).status).toBe(
         "passed",
       );
       for (const text of [
@@ -1336,7 +1360,7 @@ describe("model-loop-runtime", () => {
         "MessageBuilder is unused.",
         "MessageBuilder is not using build.",
       ]) {
-        expect(evaluateFinalAnswerClaims(text, [emptyPreContext, workspaceNoMatch]).status).toBe(
+        expect(evaluateVisibleFinalAnswerClaims(text, [emptyPreContext, workspaceNoMatch]).status).toBe(
           "passed",
         );
       }
@@ -1385,26 +1409,26 @@ describe("model-loop-runtime", () => {
     });
 
     it("gates visible negative code facts even when structured claims are omitted", () => {
-      const chinese = evaluateFinalAnswerClaims("未发现 MessageBuilder 调用者。", []);
-      const chinesePostfix = evaluateFinalAnswerClaims("MessageBuilder 未被调用。", []);
-      const chineseNoUse = evaluateFinalAnswerClaims("没有使用 MessageBuilder。", []);
-      const chineseNoUsed = evaluateFinalAnswerClaims("MessageBuilder 没有被使用。", []);
-      const chineseDoesNotCall = evaluateFinalAnswerClaims("MessageBuilder 不调用 build。", []);
-      const english = evaluateFinalAnswerClaims("There are no calls to MessageBuilder.", []);
-      const englishDoesNotCall = evaluateFinalAnswerClaims(
+      const chinese = evaluateVisibleFinalAnswerClaims("未发现 MessageBuilder 调用者。", []);
+      const chinesePostfix = evaluateVisibleFinalAnswerClaims("MessageBuilder 未被调用。", []);
+      const chineseNoUse = evaluateVisibleFinalAnswerClaims("没有使用 MessageBuilder。", []);
+      const chineseNoUsed = evaluateVisibleFinalAnswerClaims("MessageBuilder 没有被使用。", []);
+      const chineseDoesNotCall = evaluateVisibleFinalAnswerClaims("MessageBuilder 不调用 build。", []);
+      const english = evaluateVisibleFinalAnswerClaims("There are no calls to MessageBuilder.", []);
+      const englishDoesNotCall = evaluateVisibleFinalAnswerClaims(
         "MessageBuilder does not call build.",
         [],
       );
-      const englishDoNotCall = evaluateFinalAnswerClaims(
+      const englishDoNotCall = evaluateVisibleFinalAnswerClaims(
         "MessageBuilder helpers do not call build.",
         [],
       );
-      const englishDontUse = evaluateFinalAnswerClaims(
+      const englishDontUse = evaluateVisibleFinalAnswerClaims(
         "MessageBuilder helpers don't use build.",
         [],
       );
-      const englishUnused = evaluateFinalAnswerClaims("MessageBuilder is unused.", []);
-      const englishNotUsing = evaluateFinalAnswerClaims(
+      const englishUnused = evaluateVisibleFinalAnswerClaims("MessageBuilder is unused.", []);
+      const englishNotUsing = evaluateVisibleFinalAnswerClaims(
         "MessageBuilder is not using build.",
         [],
       );
@@ -1433,8 +1457,28 @@ describe("model-loop-runtime", () => {
         "MessageBuilder is unused.",
         "MessageBuilder is not using build.",
       ]) {
-        expect(evaluateFinalAnswerClaims(text, []).unsupportedKinds).toContain("code_fact");
+        expect(evaluateVisibleFinalAnswerClaims(text, []).unsupportedKinds).toContain("code_fact");
       }
+    });
+
+    it("can disable visible inference and rely on the structured contract path", () => {
+      const planText =
+        "方案：先读 packages/tui/src/model-stream-runtime.ts，再分析函数调用 final gate 的路径。";
+      const contractOnly = evaluateFinalAnswerClaims(planText, [], new Date(), {
+        visibleClaimInference: "none",
+      });
+      const full = evaluateVisibleFinalAnswerClaims(planText, []);
+
+      expect(contractOnly.status).toBe("passed");
+      expect(full.unsupportedKinds).toContain("code_fact");
+      expect(
+        evaluateFinalAnswerClaims("测试已经通过。", [], new Date(), {
+          visibleClaimInference: "none",
+        }).unsupportedKinds,
+      ).toEqual([]);
+      expect(hasStructuredFinalAnswerClaimContract("回答\nLinghunFinalAnswerClaims: {\"claims\":[]}"))
+        .toBe(true);
+      expect(hasStructuredFinalAnswerClaimContract("回答")).toBe(false);
     });
 
     it("keeps common executed actions visible while excluding readonly inspection", () => {
@@ -1452,7 +1496,7 @@ describe("model-loop-runtime", () => {
       expect(
         inferVisibleFinalAnswerClaims("Read 检查后已执行 npm install。").map((item) => item.kind),
       ).toContain("action_executed");
-      const mixed = evaluateFinalAnswerClaims("Read 检查后已执行 npm install。", [
+      const mixed = evaluateVisibleFinalAnswerClaims("Read 检查后已执行 npm install。", [
         makeEvidence({
           kind: "command_output",
           source: "Bash",
@@ -1987,7 +2031,7 @@ describe("model-loop-runtime", () => {
     });
 
     it("keeps readonly source inspection out of verification and action claims", () => {
-      const readonly = evaluateFinalAnswerClaims(
+      const readonly = evaluateVisibleFinalAnswerClaims(
         "已执行 pre_context 并完成源码交叉验证：python/consumer.py 中该函数调用 MessageBuilder。",
         [
           makeEvidence({
@@ -2016,7 +2060,7 @@ describe("model-loop-runtime", () => {
       expect(preContextOnly.status).toBe("needs_disclaimer");
       expect(preContextOnly.unsupportedKinds).toContain("code_fact");
 
-      const engineeringClaims = evaluateFinalAnswerClaims(
+      const engineeringClaims = evaluateVisibleFinalAnswerClaims(
         "typecheck passed，命令已成功执行。",
         [],
       );

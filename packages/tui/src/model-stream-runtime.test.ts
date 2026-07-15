@@ -2956,7 +2956,7 @@ describe("model message prompt cache layout", () => {
           } as const;
           return;
         }
-        yield { type: "assistant_text_delta", id: "final", text: "最终回答" } as const;
+        yield { type: "assistant_text_delta", id: "final", text: withClaims("最终回答", []) } as const;
         yield {
           type: "usage",
           usage: { inputTokens: 100, outputTokens: 10, totalTokens: 110 },
@@ -3106,6 +3106,70 @@ describe("model message prompt cache layout", () => {
       events.filter((event) => (event as { type?: string }).type === "usage"),
     ).toHaveLength(1);
     expect(JSON.stringify(events)).toContain("early tool content");
+  }, 30_000);
+
+  it("gates only the current final block after an intermediate report tool round", async () => {
+    const { context, events } = await makeSendMessageContext();
+    context.permissionMode = "full-access";
+    let attempts = 0;
+    const output = new MemoryOutput();
+    const gateway = {
+      async *stream() {
+        attempts += 1;
+        if (attempts === 1) {
+          yield {
+            type: "assistant_text_delta",
+            id: "report-draft",
+            text: [
+              "自动审核 1/3：正在检查 final gate、claim contract 和 report 写入路径。",
+              'LinghunFinalAnswerClaims: {"claims":[{"kind":"completeness","phrase":"systemic_gap"}]}',
+            ].join("\n"),
+          } as const;
+          yield {
+            type: "tool_use",
+            id: "write-report",
+            name: "Write",
+            input: { path: "final-report.md", content: "# Audit\n\nPASS\n" },
+          } as const;
+          yield {
+            type: "message_stop",
+            id: "report-tool-stop",
+            chunkCount: 2,
+            hadUsage: false,
+            finishReason: "tool_use",
+          } as const;
+          return;
+        }
+        yield {
+          type: "assistant_text_delta",
+          id: "report-final",
+          text: withClaims("结论：报告文件 final-report.md。\n下一步：按报告继续复检。", []),
+        } as const;
+        yield {
+          type: "message_stop",
+          id: "report-final-stop",
+          chunkCount: 1,
+          hadUsage: false,
+          finishReason: "stop",
+        } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await __testSendMessage("生成 final-report.md report", context, gateway, output);
+
+    const serialized = JSON.stringify(events);
+    const assistantEvents = events.filter(
+      (event): event is { type: string; text?: string } =>
+        (event as { type?: string }).type === "assistant_text_delta",
+    );
+    expect(attempts).toBe(2);
+    expect(serialized).toContain('"type":"tool_result"');
+    expect(serialized).not.toContain("final_answer_gate_aggregated retry");
+    expect(assistantEvents.at(-1)?.text).toContain("结论：报告文件 final-report.md");
+    expect(output.text).not.toContain("最终证据缺口仍未闭合");
   }, 30_000);
 
   it("starts every complete readonly tool_use before message_stop and keeps result order", async () => {
@@ -3449,7 +3513,7 @@ describe("model message prompt cache layout", () => {
           yield {
             type: "assistant_text_delta",
             id: "approval-final",
-            text: "已记录审批结果。",
+            text: withClaims("已记录审批结果。", []),
           } as const;
         }
         yield { type: "message_stop", finishReason: attempts >= 2 && attempts <= 3 ? "tool_use" : "stop" } as const;
@@ -5007,6 +5071,168 @@ describe("final answer gate aggregation", () => {
     if (result.status === "needs_disclaimer") {
       expect(result.unsupportedKinds).toContain("test_claim");
     }
+  });
+
+  it("uses contract-only main-chain inference without broad text interception", () => {
+    const planText =
+      "方案：先读 packages/tui/src/model-stream-runtime.ts，再分析函数调用 final gate 的路径。";
+    const result = evaluateAggregatedFinalAnswerGate(
+      makeGateContext() as never,
+      planText,
+      false,
+      { visibleClaimInference: "none" },
+    );
+    expect(result.status).toBe("passed");
+
+    const structured = evaluateAggregatedFinalAnswerGate(
+      makeGateContext() as never,
+      withClaims(planText, [{ kind: "code_fact", phrase: "函数调用 final gate" }]),
+      false,
+      { visibleClaimInference: "none" },
+    );
+    expect(structured.status).toBe("needs_disclaimer");
+    if (structured.status === "needs_disclaimer") {
+      expect(structured.unsupportedKinds).toContain("code_fact");
+    }
+
+    const testClaim = evaluateAggregatedFinalAnswerGate(
+      makeGateContext() as never,
+      "测试已经通过。",
+      false,
+      { visibleClaimInference: "none" },
+    );
+    expect(testClaim.status).toBe("passed");
+  });
+
+  it("requires a structured claim contract for high-risk main-chain scopes", () => {
+    const context = {
+      ...makeGateContext(),
+      lastMetaSchedulerDecision: {
+        policyDecision: {
+          taskKind: "edit",
+          executionPlan: { requireVerification: true },
+          permissionSignal: { expectedMutating: true },
+          permissionPlan: { expectedMutating: true },
+        },
+      },
+    };
+
+    const missing = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      "我已经完成当前修改。",
+      true,
+      { visibleClaimInference: "none", requireStructuredClaimContract: true },
+    );
+    expect(missing.status).toBe("needs_disclaimer");
+    if (missing.status === "needs_disclaimer") {
+      expect(missing.unsupportedKinds).toContain("final_answer_claim_contract");
+    }
+
+    const emptyContract = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      withClaims("这里只给出后续方案，不声明完成。", []),
+      true,
+      { visibleClaimInference: "none", requireStructuredClaimContract: true },
+    );
+    expect(emptyContract.status).toBe("passed");
+
+    const unsupportedStructured = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      withClaims("测试已经通过。", [{ kind: "completion_pass", phrase: "测试已经通过" }]),
+      true,
+      { visibleClaimInference: "none", requireStructuredClaimContract: true },
+    );
+    expect(unsupportedStructured.status).toBe("needs_disclaimer");
+    if (unsupportedStructured.status === "needs_disclaimer") {
+      expect(unsupportedStructured.unsupportedKinds).toContain("completion_pass");
+    }
+  });
+
+  it("keeps missing contract repair open while owner-scoped execution evidence advances", () => {
+    const context = {
+      ...makeGateContext(),
+      projectPath: "/test",
+      sessionId: "session-contract",
+      currentRequestTurnId: "turn-contract",
+      currentRequestChangedFiles: [],
+      permissionMode: "full-access",
+      language: "zh-CN",
+      tools: { changedFiles: [] },
+      lastMetaSchedulerDecision: {
+        policyDecision: {
+          taskKind: "edit",
+          executionPlan: { requireVerification: true },
+          permissionSignal: { expectedMutating: true },
+          permissionPlan: { expectedMutating: true },
+        },
+      },
+    } as unknown as TuiContext;
+    const result = evaluateAggregatedFinalAnswerGate(
+      context,
+      "测试已经通过。",
+      true,
+      { visibleClaimInference: "none", requireStructuredClaimContract: true },
+    );
+
+    expect(result.status).toBe("needs_disclaimer");
+    if (result.status !== "needs_disclaimer") return;
+
+    const first = planFinalGateEvidenceGapAction({
+      result,
+      context,
+      userText: "继续完成修改并验证",
+    });
+    expect(first.action).toBe("claim_contract_request");
+
+    const state = __testCaptureFinalGapProgressState(result, context, first.evidenceAction);
+    const noProgress = __testFinalGapHasProgress(result, context, state);
+    const noProgressPlan = planFinalGateEvidenceGapAction({
+      result,
+      context,
+      userText: "继续完成修改并验证",
+      evidenceActionRetryCount: 1,
+      finalGapMadeProgress: noProgress,
+    });
+    expect(noProgress).toBe(false);
+    expect(noProgressPlan.action).toBe("claim_contract_request");
+    expect(noProgressPlan.reason).toBe("model_did_not_follow_contract_directive");
+
+    const exhaustedPlan = planFinalGateEvidenceGapAction({
+      result,
+      context,
+      userText: "继续完成修改并验证",
+      evidenceActionRetryCount: 2,
+      finalGapMadeProgress: noProgress,
+    });
+    expect(exhaustedPlan.action).toBe("downgrade_only");
+    expect(exhaustedPlan.reason).toBe("final_gate_contract_retry_budget_exhausted");
+
+    context.evidence.push({
+      id: "contract-file-written",
+      kind: "command_output",
+      source: "Edit",
+      summary: "Edit: src/a.ts",
+      supportsClaims: ["Edit", "file_written"],
+      createdAt: new Date(1).toISOString(),
+      ownerScope: {
+        ownerSessionId: "session-contract",
+        requestTurnId: "turn-contract",
+        cwd: "/test",
+        targets: ["src/a.ts"],
+      },
+    } as unknown as EvidenceRecord);
+
+    const madeProgress = __testFinalGapHasProgress(result, context, state);
+    const followUp = planFinalGateEvidenceGapAction({
+      result,
+      context,
+      userText: "继续完成修改并验证",
+      evidenceActionRetryCount: 1,
+      finalGapMadeProgress: madeProgress,
+    });
+
+    expect(madeProgress).toBe(true);
+    expect(followUp.action).toBe("claim_contract_request");
   });
 
   it("does not let an older request PASS support the current visible claim", () => {

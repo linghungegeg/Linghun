@@ -8624,6 +8624,133 @@ describe("TaskSuggestionBar executable state", () => {
       .toBe(false);
   });
 
+  it("hides stale tool failure after same-task progress resumes", () => {
+    const failure: ProductBlockViewModel = {
+      id: "owned-tool-failure",
+      kind: "error",
+      status: "fail",
+      title: "Bash 失败",
+      summary: "退出码 1",
+      messageKind: "tool_result_error",
+      failureDomain: "tool",
+      failureRequestTurnId: "turn-current",
+    };
+    const view = createShellViewModel(
+      createContext({ currentRequestTurnId: "turn-current" } as Partial<TuiContext>),
+      {
+        outputBlocks: [
+          failure,
+          {
+            id: "assistant-progress",
+            kind: "details",
+            status: "partial",
+            title: "assistant",
+            summary: "已改用 PowerShell 单行命令继续确认环境。",
+            fullText: "已改用 PowerShell 单行命令继续确认环境。",
+            messageKind: "assistant_text",
+          },
+        ],
+        viewMode: "task",
+      },
+    );
+
+    expect(view.blocks.some((block) => block.id === "owned-tool-failure")).toBe(false);
+    expect(view.blocks.some((block) => block.id === "assistant-progress")).toBe(true);
+  });
+
+  it("hides legacy tool_result_error without a failureDomain after same-task progress resumes", () => {
+    const failure: ProductBlockViewModel = {
+      id: "legacy-command-failure",
+      kind: "error",
+      status: "fail",
+      title: "Bash 失败",
+      summary: "退出码 1",
+      fullText: "pnpm 不是内部或外部命令，也不是可运行的程序。",
+      messageKind: "tool_result_error",
+      failureRequestTurnId: "turn-current",
+    };
+    const view = createShellViewModel(
+      createContext({ currentRequestTurnId: "turn-current" } as Partial<TuiContext>),
+      {
+        outputBlocks: [
+          failure,
+          {
+            id: "assistant-progress",
+            kind: "details",
+            status: "partial",
+            title: "assistant",
+            summary: "我会改用 corepack pnpm 继续跑 focused tests。",
+            fullText: "我会改用 corepack pnpm 继续跑 focused tests。",
+            messageKind: "assistant_text",
+          },
+        ],
+        viewMode: "task",
+      },
+    );
+
+    expect(view.blocks.some((block) => block.id === "legacy-command-failure")).toBe(false);
+    expect(view.blocks.some((block) => block.id === "assistant-progress")).toBe(true);
+    expect(view.taskSuggestions?.some((item) => item.source === "tool_error") ?? false).toBe(
+      false,
+    );
+  });
+
+  it("does not surface command failure suggestions while the same request is recovering", () => {
+    const failure: ProductBlockViewModel = {
+      id: "recovering-command-failure",
+      kind: "error",
+      status: "fail",
+      title: "Bash 失败",
+      summary: "退出码 1",
+      fullText: "Unsupported pwd form on Windows PowerShell.",
+      messageKind: "tool_result_error",
+      failureRequestTurnId: "turn-current",
+    };
+    const view = createShellViewModel(
+      createContext({
+        currentRequestTurnId: "turn-current",
+        requestActivityPhase: "continuing_after_tool",
+      } as Partial<TuiContext>),
+      {
+        outputBlocks: [failure],
+        viewMode: "task",
+      },
+    );
+
+    expect(view.blocks.some((block) => block.id === "recovering-command-failure")).toBe(false);
+    expect(view.taskSuggestions?.some((item) => item.source === "tool_error") ?? false).toBe(
+      false,
+    );
+  });
+
+  it("hides legacy fail block without messageKind while the same request is recovering", () => {
+    const failure: ProductBlockViewModel = {
+      id: "legacy-status-failure",
+      kind: "error",
+      status: "fail",
+      title: "Bash 失败",
+      summary: "Node.js v24.14.0 退出码 1",
+      fullText: "syncRunEntryPointWithESMLoader\nNode.js v24.14.0 退出码 1",
+      failureRequestTurnId: "turn-current",
+    };
+    const view = createShellViewModel(
+      createContext({
+        currentRequestTurnId: "turn-current",
+        requestActivityPhase: "tool_running",
+        requestActivityToolName: "Bash",
+      } as Partial<TuiContext>),
+      {
+        outputBlocks: [failure],
+        viewMode: "task",
+      },
+    );
+
+    expect(view.blocks.some((block) => block.id === "legacy-status-failure")).toBe(false);
+    expect(view.taskSuggestions?.some((item) => item.source === "tool_error") ?? false).toBe(
+      false,
+    );
+  });
+
   it("keeps provider request failure to a single visible prompt", () => {
     const ctx = createContext({
       lastProviderFailure: {

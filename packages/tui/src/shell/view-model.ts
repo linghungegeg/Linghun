@@ -362,10 +362,18 @@ export function createShellViewModel(
     const activeRequestPhase = (context as { requestActivityPhase?: string }).requestActivityPhase;
     const hasActiveRequestActivity = isActiveRequestActivityPhase(activeRequestPhase);
     const hasActiveTaskActivity = isActiveTaskActivity(effectiveActivity);
+    const isCurrentRequestRecoverableFailureBlock = (block: ProductBlockViewModel): boolean =>
+      !isProviderFailureOutputBlock(block, language) &&
+      (block.status === "fail" || block.status === "blocked" || isToolFailureOutputBlock(block)) &&
+      block.failureDomain !== "provider" &&
+      block.failureRequestTurnId !== undefined &&
+      block.failureRequestTurnId === context.currentRequestTurnId;
     const staleProviderFailureBlockIds = new Set<string>();
+    const staleToolFailureBlockIds = new Set<string>();
     const staleCompactBoundaryBlockIds = new Set<string>();
     const activeCompactBoundaryBlockIds = new Set<string>();
     let latestProviderFailureBlockId: string | undefined;
+    let latestToolFailureBlockId: string | undefined;
     let latestProviderFailureRecovered = false;
     for (const block of allOutputBlocks) {
       if (block.messageKind === "compact_boundary") {
@@ -389,6 +397,17 @@ export function createShellViewModel(
         latestProviderFailureBlockId = undefined;
         latestProviderFailureRecovered = true;
       }
+      if (isCurrentRequestRecoverableFailureBlock(block)) {
+        if (latestToolFailureBlockId) {
+          staleToolFailureBlockIds.add(latestToolFailureBlockId);
+        }
+        latestToolFailureBlockId = block.id;
+        continue;
+      }
+      if (latestToolFailureBlockId && isToolFailureRecoveryProgressBlock(block)) {
+        staleToolFailureBlockIds.add(latestToolFailureBlockId);
+        latestToolFailureBlockId = undefined;
+      }
     }
     hasRecoveredAfterProviderFailure = latestProviderFailureRecovered;
     const selectedBlocks = allOutputBlocks.filter((b, i) => {
@@ -400,6 +419,12 @@ export function createShellViewModel(
           staleProviderFailureBlockIds.has(b.id) ||
           (activeProviderFailureRequestTurnId !== undefined &&
             b.failureRequestTurnId !== activeProviderFailureRequestTurnId))
+      ) {
+        return false;
+      }
+      if (
+        isCurrentRequestRecoverableFailureBlock(b) &&
+        (hasActiveRequestActivity || hasActiveTaskActivity || staleToolFailureBlockIds.has(b.id))
       ) {
         return false;
       }
@@ -2404,12 +2429,25 @@ function isProviderFailureOutputBlock(block: ProductBlockViewModel, language: La
   return block.messageKind === "tool_result_error" && block.failureDomain === "provider";
 }
 
+function isToolFailureOutputBlock(block: ProductBlockViewModel): boolean {
+  return block.messageKind === "tool_result_error" && block.failureDomain !== "provider";
+}
+
 function isProviderRecoveryProgressBlock(block: ProductBlockViewModel, language: Language): boolean {
   if (isProviderFailureOutputBlock(block, language)) return false;
   return (
     block.messageKind === "assistant_text" ||
     block.messageKind === "tool_result_success" ||
     block.messageKind === "diagnostic" ||
+    block.messageKind === "local_command_output"
+  );
+}
+
+function isToolFailureRecoveryProgressBlock(block: ProductBlockViewModel): boolean {
+  if (isToolFailureOutputBlock(block)) return false;
+  return (
+    block.messageKind === "assistant_text" ||
+    block.messageKind === "tool_result_success" ||
     block.messageKind === "local_command_output"
   );
 }

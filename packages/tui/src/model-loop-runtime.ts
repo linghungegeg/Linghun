@@ -976,6 +976,13 @@ export type FinalAnswerClaimVerdict = {
   staleKinds?: FinalAnswerClaimKind[];
 };
 
+export type FinalAnswerVisibleClaimInferenceMode = "full" | "result_only" | "none";
+
+export type FinalAnswerClaimEvaluationOptions = {
+  visibleClaimInference?: FinalAnswerVisibleClaimInferenceMode;
+  requireStructuredClaimContract?: boolean;
+};
+
 export const STRUCTURED_FINAL_ANSWER_CLAIM_PREFIX = "LinghunFinalAnswerClaims:";
 
 // D.13V-A — 按 claim 类型分级的 evidence 过期阈值（毫秒）。null 表示不应用过期判断。
@@ -1066,6 +1073,24 @@ export function extractStructuredFinalAnswerClaims(text: string): FinalAnswerCla
 }
 
 export { extractStructuredFinalAnswerClaims as detectHighRiskClaims };
+
+export function hasStructuredFinalAnswerClaimContract(text: string): boolean {
+  if (!text) return false;
+  const line = text
+    .split(/\r?\n/u)
+    .map((item) => item.trim())
+    .find((item) => item.includes(STRUCTURED_FINAL_ANSWER_CLAIM_PREFIX));
+  if (!line) return false;
+  const prefixIndex = line.indexOf(STRUCTURED_FINAL_ANSWER_CLAIM_PREFIX);
+  const payload = line.slice(prefixIndex + STRUCTURED_FINAL_ANSWER_CLAIM_PREFIX.length).trim();
+  if (!payload) return false;
+  try {
+    const parsed: unknown = JSON.parse(payload);
+    return Array.isArray(parsed) || (isPlainRecord(parsed) && Array.isArray(parsed.claims));
+  } catch {
+    return false;
+  }
+}
 
 function parseStructuredFinalAnswerClaims(text: string): FinalAnswerClaimMatch[] {
   if (!text) return [];
@@ -1565,9 +1590,13 @@ export function evaluateFinalAnswerClaims(
   text: string,
   evidence: EvidenceRecord[],
   now: Date = new Date(),
+  options: FinalAnswerClaimEvaluationOptions = {},
 ): FinalAnswerClaimVerdict {
   const visible = stripStructuredFinalAnswerClaims(text);
-  const inferred = inferVisibleFinalAnswerClaims(text);
+  const inferred = filterVisibleFinalAnswerClaims(
+    inferVisibleFinalAnswerClaims(text),
+    options.visibleClaimInference ?? "none",
+  );
   const visibleTargetedCodeFacts = inferred.filter(
     (claim) => claim.kind === "code_fact" && extractClaimTargets(claim).length > 0,
   );
@@ -1575,7 +1604,7 @@ export function evaluateFinalAnswerClaims(
     (claim) => claim.kind !== "architecture_boundary" && claim.kind !== "completeness",
   ).filter(
     (claim) => !isReadonlyAuditCompletionClaim(claim.kind, visible, claim.phrase),
-  ).filter(
+  ).map((claim) => enrichStructuredCodeFactClaimTargets(claim, visible)).filter(
     (claim) =>
       claim.kind !== "code_fact" ||
       extractClaimTargets(claim).length > 0 ||
@@ -1591,6 +1620,43 @@ export function evaluateFinalAnswerClaims(
     return true;
   });
   return evaluateStructuredFinalAnswerClaims(claims, evidence, now, text);
+}
+
+function enrichStructuredCodeFactClaimTargets(
+  claim: FinalAnswerClaimMatch,
+  visibleText: string,
+): FinalAnswerClaimMatch {
+  if (claim.kind !== "code_fact" || extractClaimTargets(claim).length > 0) {
+    return claim;
+  }
+  const phrase = claim.phrase.toLowerCase();
+  const clause = splitClaimClauses(visibleText).find((item) =>
+    item.toLowerCase().includes(phrase) && extractFileMentions(item).length > 0
+  );
+  return clause ? { ...claim, phrase: clause.trim() } : claim;
+}
+
+function filterVisibleFinalAnswerClaims(
+  claims: FinalAnswerClaimMatch[],
+  mode: FinalAnswerVisibleClaimInferenceMode,
+): FinalAnswerClaimMatch[] {
+  if (mode === "full") return claims;
+  if (mode === "none") return [];
+  return claims.filter((claim) => isResultBoundaryVisibleClaim(claim.kind));
+}
+
+function isResultBoundaryVisibleClaim(kind: FinalAnswerClaimKind): boolean {
+  return (
+    kind === "completion_claim" ||
+    kind === "test_claim" ||
+    kind === "file_change_claim" ||
+    kind === "verification_claim" ||
+    kind === "workflow_status_claim" ||
+    kind === "agent_status_claim" ||
+    kind === "completion_pass" ||
+    kind === "git_operation" ||
+    kind === "action_executed"
+  );
 }
 
 export function inferVisibleFinalAnswerClaims(text: string): FinalAnswerClaimMatch[] {

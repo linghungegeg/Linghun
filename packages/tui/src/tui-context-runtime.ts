@@ -283,6 +283,8 @@ export type PendingModelContinuation = {
     };
     commandFingerprint?: string;
     attemptedCommandFingerprints: Set<string>;
+    returnedDirectiveFingerprint?: string;
+    ignoredReturnedDirectiveFingerprints?: Set<string>;
     /** Request-local external stop for the currently planned evidence action. */
     externalBlockReason?: "permission_denied" | "user_cancelled";
   };
