@@ -4652,7 +4652,6 @@ export async function sendMessage(
           context,
           formatRawToolProtocolRetryFailure(context.language),
         );
-        replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
         break;
       }
 
@@ -4736,7 +4735,6 @@ export async function sendMessage(
               : "重复工具失败未能恢复，不声明未经证据支持的完成状态",
           );
           roundAssistantText = assistantText;
-          replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
           break;
         }
         if (reportWriteGuard && shouldSendReportEvidenceReminder(reportWriteGuard)) {
@@ -4784,7 +4782,6 @@ export async function sendMessage(
             );
             finalGateAssistantText = coherentDraft;
             roundAssistantText = coherentDraft;
-            replaceAssistantBlockContent(output, assistantStreamBlockId, coherentDraft);
             await appendSystemEvent(
               context,
               sessionId,
@@ -4885,11 +4882,6 @@ export async function sendMessage(
                     : undefined,
                 ),
               );
-              replaceAssistantBlockContent(
-                output,
-                assistantStreamBlockId,
-                currentFinalAssistantBlockText(assistantText, committedIntermediateAssistantText),
-              );
               break;
             }
             if (actionPlan.action === "downgrade_only") {
@@ -4914,11 +4906,6 @@ export async function sendMessage(
                 assistantText,
                 committedIntermediateAssistantText,
                 downgradedAnswer,
-              );
-              replaceAssistantBlockContent(
-                output,
-                assistantStreamBlockId,
-                currentFinalAssistantBlockText(assistantText, committedIntermediateAssistantText),
               );
               break;
             }
@@ -4964,7 +4951,6 @@ export async function sendMessage(
                   evidenceForCurrentVerificationScope(context),
                 );
                 roundAssistantText = assistantText;
-                replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
                 break;
               }
             } else {
@@ -5067,7 +5053,6 @@ export async function sendMessage(
               ? "the same tool failure repeated across rounds and reached the retry breaker"
               : "相同工具失败跨轮重复，已到达重试断路边界",
           );
-          replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
           break;
         }
       } else if (roundNeedsRealToolFallback) {
@@ -5172,7 +5157,7 @@ export async function sendMessage(
               role: "user",
               content: createFinalGateClaimAlignmentRewritePrompt(context.language),
             });
-            replaceAssistantBlockContent(output, assistantStreamBlockId, "");
+            discardAssistantBlock(output, assistantStreamBlockId);
             const rewrittenAssistantText = await streamFinalModelAnswerWithoutTools(
               {
                 messages: messagesForProvider,
@@ -5255,7 +5240,7 @@ export async function sendMessage(
               actionPlan,
               progressState: finalGapProgressState,
             });
-            replaceAssistantBlockContent(output, assistantStreamBlockId, "");
+            discardAssistantBlock(output, assistantStreamBlockId);
             const rewrittenAssistantText = await streamFinalModelAnswerWithoutTools(
               {
                 messages: messagesForProvider,
@@ -5306,20 +5291,10 @@ export async function sendMessage(
             );
           }
         }
-        replaceAssistantBlockContent(
-          output,
-          assistantStreamBlockId,
-          currentFinalAssistantBlockText(assistantText, committedIntermediateAssistantText),
-        );
       }
       const visibleAssistantText = stripStructuredFinalAnswerClaims(assistantText);
       if (visibleAssistantText !== assistantText) {
         assistantText = visibleAssistantText;
-        replaceAssistantBlockContent(
-          output,
-          assistantStreamBlockId,
-          currentFinalAssistantBlockText(assistantText, committedIntermediateAssistantText),
-        );
       }
       const evidenceCorrectedDraft = enforceSuccessfulToolCoherence(
         assistantTextBeforeFinalGate,
@@ -5347,7 +5322,6 @@ export async function sendMessage(
           committedIntermediateAssistantText,
           coherentAssistantText,
         );
-        replaceAssistantBlockContent(output, assistantStreamBlockId, coherentAssistantText);
       }
     }
     // D.14D — main-screen prompt hygiene：模型若把内部 system-prompt 字段
@@ -5360,11 +5334,6 @@ export async function sendMessage(
       const sanitized = sanitizeMainScreenLeakage(assistantText, context.language);
       if (sanitized !== assistantText) {
         assistantText = sanitized;
-        replaceAssistantBlockContent(
-          output,
-          assistantStreamBlockId,
-          currentFinalAssistantBlockText(assistantText, committedIntermediateAssistantText),
-        );
       }
       await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
         stepId: "output-presenter",
@@ -5391,20 +5360,11 @@ export async function sendMessage(
           evidenceForCurrentVerificationScope(context),
         ),
       );
-      replaceAssistantBlockContent(
-        output,
-        assistantStreamBlockId,
-        currentFinalAssistantBlockText(assistantText, committedIntermediateAssistantText),
-      );
     }
     const visibleAssistantBlockText = currentFinalAssistantBlockText(
       assistantText,
       committedIntermediateAssistantText,
     );
-    if (visibleAssistantBlockText) {
-      replaceAssistantBlockContent(output, assistantStreamBlockId, visibleAssistantBlockText);
-    }
-    if (await stopStaleRequest()) return;
     await context.store.appendEvent(sessionId, {
       type: "assistant_text_delta",
       id: assistantEventId,
@@ -5412,6 +5372,9 @@ export async function sendMessage(
       createdAt: new Date().toISOString(),
     }, requestOwnerIsCurrent);
     if (await stopStaleRequest()) return;
+    if (visibleAssistantBlockText) {
+      replaceAssistantBlockContent(output, assistantStreamBlockId, visibleAssistantBlockText);
+    }
     endAssistantStream(output);
     clearRequestActivity(context, { kind: "foreground", requestTurnId });
     writeFinalAssistantText(output, assistantText);
@@ -6366,6 +6329,12 @@ async function streamFinalModelAnswerWithoutTools(
   // 被 _write 的 ephemeral splice 淘汰，保证完整正文落到 keep:true block。
   const assistantStreamBlockId =
     reuseAssistantStreamBlockId ?? `assistant-stream-final-${randomUUID()}`;
+  const shouldExposeFinalNoToolsResult = !reuseAssistantStreamBlockId;
+  const maybeExposeFinalNoToolsResult = (text: string): void => {
+    if (shouldExposeFinalNoToolsResult) {
+      replaceAssistantBlockContent(output, assistantStreamBlockId, text);
+    }
+  };
   if (!reuseAssistantStreamBlockId) {
     beginAssistantStream(output, assistantStreamBlockId, { holdStableCommit: true });
   }
@@ -6482,15 +6451,17 @@ async function streamFinalModelAnswerWithoutTools(
       clearRequestActivity(context, activityOwner);
       const visibleText = textSanitizer.push(event.text);
       assistantText += visibleText;
-      pendingAssistantPreviewText += visibleText;
-      if (shouldFlushAssistantPreview(pendingAssistantPreviewText, lastAssistantPreviewFlushAt)) {
-        const result = flushAssistantPreviewDelta(
-          output,
-          assistantStreamBlockId,
-          pendingAssistantPreviewText,
-        );
-        pendingAssistantPreviewText = result.text;
-        if (result.flushed) lastAssistantPreviewFlushAt = Date.now();
+      if (shouldExposeFinalNoToolsResult) {
+        pendingAssistantPreviewText += visibleText;
+        if (shouldFlushAssistantPreview(pendingAssistantPreviewText, lastAssistantPreviewFlushAt)) {
+          const result = flushAssistantPreviewDelta(
+            output,
+            assistantStreamBlockId,
+            pendingAssistantPreviewText,
+          );
+          pendingAssistantPreviewText = result.text;
+          if (result.flushed) lastAssistantPreviewFlushAt = Date.now();
+        }
       }
       continue;
     }
@@ -6519,7 +6490,9 @@ async function streamFinalModelAnswerWithoutTools(
     if (event.type === "tool_use") {
       const visibleText = textSanitizer.flush();
       assistantText += visibleText;
-      pendingAssistantPreviewText += visibleText;
+      if (shouldExposeFinalNoToolsResult) {
+        pendingAssistantPreviewText += visibleText;
+      }
       await appendSystemEvent(
         context,
         sessionId,
@@ -6620,7 +6593,9 @@ async function streamFinalModelAnswerWithoutTools(
   if (requestIsStale()) return "";
   const finalVisibleText = textSanitizer.flush();
   assistantText += finalVisibleText;
-  pendingAssistantPreviewText += finalVisibleText;
+  if (shouldExposeFinalNoToolsResult) {
+    pendingAssistantPreviewText += finalVisibleText;
+  }
   if (textSanitizer.hadRawToolProtocol()) {
     ignoredRawToolProtocolText = true;
     assistantText = "";
@@ -6639,7 +6614,7 @@ async function streamFinalModelAnswerWithoutTools(
         context,
         formatRawToolProtocolRetryFailure(context.language),
       );
-      replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+      maybeExposeFinalNoToolsResult(assistantText);
     } else {
       const result = await recordProviderEmptyResponse(
         context,
@@ -6692,7 +6667,7 @@ async function streamFinalModelAnswerWithoutTools(
         startRequestActivity(output, context, "rewriting_final_answer", {
           ...(requestTurnId ? { requestTurnId } : {}),
         });
-        replaceAssistantBlockContent(output, assistantStreamBlockId, "");
+        discardAssistantBlock(output, assistantStreamBlockId);
         return streamFinalModelAnswerWithoutTools(
           continuation,
           context,
@@ -6757,7 +6732,7 @@ async function streamFinalModelAnswerWithoutTools(
           continuation.finalGapProgressState,
           finalGapMadeProgress,
         );
-        replaceAssistantBlockContent(output, assistantStreamBlockId, "");
+        discardAssistantBlock(output, assistantStreamBlockId);
         return streamFinalModelAnswerWithoutTools(
           continuation,
           context,
@@ -6781,15 +6756,15 @@ async function streamFinalModelAnswerWithoutTools(
           ? actionPlan.reason
           : undefined,
       );
-      replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+      maybeExposeFinalNoToolsResult(assistantText);
     }
     const visibleAssistantText = stripStructuredFinalAnswerClaims(assistantText);
     if (visibleAssistantText !== assistantText) {
       assistantText = visibleAssistantText;
-      replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+      maybeExposeFinalNoToolsResult(assistantText);
     }
-    if (pendingAssistantPreviewText || !reuseAssistantStreamBlockId) {
-      replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+    if (shouldExposeFinalNoToolsResult) {
+      maybeExposeFinalNoToolsResult(assistantText);
     }
   }
   // D.13V — 仅当我们自己 begin 的 stream 才负责 end；复用外层 id 时由外层 end。
@@ -7593,7 +7568,6 @@ export async function continueModelAfterToolResults(
           context,
           formatRawToolProtocolRetryFailure(context.language),
         );
-        replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
         break;
       }
       if (roundAssistantText || toolCalls.length > 0) {
@@ -7636,7 +7610,6 @@ export async function continueModelAfterToolResults(
               : "重复工具失败未能恢复，不声明未经证据支持的完成状态",
           );
           roundAssistantText = assistantText;
-          replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
           break;
         }
         if (!roundAssistantText) {
@@ -7723,7 +7696,6 @@ export async function continueModelAfterToolResults(
             );
             finalGateAssistantText = coherentDraft;
             roundAssistantText = coherentDraft;
-            replaceAssistantBlockContent(output, assistantStreamBlockId, coherentDraft);
             await appendSystemEvent(
               context,
               sessionId,
@@ -7825,11 +7797,6 @@ export async function continueModelAfterToolResults(
                     : undefined,
                 ),
               );
-              replaceAssistantBlockContent(
-                output,
-                assistantStreamBlockId,
-                currentFinalAssistantBlockText(assistantText, committedIntermediateAssistantText),
-              );
               break;
             }
             if (actionPlan.action === "downgrade_only") {
@@ -7854,11 +7821,6 @@ export async function continueModelAfterToolResults(
                 assistantText,
                 committedIntermediateAssistantText,
                 downgradedAnswer,
-              );
-              replaceAssistantBlockContent(
-                output,
-                assistantStreamBlockId,
-                currentFinalAssistantBlockText(assistantText, committedIntermediateAssistantText),
               );
               break;
             }
@@ -7904,7 +7866,6 @@ export async function continueModelAfterToolResults(
                   evidenceForCurrentVerificationScope(context),
                 );
                 roundAssistantText = assistantText;
-                replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
                 break;
               }
             } else {
@@ -7991,7 +7952,6 @@ export async function continueModelAfterToolResults(
               ? "the same tool failure repeated across rounds and reached the retry breaker"
               : "相同工具失败跨轮重复，已到达重试断路边界",
           );
-          replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
           break;
         }
       } else if (roundNeedsRealToolFallback) {
@@ -8083,7 +8043,7 @@ export async function continueModelAfterToolResults(
                 role: "user",
                 content: createFinalGateClaimAlignmentRewritePrompt(context.language),
               });
-              replaceAssistantBlockContent(output, assistantStreamBlockId, "");
+              discardAssistantBlock(output, assistantStreamBlockId);
               const rewrittenAssistantText = await streamFinalModelAnswerWithoutTools(
                 continuation,
                 context,
@@ -8160,7 +8120,7 @@ export async function continueModelAfterToolResults(
               );
               continuation.finalAnswerEvidenceActionRetries = finalAnswerEvidenceActionRetries;
               continuation.finalGapProgressState = finalGapProgressState;
-              replaceAssistantBlockContent(output, assistantStreamBlockId, "");
+              discardAssistantBlock(output, assistantStreamBlockId);
               const rewrittenAssistantText = await streamFinalModelAnswerWithoutTools(
                 continuation,
                 context,
@@ -8199,20 +8159,10 @@ export async function continueModelAfterToolResults(
               );
             }
             }
-            replaceAssistantBlockContent(
-              output,
-              assistantStreamBlockId,
-              currentFinalAssistantBlockText(assistantText, committedIntermediateAssistantText),
-            );
         }
         const visibleAssistantText = stripStructuredFinalAnswerClaims(assistantText);
         if (visibleAssistantText !== assistantText) {
           assistantText = visibleAssistantText;
-          replaceAssistantBlockContent(
-            output,
-            assistantStreamBlockId,
-            currentFinalAssistantBlockText(assistantText, committedIntermediateAssistantText),
-          );
         }
         const evidenceCorrectedDraft = enforceSuccessfulToolCoherence(
           assistantTextBeforeFinalGate,
@@ -8239,7 +8189,6 @@ export async function continueModelAfterToolResults(
             committedIntermediateAssistantText,
             coherentAssistantText,
           );
-          replaceAssistantBlockContent(output, assistantStreamBlockId, coherentAssistantText);
         }
       }
       // D.14D — main-screen prompt hygiene（与 sendMessage 同款），continuation 路径
@@ -8249,11 +8198,6 @@ export async function continueModelAfterToolResults(
         const sanitized = sanitizeMainScreenLeakage(assistantText, context.language);
         if (sanitized !== assistantText) {
           assistantText = sanitized;
-          replaceAssistantBlockContent(
-            output,
-            assistantStreamBlockId,
-            currentFinalAssistantBlockText(assistantText, committedIntermediateAssistantText),
-          );
         }
       }
       const finalVisibleGate = evaluateAggregatedFinalAnswerGate(
@@ -8272,20 +8216,11 @@ export async function continueModelAfterToolResults(
             evidenceForCurrentVerificationScope(context),
           ),
         );
-        replaceAssistantBlockContent(
-          output,
-          assistantStreamBlockId,
-          currentFinalAssistantBlockText(assistantText, committedIntermediateAssistantText),
-        );
       }
       const visibleAssistantBlockText = currentFinalAssistantBlockText(
         assistantText,
         committedIntermediateAssistantText,
       );
-      if (visibleAssistantBlockText) {
-        replaceAssistantBlockContent(output, assistantStreamBlockId, visibleAssistantBlockText);
-      }
-      if (await stopStaleContinuation()) return;
       await context.store.appendEvent(sessionId, {
         type: "assistant_text_delta",
         id: assistantEventId,
@@ -8293,6 +8228,9 @@ export async function continueModelAfterToolResults(
         createdAt: new Date().toISOString(),
       }, requestOwnerIsCurrent);
       if (await stopStaleContinuation()) return;
+      if (visibleAssistantBlockText) {
+        replaceAssistantBlockContent(output, assistantStreamBlockId, visibleAssistantBlockText);
+      }
       endAssistantStream(output);
       clearRequestActivity(context, { kind: "foreground", requestTurnId });
       writeFinalAssistantText(output, assistantText);

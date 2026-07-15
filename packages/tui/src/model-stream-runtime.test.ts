@@ -6732,6 +6732,146 @@ describe("final answer gate aggregation", () => {
     expect(serializedEvents).not.toContain("final_answer_gap_action dispatch");
   });
 
+  it("keeps reused final-no-tools downgrade hidden until the outer final commit", async () => {
+    const { context } = await makeSendMessageContext();
+    const requestTurnId = "turn-final-no-tools-reuse";
+    context.currentRequestTurnId = requestTurnId;
+    const blocks: Parameters<typeof createShellBlockOutputForTest>[1] = [];
+    const output = createShellBlockOutputForTest(context, blocks);
+    const assistantBlockId = "assistant-final-no-tools-reuse";
+    output.beginAssistantStream(assistantBlockId, { holdStableCommit: true });
+    const gateway = gatewayByTurn([
+      [
+        {
+          type: "assistant_text_delta",
+          text: withClaims("测试已经通过。", [
+            { kind: "completion_pass", phrase: "测试已经通过" },
+          ]),
+        },
+        { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+      ],
+    ], { count: 0 });
+
+    const cleaned = await __testStreamFinalModelAnswerWithoutTools(
+      {
+        messages: [{ role: "user", content: "给出最终清洗回答" }],
+        provider: "deepseek",
+        model: "deepseek-chat",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+        originalUserText: "给出最终清洗回答",
+        requestTurnId,
+        abortSignal: new AbortController().signal,
+      },
+      context,
+      gateway,
+      context.sessionId!,
+      output,
+      new AbortController().signal,
+      assistantBlockId,
+    );
+
+    expect(cleaned).toContain("本请求未能证实");
+    expect(JSON.stringify(blocks)).not.toContain("本请求未能证实");
+    expect(context.lastFullOutput).toBeUndefined();
+    expect(context.transcriptSource?.cells.some((cell) => cell.kind === "assistant") ?? false)
+      .toBe(false);
+
+    output.replaceAssistantBlockContent(assistantBlockId, cleaned);
+    output.endAssistantStream();
+
+    expect(blocks.find((block) => block.id === assistantBlockId)?.fullText).toBe(cleaned);
+    expect(context.lastFullOutput).toBe(cleaned);
+  });
+
+  it.each(["main", "continuation"] as const)(
+    "does not expose a final-gate downgraded candidate before assistant event commit in %s",
+    async (entry) => {
+      const { context, events } = await makeSendMessageContext();
+      context.permissionMode = "plan";
+      context.lastMetaSchedulerDecision = {
+        shouldRunFinalAnswerGate: true,
+        shouldCaptureFailureLearning: false,
+        shouldPreferVerifier: false,
+        shouldUseRetryGuard: false,
+        shouldCompactBeforeProvider: false,
+        shouldStopForBlockedRuntime: false,
+        indexStrategy: "ready",
+        directives: [],
+        internalEvents: [],
+        policyDecision: {
+          taskKind: "edit",
+          executionPlan: { requireVerification: true },
+          permissionSignal: { expectedMutating: true },
+          permissionPlan: { expectedMutating: true },
+        },
+      } as never;
+      const blocks: Parameters<typeof createShellBlockOutputForTest>[1] = [];
+      const output = createShellBlockOutputForTest(context, blocks);
+      let beforeCommitBlocks = "";
+      let beforeCommitLastFullOutput: string | undefined;
+      let beforeCommitTranscriptSource = "";
+      let sawAssistantAppend = false;
+      const appendEvent = context.store.appendEvent.bind(context.store);
+      context.store.appendEvent = async (sessionId, event, commitGuard) => {
+        if ((event as { type?: string }).type === "assistant_text_delta") {
+          sawAssistantAppend = true;
+          beforeCommitBlocks = JSON.stringify(blocks);
+          beforeCommitLastFullOutput = context.lastFullOutput;
+          beforeCommitTranscriptSource = JSON.stringify(context.transcriptSource?.cells ?? []);
+        }
+        await appendEvent(sessionId, event, commitGuard);
+      };
+      const rawDraft = withClaims("已完成。", [
+        { kind: "completion_claim", phrase: "已完成" },
+      ]);
+      const gateway = gatewayByTurn([
+        [
+          { type: "assistant_text_delta", text: rawDraft },
+          { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+        ],
+        [
+          { type: "assistant_text_delta", text: rawDraft },
+          { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+        ],
+      ], { count: 0 });
+
+      if (entry === "main") {
+        await __testSendMessage("修改后给出最终结果", context, gateway, output);
+      } else {
+        await continueModelAfterToolResults(
+          {
+            messages: [{ role: "user", content: "修改后给出最终结果" }],
+            provider: "deepseek",
+            model: "deepseek-chat",
+            endpointProfile: "chat_completions",
+            reasoningSent: false,
+            originalUserText: "修改后给出最终结果",
+          },
+          context,
+          gateway,
+          output,
+        );
+      }
+
+      expect(sawAssistantAppend).toBe(true);
+      expect(beforeCommitBlocks).not.toContain(rawDraft);
+      expect(beforeCommitBlocks).not.toContain("已完成");
+      expect(beforeCommitBlocks).not.toContain("本请求未能证实");
+      expect(beforeCommitLastFullOutput ?? "").not.toContain(rawDraft);
+      expect(beforeCommitLastFullOutput ?? "").not.toContain("已完成");
+      expect(beforeCommitLastFullOutput ?? "").not.toContain("本请求未能证实");
+      expect(beforeCommitTranscriptSource).not.toContain(rawDraft);
+      expect(beforeCommitTranscriptSource).not.toContain("已完成");
+      expect(beforeCommitTranscriptSource).not.toContain("本请求未能证实");
+      expect(JSON.stringify(blocks)).toContain("本请求未能证实");
+      expect(JSON.stringify(blocks)).not.toContain(rawDraft);
+      expect(JSON.stringify(events)).toContain("本请求未能证实");
+      expect(JSON.stringify(events)).not.toContain(rawDraft);
+      expect(context.lastFullOutput).toContain("本请求未能证实");
+    },
+  );
+
   it("closes a shrinking final gap identically in main and continuation loops", async () => {
     const runCase = async (entry: "main" | "continuation") => {
       const { context, events } = await makeSendMessageContext();
