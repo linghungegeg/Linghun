@@ -1477,9 +1477,13 @@ async function createFinalGapEvidenceToolCall(
       context.projectPath,
       changedFiles,
     );
-    const step = (await createVerificationPlan(verificationCwd, "default")).find(
-      (candidate) => candidate.kind === level,
-    );
+    const plan = level === "test" && changedFiles.length > 0
+      ? await createVerificationPlan(context.projectPath, "focused", {
+          workspaceRoot: context.projectPath,
+          changedFiles,
+        })
+      : await createVerificationPlan(verificationCwd, "default");
+    const step = plan.find((candidate) => candidate.kind === level);
     if (!step) return undefined;
     input = {
       command: step.command,

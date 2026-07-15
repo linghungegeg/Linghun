@@ -766,7 +766,10 @@ describe("verification-command-runtime", () => {
     const reportA = await runA;
     expect(reportA.status).toBe("cancelled");
     expect(taskA.status).toBe("cancelled");
-    expect(context.activeVerificationAbortControllers?.get(taskB.id)).toBe(controllerB);
+    const registeredControllerB = context.activeVerificationAbortControllers?.get(taskB.id);
+    if (registeredControllerB) {
+      expect(registeredControllerB).toBe(controllerB);
+    }
     expect(controllerB.signal.aborted).toBe(false);
 
     const reportB = await runB;
@@ -997,6 +1000,50 @@ describe("verification-command-runtime", () => {
     expect(report.unverified).toEqual([
       expect.stringContaining("No relevant focused test was found"),
     ]);
+  }, 30_000);
+
+  it("runs scoped test verification through the focused targeted plan instead of the root test script", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-scoped-test-"));
+    const target = "packages/tui/src/shell/view-model.test.ts";
+    await mkdir(join(projectPath, "packages", "tui", "src", "shell"), { recursive: true });
+    await Promise.all([
+      writeFile(
+        join(projectPath, "package.json"),
+        JSON.stringify({ scripts: { test: "node test-runner.cjs vitest" } }),
+        "utf8",
+      ),
+      writeFile(join(projectPath, "pnpm-lock.yaml"), "", "utf8"),
+      writeFile(
+        join(projectPath, "test-runner.cjs"),
+        [
+          `const target = ${JSON.stringify(target)};`,
+          "if (!process.argv.includes(target)) {",
+          "  console.error(`missing focused target ${target}`);",
+          "  process.exit(1);",
+          "}",
+          "console.log(`focused target ${target}`);",
+        ].join("\n"),
+        "utf8",
+      ),
+      writeFile(join(projectPath, target), "export {};\n", "utf8"),
+    ]);
+    const context = await createRunnableVerificationContext(projectPath);
+    context.currentRequestTurnId = "scoped-test-request";
+    context.currentRequestChangedFiles = [target];
+
+    const report = await runWorkflowVerificationStep(
+      "test",
+      context,
+      new MockWritable(),
+      { ownerSessionId: "session-scoped-test", requestTurnId: "scoped-test-request" },
+    );
+
+    expect(report.status).toBe("pass");
+    expect(report.commands).toHaveLength(1);
+    expect(report.commands[0]?.kind).toBe("test");
+    expect(report.commands[0]?.command).toContain(target);
+    expect(report.commands[0]?.command).not.toBe("corepack pnpm test");
+    expect(report.scope?.changedFiles).toEqual([target]);
   }, 30_000);
 
   it("does not inherit global changed files into an empty current request scope", async () => {

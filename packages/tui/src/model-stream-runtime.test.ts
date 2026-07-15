@@ -6140,6 +6140,58 @@ describe("final answer gate aggregation", () => {
     expect(plan.reason).toBe("final_gate_no_new_evidence_path");
   });
 
+  it.each(["chat", "code_fact"] as const)(
+    "does not turn %s final-gap claims into current-request verification",
+    (taskKind) => {
+      const context = {
+        ...makeGateContext(),
+        permissionMode: "full-access",
+        language: "zh-CN",
+        lastMetaSchedulerDecision: {
+          policyDecision: { taskKind },
+        },
+      };
+      const result = evaluateAggregatedFinalAnswerGate(
+        context as never,
+        withClaims("上一轮已完成。", [{ kind: "completion_claim", phrase: "已完成" }]),
+        false,
+      );
+
+      expect(result.status).toBe("needs_disclaimer");
+      if (result.status !== "needs_disclaimer") return;
+      const plan = planFinalGateEvidenceGapAction({
+        result,
+        context: context as never,
+        userText: "上一轮完成了吗？",
+      });
+      expect(plan.action).toBe("downgrade_only");
+      expect(plan.reason).toBe("non_executable_request_evidence_gap");
+      expect(plan.evidenceAction).toBeUndefined();
+    },
+  );
+
+  it.each(["chat", "code_fact"] as const)(
+    "does not require verification for ordinary %s answers without pass claims",
+    (taskKind) => {
+      const context = {
+        ...makeGateContext(),
+        permissionMode: "full-access",
+        language: "zh-CN",
+        lastMetaSchedulerDecision: {
+          policyDecision: { taskKind },
+        },
+      };
+
+      const result = evaluateAggregatedFinalAnswerGate(
+        context as never,
+        "这个函数在读取状态后返回展示文本。",
+        true,
+      );
+
+      expect(result.status).toBe("passed");
+    },
+  );
+
   it("does not turn a historical question into current-request verification", () => {
     const context = {
       ...makeGateContext(),
@@ -6211,6 +6263,35 @@ describe("final answer gate aggregation", () => {
       toolName: "RunVerification",
       input: { level: "test" },
     });
+  });
+
+  it("keeps scoped test final-gap actions at test level for focused runner selection", () => {
+    const context = {
+      ...makeGateContext(),
+      permissionMode: "full-access",
+      language: "zh-CN",
+      currentRequestChangedFiles: ["packages/tui/src/shell/view-model.test.ts"],
+      currentRequestMentionedFiles: [],
+    };
+    const result = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      withClaims("测试通过。", [{ kind: "completion_pass", phrase: "测试通过" }]),
+      false,
+    );
+
+    expect(result.status).toBe("needs_disclaimer");
+    if (result.status !== "needs_disclaimer") return;
+    const plan = planFinalGateEvidenceGapAction({
+      result,
+      context: context as never,
+      userText: "继续修复",
+    });
+    expect(plan.action).toBe("verification_request");
+    expect(plan.evidenceAction).toMatchObject({
+      toolName: "RunVerification",
+      input: { level: "test" },
+    });
+    expect(plan.evidenceAction?.input).not.toHaveProperty("command");
   });
 
   it("keeps gathering verification evidence after an attempt that did not prove pass", () => {
@@ -6998,10 +7079,20 @@ describe("final answer gate aggregation", () => {
       context.permissionMode = "full-access";
       await writeFile(
         join(context.projectPath, "package.json"),
-        JSON.stringify({ private: true, scripts: { test: "node focused-check.cjs" } }),
+        JSON.stringify({ private: true, scripts: { test: "node focused-check.cjs vitest" } }),
         "utf8",
       );
-      await writeFile(join(context.projectPath, "focused-check.cjs"), "process.exit(1);\n", "utf8");
+      await writeFile(
+        join(context.projectPath, "focused-check.cjs"),
+        [
+          "const { readFileSync } = require('node:fs');",
+          "const target = process.argv.find((arg) => arg.endsWith('.test.ts')) ?? 'focused-check.test.ts';",
+          "const text = readFileSync(target, 'utf8');",
+          "process.exit(text.includes('process.exit(0)') ? 0 : 1);",
+        ].join("\n"),
+        "utf8",
+      );
+      await writeFile(join(context.projectPath, "focused-check.test.ts"), "process.exit(1);\n", "utf8");
       let rounds = 0;
       const gateway = {
         async *stream() {
@@ -7018,7 +7109,7 @@ describe("final answer gate aggregation", () => {
               type: "tool_use",
               id: `${entry}-read-check`,
               name: "Read",
-              input: { path: "focused-check.cjs" },
+              input: { path: "focused-check.test.ts" },
             } as const;
           } else if (rounds === 4) {
             yield {
@@ -7026,7 +7117,7 @@ describe("final answer gate aggregation", () => {
               id: `${entry}-edit-check`,
               name: "Edit",
               input: {
-                path: "focused-check.cjs",
+                path: "focused-check.test.ts",
                 oldText: "process.exit(1);",
                 newText: "process.exit(0);",
               },
@@ -7073,7 +7164,7 @@ describe("final answer gate aggregation", () => {
 
       expect(rounds).toBeLessThanOrEqual(8);
       expect(
-        await readFile(join(context.projectPath, "focused-check.cjs"), "utf8"),
+        await readFile(join(context.projectPath, "focused-check.test.ts"), "utf8"),
         output.text,
       ).toContain("process.exit(0)");
       const serializedEvents = JSON.stringify(events);
@@ -8336,6 +8427,56 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
             requestTurnId: "turn-1",
             cwd: "/test",
             changedFiles: [],
+          },
+        },
+      } as unknown as EvidenceRecord);
+
+      expect(__testFinalGapHasProgress(result, context, previous)).toBe(true);
+    });
+
+    it("counts scoped focused test pass evidence as matching progress", () => {
+      const target = "packages/tui/src/shell/view-model.test.ts";
+      const context = {
+        evidence: [],
+        currentRequestTurnId: "turn-1",
+        sessionId: "session-1",
+        projectPath: "/test",
+        currentRequestChangedFiles: [target],
+        currentRequestMentionedFiles: [],
+        tools: { changedFiles: [] },
+      } as unknown as TuiContext;
+      const result = {
+        status: "needs_disclaimer" as const,
+        unsupportedKinds: ["test_claim"],
+      };
+      const evidenceAction = {
+        toolName: "RunVerification",
+        input: { level: "test" },
+        summary: "run focused test",
+      } as const;
+      const previous = __testCaptureFinalGapProgressState(
+        result,
+        context,
+        evidenceAction,
+      );
+      context.evidence.push({
+        id: "matching-focused-test-pass",
+        kind: "test_result",
+        source: "Verification Runner",
+        summary: "focused test passed",
+        supportsClaims: ["test_passed"],
+        ownerScope: {
+          requestTurnId: "turn-1",
+          ownerSessionId: "session-1",
+          cwd: "/test",
+        },
+        data: {
+          verificationScope: {
+            ownerKey: "request:session-1:turn-1",
+            ownerSessionId: "session-1",
+            requestTurnId: "turn-1",
+            cwd: "/test",
+            changedFiles: [target],
           },
         },
       } as unknown as EvidenceRecord);

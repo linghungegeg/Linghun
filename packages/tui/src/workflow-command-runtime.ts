@@ -2867,9 +2867,22 @@ export async function runWorkflowVerificationStep(
     }
     return report;
   }
+  const shouldUseRequestScopedTestPlan =
+    level === "test" &&
+    changedFiles.length > 0 &&
+    Boolean(options.requestTurnId) &&
+    !options.workflowRunId;
+  const scopedTestPlan = shouldUseRequestScopedTestPlan
+    ? (await createVerificationPlan(verificationRoot, "focused", {
+        workspaceRoot: verificationRoot,
+        changedFiles,
+      })).filter((step) => step.kind === "test")
+    : undefined;
   const plan =
     level === "smoke" || level === "focused" || level === "real-smoke"
       ? await createVerificationPlan(verificationCwd, "smoke")
+      : scopedTestPlan !== undefined
+        ? scopedTestPlan
       : (await createVerificationPlan(verificationCwd, "default")).filter(
           (step) => step.kind === level,
         );
@@ -2881,9 +2894,26 @@ export async function runWorkflowVerificationStep(
         })
       : level === "real-smoke"
         ? await createVerificationPlan(verificationCwd, "real-smoke")
+        : scopedTestPlan !== undefined
+          ? scopedTestPlan
         : plan.length > 0
           ? plan
           : await createVerificationPlan(verificationCwd, "smoke");
+  if (shouldUseRequestScopedTestPlan && effectivePlan.length === 0) {
+    const report = createVerificationUnavailableReport(
+      "focused",
+      "the current changed-files scope has no executable focused test verification.",
+    );
+    report.scope = verificationScope;
+    if (options.publishResult !== false && ownerStillValid()) {
+      await recordVerificationEvidence(context, sessionId, report, {
+        rememberInContext: canPublishToCurrentSession(),
+        commitGuard: ownerStillValid,
+      });
+      if (canPublishToCurrentSession()) context.lastVerification = report;
+    }
+    return report;
+  }
   if ((level === "real-smoke" || level === "focused") && effectivePlan.length === 0) {
     const report = createVerificationUnavailableReport(
       level,
