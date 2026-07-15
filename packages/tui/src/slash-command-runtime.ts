@@ -2048,6 +2048,12 @@ configureWorkflowCommandRuntime({
   rememberEvidence,
   handleSlashCommand,
   handleToolCommand,
+  executePreVerify: (context, changedFiles, options) =>
+    executeExtraTool(
+      { tool_name: "pre_verify", params: { changed_files: changedFiles } },
+      context,
+      { signal: options.signal, firstClassPreEngine: true },
+    ),
   createSilentOutput,
 });
 

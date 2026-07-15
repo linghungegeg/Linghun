@@ -9,7 +9,7 @@ import {
 import {
   calculateContextPercentages,
   formatContextProgressBar,
-  getNativeContextWindowForModel,
+  getContextWindowForModel,
 } from "../context-window-runtime.js";
 import type { BackgroundTaskState, TuiContext } from "../index.js";
 import { formatElapsedSince } from "../job-runner-presenter.js";
@@ -327,6 +327,12 @@ export function createShellViewModel(
         ? [...liveOutputBlocks, expandedSourceBlock]
         : liveOutputBlocks
       : (sourceOutputBlocks ?? liveOutputBlocks);
+    const recoveryScanBlocks = createFailureRecoveryScanBlocks({
+      nativeScrollback,
+      transcriptSource: options.transcriptSource,
+      liveOutputBlocks,
+      allOutputBlocks,
+    });
     // D.13Q-UX Real Smoke Fix v3 — transcript 必须严格按 append 时间顺序排列。
     // 旧实现 [...failBlocks, ...keepBlocks, ...ephemeralBlocks] 会按类型重排，
     // 让失败块插队到旧消息上方、ephemeral 推到 keep 后面，破坏 user → assistant
@@ -375,7 +381,7 @@ export function createShellViewModel(
     let latestProviderFailureBlockId: string | undefined;
     let latestToolFailureBlockId: string | undefined;
     let latestProviderFailureRecovered = false;
-    for (const block of allOutputBlocks) {
+    for (const block of recoveryScanBlocks) {
       if (block.messageKind === "compact_boundary") {
         activeCompactBoundaryBlockIds.add(block.id);
         continue;
@@ -535,7 +541,8 @@ export function createShellViewModel(
   // dim/warning 语义；setup-needed 时 model 显示 dim "--"，避免兜底 deepseek-chat
   // 流到主屏。
   const cyclePermHint = language === "en-US" ? "(Shift+Tab switch mode)" : "（Shift+Tab 切换模式）";
-  const currentContextWindowTokens = getNativeContextWindowForModel(context.model);
+  const executorRoute = context.config.modelRoutes?.routes?.find((route) => route.role === "executor");
+  const currentContextWindowTokens = getContextWindowForModel(context.model, executorRoute);
   const taskFooter: TaskFooterView | undefined = buildTaskFooterView({
     language,
     width,
@@ -1389,14 +1396,26 @@ export function createCompactBoundaryBlock(
   preChars: number,
   postChars: number,
   language: Language,
+  details?: { triggerChars?: number; reason?: string },
 ): ProductBlockViewModel {
   const freedPct = preChars > 0 ? Math.round(((preChars - postChars) / preChars) * 100) : 0;
   const freedK = Math.max(0, Math.round((preChars - postChars) / 1024));
+  const preK = formatCompactBoundaryK(preChars);
+  const postK = formatCompactBoundaryK(postChars);
+  const triggerK = details?.triggerChars !== undefined
+    ? formatCompactBoundaryK(details.triggerChars)
+    : undefined;
+  const reason = details?.reason ? formatCompactBoundaryReason(details.reason, language) : undefined;
+  const detailSuffix = triggerK
+    ? language === "en-US"
+      ? ` · ${preK}->${postK} chars / trigger ${triggerK}${reason ? ` / ${reason}` : ""}`
+      : ` · ${preK}->${postK} 字符 / 触发线 ${triggerK}${reason ? ` / ${reason}` : ""}`
+    : "";
   const copy = shellText[language];
   const title =
     language === "en-US"
-      ? `Conversation compacted · ~${freedK}K chars freed (${freedPct}%)`
-      : `对话已压缩 · 释放约 ${freedK}K 字符 (${freedPct}%)`;
+      ? `Conversation compacted · ~${freedK}K chars freed (${freedPct}%)${detailSuffix}`
+      : `对话已压缩 · 释放约 ${freedK}K 字符 (${freedPct}%)${detailSuffix}`;
   return {
     id: `compact-boundary-${Date.now()}`,
     kind: "details",
@@ -1405,6 +1424,16 @@ export function createCompactBoundaryBlock(
     summary: "",
     messageKind: "compact_boundary",
   };
+}
+
+function formatCompactBoundaryK(chars: number): string {
+  return `${Math.max(0, Math.round(chars / 1024))}K`;
+}
+
+function formatCompactBoundaryReason(reason: string, language: Language): string {
+  if (reason === "reactive") return language === "en-US" ? "reactive" : "响应式";
+  if (reason === "manual") return language === "en-US" ? "manual" : "手动";
+  return language === "en-US" ? "auto" : "自动";
 }
 
 /**
@@ -2424,6 +2453,27 @@ function isKnownSlashCommand(command: string): boolean {
   return Boolean(head && KNOWN_SLASH_COMMANDS.has(head));
 }
 
+function createFailureRecoveryScanBlocks(input: {
+  nativeScrollback: boolean;
+  transcriptSource?: TranscriptSource;
+  liveOutputBlocks: ProductBlockViewModel[];
+  allOutputBlocks: ProductBlockViewModel[];
+}): ProductBlockViewModel[] {
+  if (!input.nativeScrollback || !input.transcriptSource?.cells.length) {
+    return input.allOutputBlocks;
+  }
+  const seen = new Set<string>();
+  const blocks: ProductBlockViewModel[] = [];
+  for (const cell of input.transcriptSource.cells) {
+    blocks.push(cell.block);
+    seen.add(cell.block.id);
+  }
+  for (const block of input.liveOutputBlocks) {
+    if (!seen.has(block.id)) blocks.push(block);
+  }
+  return blocks;
+}
+
 function isProviderFailureOutputBlock(block: ProductBlockViewModel, language: Language): boolean {
   void language;
   return block.messageKind === "tool_result_error" && block.failureDomain === "provider";
@@ -2538,9 +2588,7 @@ function buildTaskSuggestions(inputs: {
     .slice(0, 4);
 }
 
-type FooterContextUsageInput = ReturnType<typeof calculateContextPercentages> & {
-  savingsRatio?: number;
-};
+type FooterContextUsageInput = ReturnType<typeof calculateContextPercentages>;
 
 function selectFooterContextUsage(
   context: TuiContext,
@@ -2553,7 +2601,6 @@ function selectFooterContextUsage(
       Math.ceil(usage.estimatedChars / 4),
       currentContextWindowTokens,
     ),
-    savingsRatio: usage.savingsRatio,
   };
 }
 
@@ -2636,12 +2683,10 @@ function formatFooterContextUsage(
   const label = language === "en-US" ? "ctx" : "上下文";
   const percent = `${Math.round(contextUsage.ratio * 100)}%`;
   const tokenWindow = `(${formatFooterContextTokens(contextUsage.usedTokens)}/${formatFooterContextTokens(contextUsage.maxTokens)})`;
-  const savings = formatFooterContextSavings(contextUsage.savingsRatio);
-  const suffix = savings ? ` ${savings}` : "";
   return {
-    wide: `${label} ${percent} ${tokenWindow}${suffix}`,
-    narrow: `${label} ${percent} ${tokenWindow}${suffix}`,
-    minimal: `${label} ${percent}${suffix}`,
+    wide: `${label} ${percent} ${tokenWindow}`,
+    narrow: `${label} ${percent} ${tokenWindow}`,
+    minimal: `${label} ${percent}`,
     ratio: contextUsage.ratio,
   };
 }
@@ -2652,13 +2697,6 @@ function formatFooterContextTokens(value: number): string {
   if (safeValue >= 1_000_000) return `${Math.round(safeValue / 100_000) / 10}m`;
   if (safeValue >= 1_000) return `${Math.round(safeValue / 1_000)}k`;
   return String(safeValue);
-}
-
-function formatFooterContextSavings(savingsRatio: number | undefined): string | undefined {
-  if (savingsRatio === undefined || !Number.isFinite(savingsRatio) || savingsRatio <= 0) {
-    return undefined;
-  }
-  return `↓${Math.round(Math.min(1, savingsRatio) * 100)}%`;
 }
 
 function formatFooterCache(language: Language, status: FooterCacheStatus): string {

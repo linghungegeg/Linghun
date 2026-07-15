@@ -960,6 +960,32 @@ describe("Meta scheduler runtime", () => {
     expect(decision.policyDecision.hints.map((hint) => hint.id)).toContain("source-first");
   });
 
+  it("keeps readonly audits with verification terms on the source-fact route", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText:
+        "只读审计 final gate、验证证据和测试证据链路；不要修改代码，不要跑 test、build、typecheck。",
+    });
+
+    expect(decision.policyDecision.taskKind).toBe("code_fact");
+    expect(decision.policyDecision.executionPlan.preferSourceFirst).toBe(true);
+    expect(decision.policyDecision.executionPlan.requireVerification).toBe(false);
+    expect(decision.policyDecision.verificationSignal.route.domain).not.toBe("code_change");
+    expect(decision.shouldRunFinalAnswerGate).toBe(false);
+    expect(decision.orchestrationPlan.steps.map((step) => step.id)).not.toContain("verification");
+  });
+
+  it("keeps explicit verification execution requests on the verification route", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "运行 focused verification 检查当前改动。",
+    });
+
+    expect(decision.policyDecision.taskKind).toBe("verification");
+    expect(decision.policyDecision.executionPlan.requireVerification).toBe(true);
+    expect(decision.orchestrationPlan.steps.map((step) => step.id)).toContain("verification");
+  });
+
   it("suggests verifier/planner roles without changing the selected model route", () => {
     const verifierDecision = evaluateMetaScheduler({
       ...baseInput(),

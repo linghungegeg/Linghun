@@ -233,6 +233,18 @@ function t(key: string, language: "zh-CN" | "en-US"): string {
   return WORKFLOW_STEP_TITLES[language]?.[key] ?? key;
 }
 
+function hasExplicitVerificationRunIntent(text: string): boolean {
+  return text.split(/[\r\n。！？!?；;，,]+/u).some(
+    (clause) =>
+      /(?:运行|执行|跑|进行|run|execute).{0,24}(?:验证|测试|verification|tests?|type[-\s]?check|lint|build)/iu.test(
+        clause,
+      ) &&
+      !/(?:不要|别|不准|禁止|先别|不)\s*(?:再|继续|重新)?\s*(?:运行|执行|跑|进行)|(?:do\s+not|don't|dont|no)\s+(?:run|execute)/iu.test(
+        clause,
+      ),
+  );
+}
+
 function buildSlicesForGoal(
   goal: string,
   permissionMode: PermissionMode,
@@ -241,7 +253,9 @@ function buildSlicesForGoal(
   const lang = options.language ?? "zh-CN";
   const constraints = parseUserActionConstraints(goal);
   const readonlyAuditGoal = isReadonlyAuditGoal(goal);
-  const verificationAdviceOnly = forbidsVerificationEvidence(constraints);
+  const verificationAdviceOnly =
+    forbidsVerificationEvidence(constraints) ||
+    (readonlyAuditGoal && !hasExplicitVerificationRunIntent(goal));
   const multiSliceGoal =
     options.multiAgent ||
     (options.requestedAgents ?? 0) > 1 ||

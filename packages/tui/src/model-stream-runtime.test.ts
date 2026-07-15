@@ -15,6 +15,7 @@ import {
 import {
   __testApplyPromptCacheKey,
   __testBuildModelMessagesWithRecentContext,
+  __testActivateReadonlyEvidenceCarryover,
   __testCurrentVerificationReportForRequest,
   __testPrepareMessagesForProviderPreflightWithActivity,
   __testScheduleApiTokenCountDiagnostics,
@@ -62,6 +63,7 @@ import type { TuiContext } from "./tui-context-runtime.js";
 import { createShellBlockOutputForTest } from "./tui-output-surface.js";
 import { writeMemoryLearningMode } from "./tui-memory-runtime.js";
 import type { EvidenceRecord } from "./tui-data-types.js";
+import { parseUserActionConstraints } from "./user-action-constraints.js";
 import {
   createCacheState,
   createMcpState,
@@ -1203,6 +1205,54 @@ describe("continuation abort ownership", () => {
       expect.objectContaining({
         type: "assistant_text_delta",
         text: "验证通过。",
+      }),
+    );
+  }, 30_000);
+
+  it("reuses the interrupted request owner for a natural audit-result follow-up", async () => {
+    const { context, events } = await makeSendMessageContext();
+    const requestContextIds: Array<string | undefined> = [];
+    const interruptedTurnId = "interrupted-audit-turn";
+    context.lastInterruptedTurn = {
+      requestTurnId: interruptedTurnId,
+      reason: "model_timeout",
+      userMessageId: "user-old",
+      at: new Date(0).toISOString(),
+    };
+    context.evidence.push(makeEvidence({
+      id: "old-readonly-evidence",
+      kind: "file_read",
+      source: "ReadSnippets",
+      summary: "readonly source evidence",
+      supportsClaims: ["readonly_low_noise_evidence", "code_fact"],
+      ownerScope: {
+        ownerSessionId: context.sessionId!,
+        requestTurnId: interruptedTurnId,
+        cwd: context.projectPath,
+      },
+    }));
+    const gateway = {
+      async *stream(_providerId: string, request: { requestContextId?: string }) {
+        requestContextIds.push(request.requestContextId);
+        yield {
+          type: "assistant_text_delta",
+          text: "审计结论：当前证据只支持源码读取结论。",
+        } as const;
+        yield { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await __testSendMessage("所以审计结果呢", context, gateway, new MemoryOutput());
+
+    expect(requestContextIds).toEqual([interruptedTurnId]);
+    expect(context.lastInterruptedTurn).toBeUndefined();
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "assistant_text_delta",
+        text: "审计结论：当前证据只支持源码读取结论。",
       }),
     );
   }, 30_000);
@@ -4456,6 +4506,50 @@ describe("model message prompt cache layout", () => {
     expect(messages.at(-1)?.content).not.toContain("Treat this user message as the authoritative task.");
   });
 
+  it("treats an implicit audit-result follow-up as a resume request in model history", async () => {
+    const context = {
+      model: "test-model",
+      cache: { history: [] },
+      store: {
+        readRecentTranscriptEvents: async () => ({
+          events: [
+            { type: "user_message", text: "只读审计当前主链" },
+            {
+              type: "interrupt",
+              status: "cancelled",
+              message:
+                "turn_interrupted: requestTurnId=turn-audit; reason=model_timeout; userMessageId=user-old",
+            },
+            { type: "user_message", text: "所以审计结果呢" },
+          ],
+        }),
+        appendEvent: async () => undefined,
+      },
+    };
+
+    const messages = await __testBuildModelMessagesWithRecentContext(
+      context as never,
+      "session-interrupted-audit-result",
+      [{ content: "stable system", promptCache: "cacheable" }],
+      "所以审计结果呢",
+      {
+        role: "executor",
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "responses",
+        reasoningSent: false,
+        reasoningStatus: "off",
+      },
+      [],
+      true,
+    );
+
+    expect(messages.at(-1)?.content).toContain(
+      "This user message requests continuing that interrupted task.",
+    );
+    expect(messages.at(-1)?.content).not.toContain("Treat this user message as the authoritative task.");
+  });
+
   it("rebuilds the same interrupted user tail as stable history on the next turn", async () => {
     let events: Array<Record<string, unknown>> = [
       { type: "user_message", text: "old task" },
@@ -5148,6 +5242,48 @@ describe("final answer gate aggregation", () => {
     }
   });
 
+  it("does not inherit engineering artifact or test gaps into readonly audit answers", () => {
+    const requestTurnId = "readonly-audit-turn";
+    const context = {
+      ...makeGateContext(),
+      currentRequestTurnId: requestTurnId,
+      currentUserActionConstraintsRequestTurnId: requestTurnId,
+      currentUserActionConstraints: {
+        readonlyOnly: true,
+        forbidWrite: true,
+        forbidTests: true,
+        forbidBuild: true,
+        forbidLint: false,
+        forbidTypecheck: true,
+        forbidSmoke: false,
+        forbidShell: false,
+        forbidAllTools: false,
+      },
+      lastMetaSchedulerDecision: {
+        shouldRunFinalAnswerGate: true,
+        policyDecision: {
+          taskKind: "verification",
+          engineeringSignal: {
+            profile: "generic",
+            strategyHint: "source-first",
+            artifactTargets: [],
+            failureCategory: "test_timeout",
+            finalBoundaryHint: "verification timed out",
+          },
+        },
+      },
+    };
+
+    const result = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      "只读审计覆盖到 final gate、verification evidence 和源码证据链路；本轮没有运行测试。",
+      true,
+      { visibleClaimInference: "result_only", readonlyAuditClaimNoiseFilter: true },
+    );
+
+    expect(result.status).toBe("passed");
+  });
+
   it("keeps missing contract repair open while owner-scoped execution evidence advances", () => {
     const context = {
       ...makeGateContext(),
@@ -5272,6 +5408,57 @@ describe("final answer gate aggregation", () => {
     scope.ownerKey = "request:session-owner:request-new";
     expect(evaluateAggregatedFinalAnswerGate(context as never, "测试已经通过。", false).status)
       .toBe("passed");
+  });
+
+  it("allows readonly audit follow-up code facts to reuse only prior readonly evidence", () => {
+    const context = {
+      ...makeGateContext(),
+      projectPath: "C:/repo",
+      sessionId: "session-readonly-followup",
+      currentRequestTurnId: "request-followup",
+      evidence: [
+        makeEvidence({
+          id: "old-readonly-source",
+          kind: "file_read",
+          source: "ReadSnippets",
+          summary: "ReadSnippets packages/tui/src/model-stream-runtime.ts",
+          supportsClaims: [
+            "ReadSnippets",
+            "read_nonempty",
+            "source_snippet",
+            "readonly_low_noise_evidence",
+          ],
+          ownerScope: {
+            ownerSessionId: "session-readonly-followup",
+            requestTurnId: "request-audit",
+            cwd: "C:/repo",
+            targets: ["packages/tui/src/model-stream-runtime.ts"],
+          },
+        }),
+      ],
+      lastMetaSchedulerDecision: {
+        policyDecision: { taskKind: "code_fact" },
+        shouldRunFinalAnswerGate: false,
+      },
+    } as unknown as TuiContext;
+    __testActivateReadonlyEvidenceCarryover(context, "request-audit", "request-followup");
+
+    const codeFact = evaluateAggregatedFinalAnswerGate(
+      context,
+      withClaims(
+        "packages/tui/src/model-stream-runtime.ts 中的 final gate 会按 owner scope 读取证据。",
+        [{
+          kind: "code_fact",
+          phrase:
+            "packages/tui/src/model-stream-runtime.ts 中的 final gate 会按 owner scope 读取证据",
+        }],
+      ),
+      false,
+    );
+    expect(codeFact.status).toBe("passed");
+
+    expect(evaluateAggregatedFinalAnswerGate(context, "测试已经通过。", false).status)
+      .toBe("needs_disclaimer");
   });
 
   it("keeps owner-scoped verification deterministic across 1000 request transitions", () => {
@@ -6270,6 +6457,9 @@ describe("final answer gate aggregation", () => {
       ...makeGateContext(),
       permissionMode: "full-access",
       language: "zh-CN",
+      currentRequestTurnId: "scoped-test-turn",
+      sessionId: "scoped-test-session",
+      projectPath: "/repo",
       currentRequestChangedFiles: ["packages/tui/src/shell/view-model.test.ts"],
       currentRequestMentionedFiles: [],
     };
@@ -6289,9 +6479,53 @@ describe("final answer gate aggregation", () => {
     expect(plan.action).toBe("verification_request");
     expect(plan.evidenceAction).toMatchObject({
       toolName: "RunVerification",
-      input: { level: "test" },
+      input: {
+        level: "test",
+        requestScope: {
+          requestTurnId: "scoped-test-turn",
+          changedFiles: ["packages/tui/src/shell/view-model.test.ts"],
+          cwd: "/repo",
+        },
+      },
     });
     expect(plan.evidenceAction?.input).not.toHaveProperty("command");
+  });
+
+  it("keeps request mentioned test files in final-gap verification scope", () => {
+    const context = {
+      ...makeGateContext(),
+      permissionMode: "full-access",
+      language: "zh-CN",
+      currentRequestTurnId: "mentioned-test-turn",
+      projectPath: "/repo",
+      currentRequestChangedFiles: [],
+      currentRequestMentionedFiles: ["notes.txt", "packages/tui/src/shell/view-model.test.ts"],
+    };
+    const result = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      withClaims("测试通过。", [{ kind: "completion_pass", phrase: "测试通过" }]),
+      false,
+    );
+
+    expect(result.status).toBe("needs_disclaimer");
+    if (result.status !== "needs_disclaimer") return;
+    const plan = planFinalGateEvidenceGapAction({
+      result,
+      context: context as never,
+      userText: "继续修复",
+    });
+
+    expect(plan.evidenceAction).toMatchObject({
+      toolName: "RunVerification",
+      input: {
+        level: "test",
+        requestScope: {
+          requestTurnId: "mentioned-test-turn",
+          mentionedFiles: ["packages/tui/src/shell/view-model.test.ts"],
+          cwd: "/repo",
+        },
+      },
+    });
   });
 
   it("keeps gathering verification evidence after an attempt that did not prove pass", () => {
@@ -6453,6 +6687,49 @@ describe("final answer gate aggregation", () => {
     expect(attempts).toBe(1);
     expect(JSON.stringify(events)).not.toContain("final_answer_gap_returned_to_model_loop");
     expect(JSON.stringify(events)).not.toContain("final_answer_gap_action dispatch");
+  });
+
+  it("does not downgrade readonly audit meta claims into missing verification evidence", async () => {
+    const { context, events } = await makeSendMessageContext();
+    const output = new MemoryOutput();
+    const answer = withClaims(
+      "只读审计完成：已检查 final gate、verification evidence 和源码证据链路；本轮没有运行测试，也没有修改文件。",
+      [
+        { kind: "completion_claim", phrase: "completion_claim" },
+        { kind: "code_fact", phrase: "code_fact" },
+        { kind: "workflow_status_claim", phrase: "workflow_status_claim" },
+        { kind: "agent_status_claim", phrase: "agent_status_claim" },
+      ],
+    );
+    const gateway = {
+      async *stream() {
+        yield { type: "assistant_text_delta", text: answer } as const;
+        yield {
+          type: "message_stop",
+          chunkCount: 1,
+          hadUsage: false,
+          finishReason: "stop",
+        } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await __testSendMessage(
+      "只读审计 final gate、验证证据和测试证据链路；不要修改代码，不要跑 test、build、typecheck。",
+      context,
+      gateway,
+      output,
+    );
+
+    expect(output.text).toContain("只读审计完成");
+    expect(output.text).not.toContain("本请求未能证实");
+    expect(output.text).not.toContain("LinghunFinalAnswerClaims");
+    const serializedEvents = JSON.stringify(events);
+    expect(serializedEvents).not.toContain("verification_start");
+    expect(serializedEvents).not.toContain("final_answer_gap_returned_to_model_loop");
+    expect(serializedEvents).not.toContain("final_answer_gap_action dispatch");
   });
 
   it("closes a shrinking final gap identically in main and continuation loops", async () => {
@@ -7281,6 +7558,58 @@ describe("final answer gate aggregation", () => {
 
     expect(plan.action).toBe("blocked_explanation");
     expect(plan.directive).toContain("用户明确限制");
+    expect(plan.evidenceAction).toBeUndefined();
+  });
+
+  it("blocks final-gap verification for readonly audit even without an explicit no-test phrase", () => {
+    const result = evaluateAggregatedFinalAnswerGate(
+      makeGateContext() as never,
+      withClaims("测试通过。", [{ kind: "completion_pass", phrase: "测试通过" }]),
+      false,
+    );
+
+    expect(result.status).toBe("needs_disclaimer");
+    if (result.status !== "needs_disclaimer") return;
+    const plan = planFinalGateEvidenceGapAction({
+      result,
+      context: {
+        ...makeGateContext(),
+        permissionMode: "full-access",
+        language: "zh-CN",
+        currentRequestTurnId: "readonly-audit-test-gap",
+        currentRequestChangedFiles: ["packages/tui/src/model-stream-runtime.test.ts"],
+      } as never,
+      userText: "只读审计，只给审计结果",
+    });
+
+    expect(plan.action).toBe("blocked_explanation");
+    expect(plan.reason).toBe("user_forbid_commands");
+    expect(plan.evidenceAction).toBeUndefined();
+  });
+
+  it("uses current request constraints to block final-gap verification when userText is only a follow-up", () => {
+    const result = evaluateAggregatedFinalAnswerGate(
+      makeGateContext() as never,
+      withClaims("验证通过。", [{ kind: "verification_claim", phrase: "验证通过" }]),
+      false,
+    );
+
+    expect(result.status).toBe("needs_disclaimer");
+    if (result.status !== "needs_disclaimer") return;
+    const plan = planFinalGateEvidenceGapAction({
+      result,
+      context: {
+        ...makeGateContext(),
+        permissionMode: "full-access",
+        language: "zh-CN",
+        currentRequestTurnId: "readonly-followup-turn",
+        currentUserActionConstraintsRequestTurnId: "readonly-followup-turn",
+        currentUserActionConstraints: parseUserActionConstraints("只读审计，只给审计结果"),
+      } as never,
+      userText: "继续给我审计结论",
+    });
+
+    expect(plan.action).toBe("blocked_explanation");
     expect(plan.evidenceAction).toBeUndefined();
   });
 
@@ -8241,6 +8570,26 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
       expect(__testFinalGapHasProgress(result, context, previous)).toBe(true);
     });
 
+    it("treats mentioned-file verification scope changes as final-gap progress", () => {
+      const context = {
+        evidence: [],
+        currentRequestTurnId: "turn-1",
+        currentRequestChangedFiles: [],
+        currentRequestMentionedFiles: ["packages/tui/src/a.test.ts"],
+        sessionId: "session-1",
+        projectPath: "/test",
+      } as unknown as TuiContext;
+      const result = {
+        status: "needs_disclaimer" as const,
+        unsupportedKinds: ["test_claim"],
+      };
+      const previous = __testCaptureFinalGapProgressState(result, context, undefined);
+
+      context.currentRequestMentionedFiles = ["packages/tui/src/b.test.ts"];
+
+      expect(__testFinalGapHasProgress(result, context, previous)).toBe(true);
+    });
+
     it("does not treat a changed readonly range as gap progress", () => {
       const context = {
         evidence: [
@@ -8351,7 +8700,7 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
       };
       const actionFingerprint = continuation.finalGapProgressState.commandFingerprint!;
       continuation.finalGapProgressState.attemptedCommandFingerprints.add(actionFingerprint);
-      context.currentRequestMentionedFiles = ["src/readonly.ts"];
+      context.currentRequestMentionedFiles = ["src/readonly.ts", "package.json"];
 
       for (let index = 0; index < 1_000; index += 1) {
         context.evidence.push({
@@ -8529,6 +8878,29 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
       expect(__testEvidenceMatchesFinalGapAction(record, action)).toBe(true);
     });
 
+    it("matches focused test pass evidence to a scoped test action", () => {
+      const record = {
+        id: "focused-test-1",
+        kind: "test_result",
+        source: "Verification Runner",
+        supportsClaims: ["verification_passed", "test_passed", "test_scope:focused"],
+      } as unknown as EvidenceRecord;
+
+      const action = {
+        toolName: "RunVerification",
+        input: {
+          level: "test",
+          requestScope: {
+            requestTurnId: "turn-1",
+            changedFiles: ["packages/tui/src/shell/view-model.test.ts"],
+          },
+        },
+        summary: "run focused test",
+      } as const;
+
+      expect(__testEvidenceMatchesFinalGapAction(record, action)).toBe(true);
+    });
+
     it("rejects typecheck evidence for test-level action", () => {
       const record = {
         id: "typecheck-1",
@@ -8552,6 +8924,22 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
         kind: "test_result",
         source: "Verification Runner",
         supportsClaims: ["verification attempted", "verification:fail"],
+      } as unknown as EvidenceRecord;
+      const action = {
+        toolName: "RunVerification",
+        input: { level: "test" },
+        summary: "run test",
+      } as const;
+
+      expect(__testEvidenceMatchesFinalGapAction(record, action)).toBe(false);
+    });
+
+    it("rejects synthetic verification evidence for test-level action", () => {
+      const record = {
+        id: "synthetic-test-1",
+        kind: "test_result",
+        source: "Verification Runner",
+        supportsClaims: ["verification_self_check_passed", "verification_not_run"],
       } as unknown as EvidenceRecord;
       const action = {
         toolName: "RunVerification",

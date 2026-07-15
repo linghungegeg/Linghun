@@ -232,6 +232,24 @@ describe("model-loop-runtime", () => {
       }
     });
 
+    it("exposes RunVerification requestScope without making it required", () => {
+      const verify = createModelToolDefinitions().find((d) => d.name === "RunVerification");
+      const schema = verify?.inputSchema as {
+        required?: string[];
+        properties?: Record<string, {
+          properties?: Record<string, unknown>;
+          items?: unknown;
+        }>;
+      };
+
+      expect(schema.required).toEqual(["level"]);
+      expect(schema.properties).toHaveProperty("requestScope");
+      expect(schema.properties?.requestScope?.properties).toHaveProperty("requestTurnId");
+      expect(schema.properties?.requestScope?.properties).toHaveProperty("changedFiles");
+      expect(schema.properties?.requestScope?.properties).toHaveProperty("mentionedFiles");
+      expect(schema.properties?.requestScope?.properties).toHaveProperty("cwd");
+    });
+
     it("exposes real agent workflow verification and report tools before CommandProposal fallback", () => {
       const names = createModelToolDefinitions().map((d) => d.name);
       expect(names).toContain("StartAgent");
@@ -1050,6 +1068,22 @@ describe("model-loop-runtime", () => {
       }
     });
 
+    it("filters generic readonly audit structured claim noise only in readonly audit mode", () => {
+      const text = withClaims("只读审计完成：已检查 workflow/agent 相关源码。", [
+        { kind: "completion_claim", phrase: "completion_claim" },
+        { kind: "code_fact", phrase: "code_fact" },
+        { kind: "workflow_status_claim", phrase: "workflow_status_claim" },
+        { kind: "agent_status_claim", phrase: "agent_status_claim" },
+      ]);
+      const verdict = evaluateFinalAnswerClaims(text, [], new Date(), {
+        visibleClaimInference: "result_only",
+        readonlyAuditClaimNoiseFilter: true,
+      });
+
+      expect(verdict.status).toBe("passed");
+      expect(verdict.matchedClaims).toEqual([]);
+    });
+
     it("keeps broad completion and verification claims blocked outside the readonly audit clause", () => {
       const broadCompletion = evaluateVisibleFinalAnswerClaims(
         withClaims("只读审计完成；任务完成。", [{ kind: "completion_claim", phrase: "任务完成" }]),
@@ -1062,6 +1096,78 @@ describe("model-loop-runtime", () => {
 
       const testClaim = evaluateVisibleFinalAnswerClaims("只读检查完；测试通过。", []);
       expect(testClaim.unsupportedKinds).toContain("test_claim");
+    });
+
+    it("keeps real pass, mutation, workflow, and code facts blocked under readonly audit filtering", () => {
+      const options = {
+        visibleClaimInference: "result_only" as const,
+        readonlyAuditClaimNoiseFilter: true,
+      };
+      const workflow = evaluateFinalAnswerClaims(
+        withClaims("只读审计完成；Workflow 已完成。", [
+          { kind: "workflow_status_claim", phrase: "workflow_status_claim" },
+        ]),
+        [],
+        new Date(),
+        options,
+      );
+      expect(workflow.unsupportedKinds).toContain("workflow_status_claim");
+
+      const testPass = evaluateFinalAnswerClaims("只读审计完成；测试通过。", [], new Date(), {
+        ...options,
+        visibleClaimInference: "full",
+      });
+      expect(testPass.unsupportedKinds).toContain("test_claim");
+
+      const fileChange = evaluateFinalAnswerClaims("只读审计完成；已修改 src/a.ts。", [], new Date(), {
+        ...options,
+        visibleClaimInference: "full",
+      });
+      expect(fileChange.unsupportedKinds).toContain("file_change_claim");
+
+      const codeFact = evaluateFinalAnswerClaims(
+        withClaims("只读审计发现 runWorkflowVerificationStep 调用 createVerificationPlan。", [
+          { kind: "code_fact", phrase: "code_fact" },
+        ]),
+        [],
+        new Date(),
+        options,
+      );
+      expect(codeFact.unsupportedKinds).toContain("code_fact");
+    });
+
+    it("filters readonly audit discussions of pass-claim wording", () => {
+      const options = {
+        visibleClaimInference: "full" as const,
+        readonlyAuditClaimNoiseFilter: true,
+      };
+      const verdict = evaluateFinalAnswerClaims(
+        "只读审计发现 `测试通过` 和 `verified` 正则兜底会误判；本轮没有运行测试。",
+        [],
+        new Date(),
+        options,
+      );
+
+      expect(verdict.status).toBe("passed");
+      expect(verdict.matchedClaims).toEqual([]);
+    });
+
+    it("filters readonly audit negative verification summaries as claim noise", () => {
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("只读审计结论：已有验证失败 artifact；本轮没有运行测试，缺测试证据。", [
+          { kind: "verification_claim", phrase: "verification_claim" },
+          { kind: "test_claim", phrase: "test_claim" },
+        ]),
+        [],
+        new Date(),
+        {
+          visibleClaimInference: "result_only",
+          readonlyAuditClaimNoiseFilter: true,
+        },
+      );
+
+      expect(verdict.status).toBe("passed");
+      expect(verdict.matchedClaims).toEqual([]);
     });
 
     it("blocks completion/PASS without test/build evidence even if Read evidence exists", () => {

@@ -96,8 +96,10 @@ describe("user-action-constraints", () => {
   it.each([
     "只读审计，不要修改文件",
     "只读审计，不要修复",
+    "只读审计关键词/正则兜底链路，不要修改文件",
     "先检查清楚，但不要写入或编辑文件",
     "audit only; do not edit files",
+    "read-only scan keyword/regex fallback, do not edit files",
     "diagnose only, do not modify files",
   ])("keeps explicit readonly intent as a hard request constraint: %s", (text) => {
     const constraints = parseUserActionConstraints(text);
@@ -105,6 +107,14 @@ describe("user-action-constraints", () => {
     expect(constraints.readonlyOnly || constraints.forbidWrite).toBe(true);
     expect(constraints.forbidWrite).toBe(true);
     expect(hasReadOnlyUserConstraint(constraints)).toBe(true);
+  });
+
+  it("treats readonly-only audit as forbidding verification evidence", () => {
+    const constraints = parseUserActionConstraints("只读审计，只给审计结果，不改代码");
+
+    expect(constraints.readonlyOnly).toBe(true);
+    expect(forbidsVerificationEvidence(constraints)).toBe(true);
+    expect(verificationStepConstraintReason(constraints, "test")).toContain("read-only");
   });
 
   it.each([
@@ -298,6 +308,9 @@ describe("user-action-constraints", () => {
     "don't use the shell",
     "不要运行任何终端命令",
     "不要执行所有 shell 命令",
+    "不跑命令",
+    "不运行命令",
+    "不执行命令",
     "no shell",
     "no shell commands",
   ])("recognizes quantified shell execution bans: %s", (text) => {

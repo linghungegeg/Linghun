@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import type { ModelGateway, ModelToolCall } from "@linghun/providers";
 import { type Language, isNodeErrorWithCode } from "@linghun/shared";
@@ -2250,6 +2250,9 @@ export async function executeLinghunControlToolUse(
     if (toolCall.name === RUN_VERIFICATION_TOOL_NAME) {
       const input = parseVerificationToolInput(toolCall.input);
       if (!input.ok) return await finishFailure(input.text);
+      const scopedRequestMatches =
+        !input.requestScope?.requestTurnId ||
+        input.requestScope.requestTurnId === requestTurnId;
       const report = await runWorkflowVerificationStep(
         input.level,
         context,
@@ -2257,10 +2260,18 @@ export async function executeLinghunControlToolUse(
         {
           ownerSessionId: sessionId,
           ownerSignal: requestSignal,
-          requestTurnId,
+          requestTurnId: scopedRequestMatches
+            ? input.requestScope?.requestTurnId ?? requestTurnId
+            : requestTurnId,
           publishResult: false,
           permissionMode: invocationPermissionMode,
           userActionConstraints: invocationUserActionConstraints,
+          ...(scopedRequestMatches && input.requestScope?.changedFiles
+            ? { changedFiles: input.requestScope.changedFiles }
+            : {}),
+          ...(scopedRequestMatches && input.requestScope?.cwd
+            ? safeProjectScopedCwd(context.projectPath, input.requestScope.cwd)
+            : {}),
         },
       );
       if (requestIsStale()) {
@@ -2778,6 +2789,11 @@ function parseVerificationToolInput(
   | {
       ok: true;
       level: "plan-only" | "smoke" | "focused" | "real-smoke" | "typecheck" | "test" | "build" | "lint";
+      requestScope?: {
+        requestTurnId?: string;
+        changedFiles?: string[];
+        cwd?: string;
+      };
     }
   | { ok: false; text: string } {
   const obj =
@@ -2797,7 +2813,45 @@ function parseVerificationToolInput(
   ) {
     return { ok: false, text: "RunVerification requires a valid level." };
   }
-  return { ok: true, level };
+  const requestScope = parseVerificationRequestScope(obj.requestScope);
+  return { ok: true, level, ...(requestScope ? { requestScope } : {}) };
+}
+
+function parseVerificationRequestScope(
+  input: unknown,
+): { requestTurnId?: string; changedFiles?: string[]; cwd?: string } | undefined {
+  if (!isRecord(input)) return undefined;
+  const changedFiles = readStringArray(input.changedFiles);
+  const mentionedFiles = readStringArray(input.mentionedFiles);
+  const scopedFiles = changedFiles.length > 0 ? changedFiles : mentionedFiles;
+  const requestTurnId = typeof input.requestTurnId === "string" && input.requestTurnId.trim()
+    ? input.requestTurnId.trim()
+    : undefined;
+  const cwd = typeof input.cwd === "string" && input.cwd.trim() ? input.cwd.trim() : undefined;
+  if (!requestTurnId && scopedFiles.length === 0 && !cwd) return undefined;
+  return {
+    ...(requestTurnId ? { requestTurnId } : {}),
+    ...(scopedFiles.length > 0 ? { changedFiles: scopedFiles } : {}),
+    ...(cwd ? { cwd } : {}),
+  };
+}
+
+function safeProjectScopedCwd(
+  projectPath: string,
+  cwd: string,
+): { cwd: string } | Record<string, never> {
+  const root = resolve(projectPath);
+  const target = resolve(root, cwd);
+  const rel = relative(root, target);
+  if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) {
+    return { cwd: target };
+  }
+  return {};
+}
+
+function readStringArray(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  return input.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
 }
 
 async function finishControlToolFailure(
@@ -2885,8 +2939,13 @@ function deriveRunVerificationSupportsClaims(data: unknown): string[] {
     claims.add("verification_not_run");
   }
   for (const command of passedCommands) {
-    if (command.kind === "test") claims.add("test_passed");
-    else if (command.kind === "typecheck") claims.add("typecheck_passed");
+    if (command.kind === "test") {
+      claims.add("test_passed");
+      const scope = isRecord(record.scope) ? record.scope : {};
+      if (readStringArray(scope.changedFiles).length > 0) {
+        claims.add("test_scope:focused");
+      }
+    } else if (command.kind === "typecheck") claims.add("typecheck_passed");
     else if (command.kind === "build") claims.add("build_passed");
     else if (command.kind === "lint") claims.add("lint_passed");
     else if (command.kind === "smoke") {

@@ -14,7 +14,10 @@ import { handleVerifyCommand } from "./slash-command-runtime.js";
 import { createMemoryState } from "./tui-state-runtime.js";
 import { createEvidenceBackedMemoryCandidates } from "./tui-memory-runtime.js";
 import { parseUserActionConstraints } from "./user-action-constraints.js";
-import { runWorkflowVerificationStep } from "./workflow-command-runtime.js";
+import {
+  __testShouldRunFocusedPreVerify,
+  runWorkflowVerificationStep,
+} from "./workflow-command-runtime.js";
 import type { VerificationReport, VerificationStepKind } from "./tui-data-types.js";
 import {
   createVerificationPlan,
@@ -408,6 +411,49 @@ describe("verification-command-runtime", () => {
 
     expect(report).toMatchObject({ status: "partial", commands: [] });
     expect(await readdir(projectPath)).not.toContain("smoke-ran.txt");
+  });
+
+  it.each(["focused", "test", "typecheck", "lint", "build"] as const)(
+    "runs pre_verify before request-scoped %s verification for product-grade files",
+    (level) => {
+      expect(
+        __testShouldRunFocusedPreVerify(
+          level,
+          ["packages/tui/src/model-stream-runtime.ts"],
+          {
+            ownerKey: "request:session-a:turn-a",
+            cwd: "/repo",
+            changedFiles: ["packages/tui/src/model-stream-runtime.ts"],
+            ownerSessionId: "session-a",
+            requestTurnId: "turn-a",
+            level,
+          },
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it("does not run pre_verify for readonly verification or unsupported files", () => {
+    const scope = {
+      ownerKey: "request:session-a:turn-a",
+      cwd: "/repo",
+      changedFiles: ["docs/audit.md"],
+      ownerSessionId: "session-a",
+      requestTurnId: "turn-a",
+      level: "typecheck" as const,
+    };
+
+    expect(
+      __testShouldRunFocusedPreVerify("typecheck", ["docs/audit.md"], scope),
+    ).toBe(false);
+    expect(
+      __testShouldRunFocusedPreVerify(
+        "typecheck",
+        ["packages/tui/src/model-stream-runtime.ts"],
+        { ...scope, changedFiles: ["packages/tui/src/model-stream-runtime.ts"] },
+        parseUserActionConstraints("只读审计，只给审计结果"),
+      ),
+    ).toBe(false);
   });
 
   it.each([
@@ -1044,6 +1090,62 @@ describe("verification-command-runtime", () => {
     expect(report.commands[0]?.command).toContain(target);
     expect(report.commands[0]?.command).not.toBe("corepack pnpm test");
     expect(report.scope?.changedFiles).toEqual([target]);
+  }, 30_000);
+
+  it("uses RunVerification requestScope to select the focused test target", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-tool-scope-"));
+    const target = "packages/tui/src/shell/view-model.test.js";
+    await mkdir(join(projectPath, "packages", "tui", "src", "shell"), { recursive: true });
+    await Promise.all([
+      writeFile(
+        join(projectPath, "package.json"),
+        JSON.stringify({ scripts: { test: "node test-runner.cjs vitest" } }),
+        "utf8",
+      ),
+      writeFile(join(projectPath, "pnpm-lock.yaml"), "", "utf8"),
+      writeFile(
+        join(projectPath, "test-runner.cjs"),
+        [
+          `const target = ${JSON.stringify(target)};`,
+          "if (!process.argv.includes(target)) {",
+          "  console.error(`missing focused target ${target}`);",
+          "  process.exit(1);",
+          "}",
+          "console.log(`focused target ${target}`);",
+        ].join("\n"),
+        "utf8",
+      ),
+      writeFile(join(projectPath, target), "export {};\n", "utf8"),
+    ]);
+    const context = await createRunnableVerificationContext(projectPath);
+    context.currentRequestTurnId = "tool-scoped-test-request";
+    context.currentRequestChangedFiles = [];
+
+    const result = await executeLinghunControlToolUse(
+      {
+        id: "verify-tool-scoped-test",
+        name: "RunVerification",
+        input: {
+          level: "test",
+          requestScope: {
+            requestTurnId: "tool-scoped-test-request",
+            changedFiles: [target],
+          },
+        },
+      },
+      context,
+      "session-tool-scoped-test",
+      new MockWritable(),
+      { requestTurnId: "tool-scoped-test-request" } as never,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(context.lastVerification?.commands[0]?.command).toContain(target);
+    expect(context.lastVerification?.commands[0]?.command).not.toBe("corepack pnpm test");
+    expect(context.lastVerification?.scope?.changedFiles).toEqual([target]);
+    expect(context.evidence.flatMap((item) => item.supportsClaims)).toEqual(
+      expect.arrayContaining(["test_passed", "test_scope:focused"]),
+    );
   }, 30_000);
 
   it("does not inherit global changed files into an empty current request scope", async () => {

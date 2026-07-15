@@ -7,7 +7,7 @@ import { computeLocalCacheDisplayState } from "./cache-policy-runtime.js";
 import { buildExplicitDetailsCommandPanel, showCommandPanel } from "./command-panel-runtime.js";
 import {
   calculateContextPercentages,
-  getNativeContextWindowForModel,
+  getContextWindowForModel,
 } from "./context-window-runtime.js";
 import { formatBackgroundDetails, formatBackgroundOutputDetails } from "./job-runner-presenter.js";
 import { formatLogArtifactSlice, readLogArtifactSlice } from "./log-artifact.js";
@@ -501,7 +501,8 @@ export function writeStatus(output: Writable, context: TuiContext): void {
 function selectStatusContextUsage(
   context: TuiContext,
 ): ReturnType<typeof calculateContextPercentages> | undefined {
-  const maxTokens = getNativeContextWindowForModel(context.model);
+  const executorRoute = context.config.modelRoutes?.routes?.find((route) => route.role === "executor");
+  const maxTokens = getContextWindowForModel(context.model, executorRoute);
   const usage = context.cache.contextUsage;
   if (!usage) return undefined;
   return calculateContextPercentages(

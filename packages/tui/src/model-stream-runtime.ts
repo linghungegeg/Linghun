@@ -110,6 +110,7 @@ import { startModelSetup } from "./model-command-runtime.js";
 import {
   createModelToolDefinitionsForReportGuard,
   deriveToolSupportsClaims,
+  extractFileMentions,
   isPreEngineToolName,
 } from "./model-loop-runtime.js";
 import type {
@@ -258,6 +259,13 @@ type AggregatedFinalAnswerGateResult =
 
 type FinalGateVerificationLevel = "typecheck" | "test" | "build" | "lint" | "smoke";
 
+type FinalGateVerificationRequestScope = {
+  requestTurnId?: string;
+  changedFiles?: string[];
+  mentionedFiles?: string[];
+  cwd?: string;
+};
+
 export type FinalGateEvidenceGapActionPlan = {
   action:
     | "readonly_check"
@@ -302,13 +310,17 @@ function createMainChainFinalGateClaimOptions(
   return {
     visibleClaimInference: MAIN_CHAIN_VISIBLE_CLAIM_INFERENCE,
     requireStructuredClaimContract: shouldRequireStructuredFinalAnswerClaimContract(context),
+    readonlyAuditClaimNoiseFilter: shouldFilterReadonlyAuditClaimNoise(context),
   };
 }
 
-function createMainChainVisibleFinalGateClaimOptions(): FinalAnswerClaimEvaluationOptions {
+function createMainChainVisibleFinalGateClaimOptions(
+  context: TuiContext,
+): FinalAnswerClaimEvaluationOptions {
   return {
     visibleClaimInference: MAIN_CHAIN_VISIBLE_CLAIM_INFERENCE,
     requireStructuredClaimContract: false,
+    readonlyAuditClaimNoiseFilter: shouldFilterReadonlyAuditClaimNoise(context),
   };
 }
 
@@ -374,6 +386,44 @@ function shouldRequireStructuredFinalAnswerClaimContract(context: TuiContext): b
     policy.executionPlan?.requireVerification ||
       policy.permissionSignal?.expectedMutating ||
       policy.permissionPlan?.expectedMutating,
+  );
+}
+
+function shouldFilterReadonlyAuditClaimNoise(context: TuiContext): boolean {
+  const constraints = currentRequestUserActionConstraints(context);
+  return Boolean(
+    (constraints && hasReadOnlyUserConstraint(constraints)) ||
+      readonlyEvidenceCarryoverActive(context),
+  );
+}
+
+function shouldRunExtendedFinalAnswerGate(context: Pick<TuiContext, "lastMetaSchedulerDecision">): boolean {
+  return context.lastMetaSchedulerDecision?.shouldRunFinalAnswerGate === true;
+}
+
+function hasReadonlyAuditBoundaryContext(text: string): boolean {
+  return /(?:只读|审计|检查|核对|覆盖|源码|代码片段|读取|读到|audit|review|inspect(?:ion)?|check(?:ed)?|coverage|source\s+(?:read|inspection|review))/iu.test(
+    text,
+  );
+}
+
+function hasExplicitEngineeringResultClaim(text: string): boolean {
+  return text.split(/[\r\n。！？!?；;，,]+/u).some(
+    (clause) => {
+      const negated = /(?:未|没有|无|不|不要|别|禁止|未运行|没有运行|不运行|did\s+not|didn't|not\s+|no\s+|without\s+(?:running|modifying|editing|writing))/iu.test(
+        clause,
+      );
+      return !negated &&
+        /(?:修复|修改|改动|实现|写入|创建|删除|提交|发布|生成|产物存在|测试通过|验证通过|构建通过|已通过|fixed|repaired|modified|implemented|written|created|deleted|committed|published|generated|artifact exists|tests?\s+passed|verified|build\s+passed)/iu.test(
+          clause,
+        ) &&
+        !(
+        hasReadonlyAuditBoundaryContext(clause) &&
+        /(?:示例|例子|正则|关键词|claim|声明|误判|误触|扫描|讨论|提到|提及|覆盖|链路|未运行|没有运行|不运行|example|regex|keyword|false positive|fallback|did not run|no tests? (?:ran|run))/iu.test(
+          clause,
+        )
+      );
+    },
   );
 }
 
@@ -1330,11 +1380,21 @@ export function evaluateAggregatedFinalAnswerGate(
 
 function evidenceForCurrentVerificationScope(context: TuiContext): TuiContext["evidence"] {
   if (!context.currentRequestTurnId) return context.evidence;
-  return context.evidence.filter(
+  const scoped = context.evidence.filter(
     (record) => isVerificationEvidenceRecord(record)
       ? verificationEvidenceMatchesContext(record, context)
       : evidenceMatchesRequestOwner(record, context),
   );
+  const carryover = readonlyEvidenceCarryoverScopes.get(context);
+  if (!carryover || carryover.currentRequestTurnId !== context.currentRequestTurnId) {
+    return scoped;
+  }
+  const seen = new Set(scoped.map((record) => record.id));
+  const carried = context.evidence.filter((record) =>
+    !seen.has(record.id) &&
+    isReadonlyEvidenceCarryoverRecord(record, context, carryover.previousRequestTurnId)
+  );
+  return [...scoped, ...carried];
 }
 
 type FinalGapProgressState = NonNullable<PendingModelContinuation["finalGapProgressState"]>;
@@ -1509,18 +1569,23 @@ type FinalGateContinuationBridgeHint = {
 };
 
 const finalGateContinuationBridgeHints = new WeakMap<TuiContext, FinalGateContinuationBridgeHint>();
+const readonlyEvidenceCarryoverScopes = new WeakMap<
+  TuiContext,
+  { previousRequestTurnId: string; currentRequestTurnId: string }
+>();
 
 function captureFinalGateContinuationBridgeHint(input: {
   context: TuiContext;
   requestTurnId: string;
-  userText: string;
+  userText?: string;
   result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>;
   actionPlan: FinalGateEvidenceGapActionPlan;
   progressState?: FinalGapProgressState;
 }): void {
+  const userText = input.userText ?? "";
   finalGateContinuationBridgeHints.set(input.context, {
     requestTurnId: input.requestTurnId,
-    userText: input.userText.slice(0, 500),
+    userText: userText.slice(0, 500),
     unsupportedKinds: [...new Set(input.result.unsupportedKinds)].slice(0, 12),
     actionReason: input.actionPlan.reason,
     directive: input.actionPlan.directive.slice(0, 1200),
@@ -1533,11 +1598,97 @@ function consumeFinalGateContinuationBridgeHint(
   context: TuiContext,
   userText: string,
 ): FinalGateContinuationBridgeHint | undefined {
-  if (!isBareInterruptedTurnResumeRequest(userText)) return undefined;
   const hint = finalGateContinuationBridgeHints.get(context);
   if (!hint) return undefined;
+  if (
+    !isBareInterruptedTurnResumeRequest(userText) &&
+    !isReadonlyAuditFollowupBridgeRequest(context, userText, hint)
+  ) {
+    finalGateContinuationBridgeHints.delete(context);
+    return undefined;
+  }
   finalGateContinuationBridgeHints.delete(context);
   return hint;
+}
+
+function isReadonlyAuditFollowupBridgeRequest(
+  context: TuiContext,
+  userText: string,
+  hint: FinalGateContinuationBridgeHint,
+): boolean {
+  if (!canCarryReadonlyEvidenceFromHint(hint)) return false;
+  if (!hasPriorReadonlyEvidenceForRequest(context, hint.requestTurnId)) return false;
+  return isImplicitInterruptedTurnFollowupRequest(userText);
+}
+
+function shouldResumeInterruptedTurnRequest(context: TuiContext, text: string): boolean {
+  const interrupted = context.lastInterruptedTurn;
+  if (!interrupted) return false;
+  if (isBareInterruptedTurnResumeRequest(text)) return true;
+  if (!isImplicitInterruptedTurnFollowupRequest(text)) return false;
+  return hasPriorEvidenceForRequest(context, interrupted.requestTurnId);
+}
+
+function isImplicitInterruptedTurnFollowupRequest(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized) return false;
+  if (extractFileMentions(normalized).length > 0) return false;
+  if (hasNewExecutableOrScopeIntent(normalized)) return false;
+  return /(?:继续|接着|刚才|上面|前面|上一(?:轮|次)|原来|之前|审计|结论|结果|汇总|回答|说完|收拢|闭环|continue|resume|previous|earlier|result|conclusion|summary|answer)/iu.test(
+    normalized,
+  );
+}
+
+function canCarryReadonlyEvidenceFromHint(hint: FinalGateContinuationBridgeHint): boolean {
+  if (hint.readonlyEvidenceHints.length === 0) return false;
+  return hint.unsupportedKinds.some((kind) =>
+    /(?:code_fact|source_read|source_search|local_read|artifact)/iu.test(kind)
+  ) || /readonly|artifact|source|code_fact|local_read/iu.test(hint.actionReason);
+}
+
+function hasNewExecutableOrScopeIntent(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized) return false;
+  return /(?:修改|修复|实现|新增|删除|写入|创建|提交|发布|切换|换到|另(?:外|一个)|新的|运行|执行|跑|测试一下|验证一下|构建|打包|test|vitest|jest|pytest|go\s+test|cargo\s+test|typecheck|lint|build|pnpm|npm|yarn|commit|publish|another|new\s+(?:file|task|scope)|run\s+(?:tests?|build|lint|typecheck))/iu.test(
+    normalized,
+  );
+}
+
+function hasPriorReadonlyEvidenceForRequest(context: TuiContext, requestTurnId: string): boolean {
+  return context.evidence.some((record) =>
+    isReadonlyEvidenceCarryoverRecord(record, context, requestTurnId)
+  );
+}
+
+function hasPriorEvidenceForRequest(context: TuiContext, requestTurnId: string): boolean {
+  return context.evidence.some((record) => {
+    const owner = record.ownerScope;
+    if (!owner || owner.ownerAgentId || owner.workflowRunId) return false;
+    if (owner.requestTurnId !== requestTurnId) return false;
+    if (context.sessionId && owner.ownerSessionId !== context.sessionId) return false;
+    return evidenceCwdBelongsToProject(owner.cwd, context.projectPath);
+  });
+}
+
+function configureReadonlyEvidenceCarryover(
+  context: TuiContext,
+  hint: FinalGateContinuationBridgeHint | undefined,
+  userText: string,
+  currentRequestTurnId: string,
+): void {
+  if (hint && isReadonlyAuditFollowupBridgeRequest(context, userText, hint)) {
+    readonlyEvidenceCarryoverScopes.set(context, {
+      previousRequestTurnId: hint.requestTurnId,
+      currentRequestTurnId,
+    });
+    return;
+  }
+  readonlyEvidenceCarryoverScopes.delete(context);
+}
+
+function readonlyEvidenceCarryoverActive(context: TuiContext): boolean {
+  const scope = readonlyEvidenceCarryoverScopes.get(context);
+  return Boolean(scope && scope.currentRequestTurnId === context.currentRequestTurnId);
 }
 
 function summarizeReadonlyEvidenceHints(context: TuiContext): string[] {
@@ -1618,8 +1769,28 @@ function abortSupersededFinalGapVerification(context: TuiContext): void {
 function finalGapScopeFingerprint(context: TuiContext): string {
   return stableHash({
     projectPath: normalizeEvidenceCwd(context.projectPath),
-    changedFiles: [...(context.currentRequestChangedFiles ?? [])].sort(),
+    changedFiles: getFinalGapFingerprintVerificationFiles(context),
   });
+}
+
+function getFinalGapFingerprintVerificationFiles(context: TuiContext): string[] {
+  return [
+    ...new Set([
+      ...(context.currentRequestChangedFiles ?? []),
+      ...filterFinalGapFingerprintMentionedFiles(context.currentRequestMentionedFiles ?? []),
+    ]),
+  ].sort();
+}
+
+function filterFinalGapFingerprintMentionedFiles(files: string[]): string[] {
+  return filterVerificationRequestScopeMentionedFiles(files).filter(
+    isFinalGapFingerprintMentionedFile,
+  );
+}
+
+function isFinalGapFingerprintMentionedFile(file: string): boolean {
+  const normalized = file.trim().replace(/\\/gu, "/");
+  return /(?:^|\/)[^/]*(?:test|spec)\.[cm]?[jt]sx?$/iu.test(normalized);
 }
 
 function finalGapFreshnessFingerprint(context: TuiContext): string {
@@ -1850,6 +2021,25 @@ function verificationEvidenceMatchesContext(
   );
 }
 
+function isReadonlyEvidenceCarryoverRecord(
+  record: TuiContext["evidence"][number],
+  context: TuiContext,
+  requestTurnId: string,
+): boolean {
+  if (record.kind !== "file_read" && record.kind !== "grep_result" && record.kind !== "index_query") {
+    return false;
+  }
+  if (record.supportsClaims.includes("tool_failure")) return false;
+  const owner = record.ownerScope;
+  if (!owner || owner.ownerAgentId || owner.workflowRunId) return false;
+  if (owner.requestTurnId !== requestTurnId) return false;
+  if (context.sessionId && owner.ownerSessionId !== context.sessionId) return false;
+  if (!evidenceCwdBelongsToProject(owner.cwd, context.projectPath)) return false;
+  return record.supportsClaims.includes("readonly_low_noise_evidence") ||
+    record.supportsClaims.includes("code_fact") ||
+    record.kind === "index_query";
+}
+
 function evidenceCwdBelongsToProject(cwd: unknown, projectPath: unknown): boolean {
   if (
     typeof cwd !== "string" ||
@@ -1918,6 +2108,14 @@ export function __testCaptureFinalGapProgressState(
   return captureFinalGapProgressState(result, context, evidenceAction, previousState);
 }
 
+export function __testActivateReadonlyEvidenceCarryover(
+  context: TuiContext,
+  previousRequestTurnId: string,
+  currentRequestTurnId: string,
+): void {
+  readonlyEvidenceCarryoverScopes.set(context, { previousRequestTurnId, currentRequestTurnId });
+}
+
 function evaluateEngineeringFinalBoundary(
   context: TuiContext,
   assistantText: string,
@@ -1926,11 +2124,12 @@ function evaluateEngineeringFinalBoundary(
   const signal = context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal;
   if (!signal) return { status: "passed" };
   const currentConstraints = currentRequestUserActionConstraints(context);
+  const readonlyRequest = Boolean(currentConstraints && hasReadOnlyUserConstraint(currentConstraints));
+  const explicitEngineeringResult = hasExplicitEngineeringResultClaim(assistantText);
   if (
-    context.lastMetaSchedulerDecision?.policyDecision.taskKind === "code_fact" &&
-    currentConstraints &&
-    hasReadOnlyUserConstraint(currentConstraints) &&
-    !signal.failureCategory
+    readonlyRequest &&
+    hasReadonlyAuditBoundaryContext(assistantText) &&
+    !explicitEngineeringResult
   ) {
     return { status: "passed" };
   }
@@ -2027,7 +2226,7 @@ function hasServiceVerificationEvidence(context: Pick<TuiContext, "evidence">): 
 export function planFinalGateEvidenceGapAction(input: {
   result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>;
   context: Pick<TuiContext, "permissionMode" | "evidence" | "language"> &
-    Partial<Pick<TuiContext, "tools" | "recentlyMentionedFiles" | "lastMetaSchedulerDecision" | "backgroundTasks" | "currentRequestTurnId" | "sessionId" | "projectPath">>;
+    Partial<Pick<TuiContext, "tools" | "recentlyMentionedFiles" | "lastMetaSchedulerDecision" | "backgroundTasks" | "currentRequestTurnId" | "currentUserActionConstraintsRequestTurnId" | "currentUserActionConstraints" | "currentRequestChangedFiles" | "currentRequestMentionedFiles" | "sessionId" | "projectPath">>;
   userText?: string;
   assistantText?: string;
   evidenceActionRetryCount?: number;
@@ -2092,7 +2291,8 @@ export function planFinalGateEvidenceGapAction(input: {
     }
     return plan;
   };
-  const constraints = parseUserActionConstraints(input.userText);
+  const constraints = currentRequestUserActionConstraints(context) ??
+    parseUserActionConstraints(input.userText);
   const taskKind = context.lastMetaSchedulerDecision?.policyDecision.taskKind;
   if (
     (gap === "verification" || gap === "completion") &&
@@ -2194,6 +2394,7 @@ export function planFinalGateEvidenceGapAction(input: {
           : "completion_gap_verification_allowed_by_mode",
       missingKinds: result.unsupportedKinds,
       level: selectFinalGateVerificationLevel(result),
+      requestScope: createFinalGateVerificationRequestScope(context),
     }));
   }
   if (gap === "runtime") {
@@ -2234,6 +2435,7 @@ export function planFinalGateEvidenceGapAction(input: {
       reason: context.permissionMode === "default" ? "verification_requires_permission" : "verification_allowed_by_mode",
       missingKinds: result.unsupportedKinds,
       level: selectFinalGateVerificationLevel(result),
+      requestScope: createFinalGateVerificationRequestScope(context),
     }));
   }
   return {
@@ -2265,8 +2467,13 @@ function createVerificationEvidenceGapPlan(input: {
   reason: string;
   missingKinds: string[];
   level?: FinalGateVerificationLevel;
+  requestScope?: FinalGateVerificationRequestScope;
 }): FinalGateEvidenceGapActionPlan {
   const level = input.level ?? "typecheck";
+  const actionInput = {
+    level,
+    ...(input.requestScope ? { requestScope: input.requestScope } : {}),
+  };
 
   // Stage 4: Directive must exactly match selectedLevel
   const levelLabel = formatVerificationLevelLabel(level, input.language);
@@ -2292,16 +2499,53 @@ function createVerificationEvidenceGapPlan(input: {
       input.permissionMode === "default"
         ? {
             toolName: "Bash",
-            input: { level },
+            input: actionInput,
             strategy: "minimal_bash_verification",
             summary: `run one minimal ${level} verification command through Bash permission flow`,
           }
         : {
             toolName: "RunVerification",
-            input: { level },
+            input: actionInput,
             summary: `run minimal ${level} verification through RunVerification`,
           },
   };
+}
+
+function createFinalGateVerificationRequestScope(
+  context: Partial<Pick<TuiContext, "currentRequestTurnId" | "currentRequestChangedFiles" | "currentRequestMentionedFiles" | "projectPath">>,
+): FinalGateVerificationRequestScope | undefined {
+  const changedFiles = [...(context.currentRequestChangedFiles ?? [])];
+  const mentionedFiles = filterVerificationRequestScopeMentionedFiles(
+    context.currentRequestMentionedFiles ?? [],
+  );
+  if (
+    !context.currentRequestTurnId &&
+    changedFiles.length === 0 &&
+    mentionedFiles.length === 0 &&
+    !context.projectPath
+  ) {
+    return undefined;
+  }
+  return {
+    ...(context.currentRequestTurnId ? { requestTurnId: context.currentRequestTurnId } : {}),
+    ...(changedFiles.length > 0 ? { changedFiles } : {}),
+    ...(mentionedFiles.length > 0 ? { mentionedFiles } : {}),
+    ...(context.projectPath ? { cwd: context.projectPath } : {}),
+  };
+}
+
+function filterVerificationRequestScopeMentionedFiles(files: string[]): string[] {
+  return [...new Set(files.filter(isVerificationRequestScopeFile))];
+}
+
+function isVerificationRequestScopeFile(file: string): boolean {
+  const normalized = file.trim().replace(/\\/gu, "/");
+  return (
+    /\.(?:[cm]?[jt]sx?|py|rs|go|java)$/iu.test(normalized) ||
+    /(?:^|\/)(?:package\.json|pnpm-workspace\.yaml|pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb?|vitest\.config\.[^.\/]+|jest\.config\.[^.\/]+|tsconfig(?:\.[^.\/]+)?\.json|pyproject\.toml|pytest\.ini|go\.mod|Cargo\.toml|pom\.xml|build\.gradle(?:\.kts)?)$/iu.test(
+      normalized,
+    )
+  );
 }
 
 function formatVerificationLevelLabel(
@@ -2902,6 +3146,8 @@ function mapFinalGateKindsToUserLabels(kinds: string[], language: Language): str
       labels.add(language === "en-US" ? "verification or test evidence" : "验证或测试证据");
     } else if (/artifact|file|report|write/iu.test(kind)) {
       labels.add(language === "en-US" ? "artifact or file evidence" : "产物或文件证据");
+    } else if (/code_fact|source_read|source_search|local_read|index_code_fact/iu.test(kind)) {
+      labels.add(language === "en-US" ? "source matching evidence" : "源码匹配证据");
     } else if (/architecture|completeness|drift|boundary/iu.test(kind)) {
       labels.add(language === "en-US" ? "architecture or closure evidence" : "架构或闭合证据");
     } else if (/service|runtime|port|health/iu.test(kind)) {
@@ -3540,7 +3786,7 @@ export async function sendMessage(
     createdAt: string;
   };
   const interruptedTurnToResume = context.lastInterruptedTurn &&
-    isBareInterruptedTurnResumeRequest(text)
+    shouldResumeInterruptedTurnRequest(context, text)
     ? context.lastInterruptedTurn
     : undefined;
   const finalGateContinuationHint = !interruptedTurnToResume
@@ -3550,6 +3796,7 @@ export async function sendMessage(
     ? resumeInterruptedForegroundRequestTurn(context, userMessageEvent.id) ??
       beginForegroundRequestTurn(context, userMessageEvent.id)
     : beginForegroundRequestTurn(context, userMessageEvent.id);
+  configureReadonlyEvidenceCarryover(context, finalGateContinuationHint, text, requestTurnId);
   const resumedInterruptedTurn = requestTurnId === interruptedTurnToResume?.requestTurnId;
   if (!resumedInterruptedTurn) {
     context.lastInterruptedTurn = undefined;
@@ -3820,6 +4067,7 @@ export async function sendMessage(
     text,
     selectedRuntime,
     systemPrompt.volatile,
+    resumedInterruptedTurn,
   );
   let messagesForProvider = messages;
   if (finalGateContinuationHint) {
@@ -5131,7 +5379,7 @@ export async function sendMessage(
       context,
       currentFinalAssistantBlockText(assistantText, committedIntermediateAssistantText),
       metaSchedulerDecision.shouldRunFinalAnswerGate,
-      createMainChainVisibleFinalGateClaimOptions(),
+      createMainChainVisibleFinalGateClaimOptions(context),
     );
     if (finalVisibleGate.status === "needs_disclaimer") {
       assistantText = replaceCurrentFinalAssistantBlockText(
@@ -5827,6 +6075,7 @@ export async function buildModelMessagesWithRecentContext(
   currentUserText: string,
   runtime = getSelectedModelRuntime(context),
   volatileSystemPrompt: readonly ModelSystemPromptSegment[] = [],
+  currentUserResumesInterruptedTurn?: boolean,
 ): Promise<ModelMessage[]> {
   const messages: ModelMessage[] = toSystemMessages(systemPrompt);
   try {
@@ -5930,7 +6179,11 @@ export async function buildModelMessagesWithRecentContext(
     );
     if (compactSummary) messages.push(compactSummary);
     messages.push(...budgetedHistory);
-    currentUserText = appendInterruptedTurnBoundaryHint(currentUserText, interruptedTurnReason);
+    currentUserText = appendInterruptedTurnBoundaryHint(
+      currentUserText,
+      interruptedTurnReason,
+      currentUserResumesInterruptedTurn ?? isBareInterruptedTurnResumeRequest(currentUserText),
+    );
   } catch (error) {
     await appendSystemEvent(
       context,
@@ -5953,9 +6206,13 @@ export async function buildModelMessagesWithRecentContext(
   return messages;
 }
 
-function appendInterruptedTurnBoundaryHint(text: string, reason: string | undefined): string {
+function appendInterruptedTurnBoundaryHint(
+  text: string,
+  reason: string | undefined,
+  resumesInterruptedTurn = isBareInterruptedTurnResumeRequest(text),
+): string {
   if (!reason) return text;
-  if (isBareInterruptedTurnResumeRequest(text)) {
+  if (resumesInterruptedTurn) {
     return `${text}\n\nPrevious foreground turn was interrupted (reason: ${reason}). This user message requests continuing that interrupted task. Continue from the prior request context instead of treating this short resume request as a new task.`;
   }
   return `${text}\n\nPrevious foreground turn was interrupted (reason: ${reason}). Treat this user message as the authoritative task. Do not infer the task only from current git diff, pending file changes, or unrelated background state unless the user explicitly asks to audit them.`;
@@ -6416,7 +6673,7 @@ async function streamFinalModelAnswerWithoutTools(
     const gateResult = evaluateAggregatedFinalAnswerGate(
       context,
       assistantText,
-      context.lastMetaSchedulerDecision?.shouldRunFinalAnswerGate ?? true,
+      shouldRunExtendedFinalAnswerGate(context),
       createMainChainFinalGateClaimOptions(context),
     );
     if (gateResult.status === "needs_disclaimer") {
@@ -6476,6 +6733,16 @@ async function streamFinalModelAnswerWithoutTools(
           : "info",
       );
       if (requestIsStale()) return "";
+      if (requestTurnId) {
+        captureFinalGateContinuationBridgeHint({
+          context,
+          requestTurnId,
+          userText: continuation.originalUserText,
+          result: gateResult,
+          actionPlan,
+          progressState: continuation.finalGapProgressState,
+        });
+      }
       if (actionPlan.action === "claim_contract_request") {
         continuation.messages.push({
           role: "assistant",
@@ -7474,7 +7741,7 @@ export async function continueModelAfterToolResults(
           const gateResult = evaluateAggregatedFinalAnswerGate(
             context,
             finalGateAssistantText,
-            context.lastMetaSchedulerDecision?.shouldRunFinalAnswerGate ?? true,
+            shouldRunExtendedFinalAnswerGate(context),
             createMainChainFinalGateClaimOptions(context),
           );
           if (gateResult.status === "needs_disclaimer") {
@@ -7533,6 +7800,16 @@ export async function continueModelAfterToolResults(
                 : "info",
             );
             if (await stopStaleContinuation()) return;
+            if (continuation.requestTurnId) {
+              captureFinalGateContinuationBridgeHint({
+                context,
+                requestTurnId: continuation.requestTurnId,
+                userText: continuation.originalUserText,
+                result: gateResult,
+                actionPlan,
+                progressState: finalGapProgressState,
+              });
+            }
             if (actionPlan.action === "blocked_explanation") {
               await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
               if (await stopStaleContinuation()) return;
@@ -7782,7 +8059,7 @@ export async function continueModelAfterToolResults(
         const gateResult = evaluateAggregatedFinalAnswerGate(
           context,
           assistantTextBeforeFinalGate,
-          context.lastMetaSchedulerDecision?.shouldRunFinalAnswerGate ?? true,
+          shouldRunExtendedFinalAnswerGate(context),
           createMainChainFinalGateClaimOptions(context),
         );
         if (gateResult.status === "needs_disclaimer") {
@@ -7852,11 +8129,21 @@ export async function continueModelAfterToolResults(
               context,
               sessionId,
               `final_answer_gap_planner continuation_final_safety=yes action=${actionPlan.action} reason=${actionPlan.reason}`,
-                actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only"
-                  ? "warning"
-                  : "info",
-              );
-              if (await stopStaleContinuation()) return;
+              actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only"
+                ? "warning"
+                : "info",
+            );
+            if (await stopStaleContinuation()) return;
+            if (continuation.requestTurnId) {
+              captureFinalGateContinuationBridgeHint({
+                context,
+                requestTurnId: continuation.requestTurnId,
+                userText: continuation.originalUserText,
+                result: gateResult,
+                actionPlan,
+                progressState: finalGapProgressState,
+              });
+            }
             if (actionPlan.action === "claim_contract_request") {
               continuation.messages.push({
                 role: "assistant",
@@ -7972,8 +8259,8 @@ export async function continueModelAfterToolResults(
       const finalVisibleGate = evaluateAggregatedFinalAnswerGate(
         context,
         currentFinalAssistantBlockText(assistantText, committedIntermediateAssistantText),
-        context.lastMetaSchedulerDecision?.shouldRunFinalAnswerGate ?? true,
-        createMainChainVisibleFinalGateClaimOptions(),
+        shouldRunExtendedFinalAnswerGate(context),
+        createMainChainVisibleFinalGateClaimOptions(context),
       );
       if (finalVisibleGate.status === "needs_disclaimer") {
         assistantText = replaceCurrentFinalAssistantBlockText(

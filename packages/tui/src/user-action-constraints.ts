@@ -36,11 +36,22 @@ const EMPTY_CONSTRAINTS: UserActionConstraints = {
 };
 
 function splitConstraintClauses(text: string): string[] {
-  const clauses = text
-    .split(/[\r\n。！？!?；;，,]+/u)
-    .map((clause) => clause.trim())
+  const clauses = text.match(/[^\r\n。！!？?；;，,]+[？?]?/gu)
+    ?.map((clause) => clause.trim())
     .filter(Boolean);
-  return clauses.length > 0 ? clauses : [text];
+  return clauses && clauses.length > 0 ? clauses : [text];
+}
+
+function isConstraintWordingQuestion(clause: string): boolean {
+  return (
+    /[？?]\s*$/u.test(clause) ||
+    /(?:这句话|这个说法|是不是|为什么|怎么会|会不会|吗|普通问答|提到).{0,80}(?:关键词|正则|语义|解析|识别|判断|误触|误判|硬门控|硬限制|门控|约束机制|约束规则|阻止验证)/iu.test(
+      clause,
+    ) ||
+    /(?:is\s+this|does\s+["'\w\s-]+trigger|parsed\s+by|constraint\s+wording|wording\s+example)/iu.test(
+      clause,
+    )
+  );
 }
 
 function anyClauseMatches(clauses: string[], pattern: RegExp): boolean {
@@ -56,16 +67,20 @@ function anyNegatedRunListMentions(clauses: string[], itemPattern: RegExp): bool
 }
 
 function isExplicitConstraintDirective(clause: string): boolean {
-  if (
-    /(?:关键词|正则|语义|解析|识别|判断|误触|误判|硬门控|硬限制|门控|约束机制|约束规则|这句话|这个说法|文案)|(?:regex|semantic|parser|parsing|wording|hard\s+(?:gate|constraint)|constraint\s+(?:parser|rule))/iu.test(
+  const startsWithExplicitDirective =
+    /^(?:(?:请|麻烦|本次|这次|当前(?:请求|任务)?|这个任务|该任务|我要求|用户要求|先|然后|再|也|并且|同时|但(?:是)?)\s*)*(?:只读|只\s*(?:看|检查|分析|审计|定位)|只允许|不要|别|不准|禁止|先别|不可以|不允许|不能|不可|不许|不\s*(?:跑|运行|执行|做|进行))|^(?:(?:please|for\s+this\s+(?:request|task)|then|also|but)\s+)*(?:read[-\s]?only|audit\s+only|diagnose\s+only|inspect\s+only|do\s+not|don't|dont|no\s|cannot|can't|cant|not\s+allowed|may\s+not|must\s+not|without\s|answer\s+without|use\s+no)/iu.test(
       clause,
-    )
+    );
+  if (
+    (startsWithExplicitDirective && isConstraintWordingQuestion(clause)) ||
+    !startsWithExplicitDirective &&
+      /(?:关键词|正则|语义|解析|识别|判断|误触|误判|硬门控|硬限制|门控|约束机制|约束规则|这句话|这个说法|文案)|(?:regex|semantic|parser|parsing|wording|hard\s+(?:gate|constraint)|constraint\s+(?:parser|rule))/iu.test(
+        clause,
+      )
   ) {
     return false;
   }
-  return /^(?:(?:请|麻烦|本次|这次|当前(?:请求|任务)?|这个任务|该任务|我要求|用户要求|先|然后|再|也|并且|同时|但(?:是)?)\s*)*(?:只读|只\s*(?:看|检查|分析|审计|定位)|只允许|不要|别|不准|禁止|先别|不可以|不允许|不能|不可|不许|不\s*(?:跑|运行|执行|做|进行))|^(?:(?:please|for\s+this\s+(?:request|task)|then|also|but)\s+)*(?:read[-\s]?only|audit\s+only|diagnose\s+only|inspect\s+only|do\s+not|don't|dont|no\s|cannot|can't|cant|not\s+allowed|may\s+not|must\s+not|without\s|answer\s+without|use\s+no)/iu.test(
-    clause,
-  );
+  return startsWithExplicitDirective;
 }
 
 function hasPhasedReadThenWriteIntent(text: string): boolean {
@@ -284,7 +299,7 @@ export function parseUserActionConstraints(text: string | undefined): UserAction
 
   const forbidShell =
     forbidAllTools ||
-    anyClauseMatches(constraintClauses, /(?:不要|别|不准|禁止|先别)\s*(?:再|继续|重新)?\s*(?:(?:执行|运行|跑)\s*(?:任何|所有|全部)?\s*(?:终端|shell)?\s*命令|用\s*Bash|用\s*shell|bash|shell|终端命令)/iu) ||
+    anyClauseMatches(constraintClauses, /(?:不要|别|不准|禁止|先别|不)\s*(?:再|继续|重新)?\s*(?:(?:执行|运行|跑)\s*(?:任何|所有|全部)?\s*(?:终端|shell)?\s*命令|用\s*Bash|用\s*shell|bash|shell|终端命令)/iu) ||
     anyClauseMatches(constraintClauses, /(?:do\s+not|don't|dont|no)\s+(?:run|execute|use)\s+(?:(?:any|all|the)\s+)?(?:commands?|bash|shell)/iu) ||
     anyClauseMatches(constraintClauses, /^no\s+shell(?:\s+commands?)?$/iu);
 
@@ -302,7 +317,7 @@ export function parseUserActionConstraints(text: string | undefined): UserAction
 }
 
 export function forbidsVerificationEvidence(constraints: UserActionConstraints): boolean {
-  return constraints.forbidAllTools || constraints.forbidShell;
+  return constraints.readonlyOnly || constraints.forbidAllTools || constraints.forbidShell;
 }
 
 export function verificationStepConstraintReason(
@@ -310,6 +325,7 @@ export function verificationStepConstraintReason(
   kind: VerificationStepKind,
 ): string | undefined {
   if (!constraints) return undefined;
+  if (constraints.readonlyOnly) return "the current request is read-only";
   if (constraints.forbidAllTools) return "the current request forbids all tools";
   if (constraints.forbidShell) return "the current request forbids shell commands";
   if (kind === "test" && constraints.forbidTests) return "the current request forbids tests";

@@ -1204,6 +1204,18 @@ function hasReadOnlyIntent(text: string): boolean {
   return hasReadOnlyUserConstraint(parseUserActionConstraints(text));
 }
 
+function hasExplicitVerificationRunIntent(text: string): boolean {
+  return text.split(/[\r\n。！？!?；;，,]+/u).some(
+    (clause) =>
+      /(?:运行|执行|跑|进行|run|execute).{0,24}(?:验证|测试|verification|tests?|type[-\s]?check|lint|build)/iu.test(
+        clause,
+      ) &&
+      !/(?:不要|别|不准|禁止|先别|不)\s*(?:再|继续|重新)?\s*(?:运行|执行|跑|进行)|(?:do\s+not|don't|dont|no)\s+(?:run|execute)/iu.test(
+        clause,
+      ),
+  );
+}
+
 function classifyTaskKind(
   userText: string,
   capabilityPlan: CapabilityPlan = createEmptyCapabilityPlan(),
@@ -1246,8 +1258,13 @@ function classifyTaskKind(
     reasons.push("连续失败后强制源码优先");
   }
 
+  const readOnlyIntent = hasReadOnlyIntent(userText);
+  const explicitVerificationRunIntent = hasExplicitVerificationRunIntent(userText);
+  const readonlySuppressesVerification =
+    readOnlyIntent && !explicitVerificationRunIntent;
+
   if (lastVerificationStatus === "fail") {
-    if (!secondaries.includes("verification")) {
+    if (!readonlySuppressesVerification && !secondaries.includes("verification")) {
       secondaries.push("verification");
     }
     reasons.push("上轮验证失败");
@@ -1257,21 +1274,24 @@ function classifyTaskKind(
     reasons.push("provider 历史失败，避免重压力操作");
   }
 
-  const readOnlyIntent = hasReadOnlyIntent(userText);
   if (readOnlyIntent) {
     reasons.push("用户明确要求只读/先不修改");
   }
 
   // 确定 primary：信号可覆盖关键词打分
   let primary: PolicyDecision["taskKind"];
-  if ((consecutiveFailures >= 2 || readOnlyIntent) && dominant.kind === "edit") {
+  if (explicitVerificationRunIntent && dominant.kind !== "edit") {
+    primary = "verification";
+  } else if ((consecutiveFailures >= 2 || readOnlyIntent) && dominant.kind === "edit") {
+    primary = "code_fact";
+  } else if (readonlySuppressesVerification && dominant.kind === "verification") {
     primary = "code_fact";
   } else {
     primary = dominant.kind;
   }
 
   // Layer 3: 模糊时标记澄清
-  const intentUnclear = scores.every((s) => s.score < 10);
+  const intentUnclear = !explicitVerificationRunIntent && scores.every((s) => s.score < 10);
   if (intentUnclear && reasons.length === 0) {
     reasons.push("意图模糊，建议模型先澄清");
   }
@@ -1283,6 +1303,7 @@ function classifyTaskKind(
       : scores.find((s) => s.kind === primary)?.score ?? 0;
   for (const s of scores) {
     if (s.kind === primary) continue;
+    if (readonlySuppressesVerification && s.kind === "verification") continue;
     if (s.score >= primaryScore * 0.6 && s.score > 0) {
       if (!secondaries.includes(s.kind)) {
         secondaries.push(s.kind);
@@ -1351,6 +1372,8 @@ function classifyVerificationDomain(
   taskKind: PolicyDecision["taskKind"],
   expectedMutating: boolean,
 ): VerificationRouteDomain {
+  const readonlyWithoutVerificationRun = hasReadOnlyIntent(userText) &&
+    !hasExplicitVerificationRunIntent(userText);
   if (taskKind === "capability") {
     return "agent_job_workflow";
   }
@@ -1385,7 +1408,8 @@ function classifyVerificationDomain(
   if (
     taskKind === "edit" ||
     expectedMutating ||
-    /(?:代码|源码|ts|tsx|js|jsx|test|typecheck|lint|build|diff|实现|修复)/iu.test(userText)
+    (!readonlyWithoutVerificationRun &&
+      /(?:代码|源码|ts|tsx|js|jsx|test|typecheck|lint|build|diff|实现|修复)/iu.test(userText))
   ) {
     return "code_change";
   }

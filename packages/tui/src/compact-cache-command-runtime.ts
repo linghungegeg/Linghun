@@ -33,13 +33,12 @@ import { compactBoundaryHash } from "./compact-context.js";
 import {
   getAutoCompactTriggerChars,
   getProviderContextMaxChars,
-  getProviderContextWindowChars,
   inspectToolPairingSafety,
   prepareMessagesForProviderPreflight,
   recordCompactBoundary,
 } from "./compact-preflight-runtime.js";
 import { estimateModelMessageChars } from "./context-estimator.js";
-import { getNativeContextWindowForModel } from "./context-window-runtime.js";
+import { getContextWindowForModel } from "./context-window-runtime.js";
 import {
   createDeepCompactProgress,
   maybeRunDeepCompactBeforeProvider,
@@ -111,10 +110,11 @@ import {
 import type { WorkspaceReferenceCache } from "./workspace-reference-cache.js";
 
 const USAGE_STALE_MIN_CONFIRMED_TOKENS = 1;
+const USAGE_STALE_MIN_TRIGGER_RATIO = 0.5;
 
 function getContextWindowTokens(context: TuiContext): number {
   const runtime = getSelectedModelRuntime(context);
-  return getNativeContextWindowForModel(runtime.model);
+  return getContextWindowForModel(runtime.model, getRoleRoute(context.config, runtime.role));
 }
 
 function getCompactTriggerTokens(context: TuiContext): number {
@@ -166,6 +166,9 @@ export function markContextUsageStale(
   if (!existing?.confirmedUsedTokens || existing.confirmedUsedTokens < USAGE_STALE_MIN_CONFIRMED_TOKENS) {
     return;
   }
+  if (!confirmedUsageIsNearCurrentTrigger(context, existing.confirmedUsedTokens)) {
+    return;
+  }
   context.cache.contextUsage = {
     ...existing,
     updatedAt: new Date().toISOString(),
@@ -177,15 +180,24 @@ export function shouldForceCompactFromConfirmedUsage(context: TuiContext): boole
   const usage = context.cache.contextUsage;
   if (!usage?.confirmedUsedTokens) return false;
   const runtime = getSelectedModelRuntime(context);
+  const currentContextWindowTokens = getContextWindowTokens(context);
   const runtimeChanged = Boolean(
     usage.staleReason === "runtime_changed" ||
       (usage.model &&
-        (usage.model !== runtime.model || usage.provider !== runtime.provider)),
+        (usage.model !== runtime.model || usage.provider !== runtime.provider)) ||
+      (usage.contextWindowTokens !== undefined &&
+        usage.contextWindowTokens !== currentContextWindowTokens),
   );
+  const currentTriggerTokens = getCompactTriggerTokens(context);
   const triggerTokens = runtimeChanged
-    ? getCompactTriggerTokens(context)
-    : usage.compactTriggerTokens ?? getCompactTriggerTokens(context);
+    ? currentTriggerTokens
+    : Math.max(usage.compactTriggerTokens ?? currentTriggerTokens, currentTriggerTokens);
   return usage.confirmedUsedTokens >= triggerTokens;
+}
+
+function confirmedUsageIsNearCurrentTrigger(context: TuiContext, confirmedUsedTokens: number): boolean {
+  const triggerTokens = getCompactTriggerTokens(context);
+  return confirmedUsedTokens >= Math.ceil(triggerTokens * USAGE_STALE_MIN_TRIGGER_RATIO);
 }
 
 let _builtInToolsHashCache: string | undefined;
@@ -463,7 +475,6 @@ export async function refreshCompactPressureSnapshot(context: TuiContext): Promi
     const runtime = getSelectedModelRuntime(context);
     const estimatedChars = estimateModelMessageChars(messages);
     const maxChars = getProviderContextMaxChars(context, runtime);
-    const windowChars = getProviderContextWindowChars(context, runtime);
     const triggerChars = getAutoCompactTriggerChars(context, runtime);
     const updatedAt = new Date().toISOString();
     context.cache.compactPressure = {
@@ -476,7 +487,7 @@ export async function refreshCompactPressureSnapshot(context: TuiContext): Promi
     };
     context.cache.contextUsage = {
       estimatedChars,
-      maxChars: windowChars,
+      maxChars,
       updatedAt,
       source: "pressure",
     };

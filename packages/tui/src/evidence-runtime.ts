@@ -831,6 +831,9 @@ function deriveVerificationSupportsClaims(report: VerificationReport): string[] 
     if (command.status !== "pass") continue;
     if (command.kind === "test") {
       claims.add("test_passed");
+      if ((report.scope?.changedFiles.length ?? 0) > 0) {
+        claims.add("test_scope:focused");
+      }
     } else if (command.kind === "typecheck") {
       claims.add("typecheck_passed");
     } else if (command.kind === "build") {

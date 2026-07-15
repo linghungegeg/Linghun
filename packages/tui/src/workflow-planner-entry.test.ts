@@ -77,8 +77,8 @@ describe("D.14H-E workflow planner entry", () => {
       const verify = slices.find((slice) => slice.id === "slice-verify");
       expect(verify?.dependsOnSliceIds).toEqual(["slice-architecture-review"]);
       expect(verify?.targetRuntime).toMatchObject({
-        kind: "verification",
-        level: "typecheck",
+        kind: "details",
+        view: "evidence",
         mutating: false,
       });
     }
@@ -89,6 +89,18 @@ describe("D.14H-E workflow planner entry", () => {
     expect(fixResult.plan.phases[0].slices.some((slice) => slice.id === "slice-implement")).toBe(
       true,
     );
+  });
+
+  it("keeps explicit verification goals executable", () => {
+    const result = generateWorkflowPlanPreview(goal({ goal: "运行 focused verification 检查当前改动" }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const verify = result.plan.phases[0].slices.find((slice) => slice.id === "slice-verify");
+    expect(verify?.targetRuntime).toMatchObject({
+      kind: "verification",
+      level: "typecheck",
+      mutating: false,
+    });
   });
 
   it("default mode marks mutating proposals with requiresStartGate/requiresPermissionPipeline, not directly executable", () => {

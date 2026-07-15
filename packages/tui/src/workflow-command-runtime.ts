@@ -34,7 +34,7 @@ import {
   handleJobCommand,
 } from "./job-agent-command-runtime.js";
 import { getDurableJobStatePath } from "./job-runtime.js";
-import { truncateDisplay, writeLine } from "./startup-runtime.js";
+import { formatError, truncateDisplay, writeLine } from "./startup-runtime.js";
 import { messages } from "./tui-messages.js";
 import {
   isRuntimeActiveBackgroundTask,
@@ -45,7 +45,9 @@ import type { TuiContext } from "./tui-context-runtime.js";
 import { WORKFLOW_ARCHITECTURE_REVIEW_FILE_LIMIT } from "./tui-context-runtime.js";
 import {
   currentRequestUserActionConstraints,
+  forbidsVerificationEvidence,
   type UserActionConstraints,
+  verificationStepConstraintReason,
 } from "./user-action-constraints.js";
 import type {
   AgentRun,
@@ -88,6 +90,10 @@ type WorkflowToolOwner = {
   cwd?: string;
 };
 
+type PreVerifyExecutionResult =
+  | { ok: true; text: string; data?: unknown; degraded?: boolean }
+  | { ok: false; text: string };
+
 export type WorkflowCommandRuntimeDeps = {
   ensureSession: (context: TuiContext) => Promise<string>;
   appendSystemEvent: (
@@ -126,6 +132,11 @@ export type WorkflowCommandRuntimeDeps = {
     output: Writable,
     owner?: WorkflowToolOwner,
   ) => Promise<ToolOutput | undefined>;
+  executePreVerify?: (
+    context: TuiContext,
+    changedFiles: string[],
+    options: { signal?: AbortSignal },
+  ) => Promise<PreVerifyExecutionResult>;
   createSilentOutput: () => Writable;
 };
 
@@ -183,6 +194,14 @@ function captureFailureLearning(
 
 function rememberEvidence(context: TuiContext, evidence: EvidenceRecord): void {
   getWorkflowDeps().rememberEvidence(context, evidence);
+}
+
+async function executePreVerify(
+  context: TuiContext,
+  changedFiles: string[],
+  options: { signal?: AbortSignal },
+): Promise<PreVerifyExecutionResult | undefined> {
+  return getWorkflowDeps().executePreVerify?.(context, changedFiles, options);
 }
 
 export type WorkflowDispatchRuntimePolicy =
@@ -2804,6 +2823,130 @@ function deriveWorkflowRunningCap(plan: NormalizedWorkflowPlan, phaseId?: string
   return Math.max(1, phase?.slices.length ?? 1);
 }
 
+async function recordFocusedPreVerifyEvidence(input: {
+  context: TuiContext;
+  sessionId: string;
+  level: "plan-only" | "smoke" | "focused" | "real-smoke" | "typecheck" | "test" | "build" | "lint";
+  changedFiles: string[];
+  verificationScope: VerificationScope;
+  ownerSignal?: AbortSignal;
+  userActionConstraints?: UserActionConstraints;
+  commitGuard: () => boolean;
+}): Promise<void> {
+  if (
+    !shouldRunFocusedPreVerify(
+      input.level,
+      input.changedFiles,
+      input.verificationScope,
+      input.userActionConstraints,
+    )
+  ) {
+    return;
+  }
+  if (!input.commitGuard() || isAbortSignalAborted(input.ownerSignal)) return;
+  const result = await executePreVerify(input.context, input.changedFiles, {
+    signal: input.ownerSignal,
+  }).catch((error: unknown): PreVerifyExecutionResult => ({
+    ok: false,
+    text: formatError(error, input.context.language),
+  }));
+  if (!result) return;
+  if (!input.commitGuard() || isAbortSignalAborted(input.ownerSignal)) return;
+
+  const degraded = result.ok === true && result.degraded === true;
+  const supportsClaims = [
+    "pre_verify",
+    "pre_verify_semantic_evidence",
+    ...(result.ok === false ? ["pre_verify_not_run", "tool_failure"] : []),
+    ...(degraded ? ["pre_verify_degraded", "fallback_required"] : []),
+    ...(result.ok === true && !degraded ? ["pre_verify_passed"] : []),
+  ];
+  const evidence = createEvidenceRecord(
+    "command_output",
+    `pre_verify ${result.ok ? "completed" : "failed"}: ${truncateDisplay(result.text.replace(/\s+/g, " "), 160)}`,
+    "pre-engine:pre_verify",
+    supportsClaims,
+  );
+  evidence.data = {
+    verificationScope: input.verificationScope,
+    preVerify: {
+      status: result.ok ? (degraded ? "degraded" : "pass") : "fail",
+      data: result.ok ? result.data : undefined,
+    },
+  };
+  evidence.ownerScope = {
+    ownerSessionId: input.verificationScope.ownerSessionId,
+    ...(input.verificationScope.requestTurnId
+      ? { requestTurnId: input.verificationScope.requestTurnId }
+      : {}),
+    cwd: input.verificationScope.cwd,
+    targets: [...input.changedFiles],
+  };
+  await input.context.store.appendEvent(
+    input.sessionId,
+    { type: "evidence_record", ...evidence },
+    input.commitGuard,
+  );
+  if (!input.commitGuard() || isAbortSignalAborted(input.ownerSignal)) return;
+  rememberEvidence(input.context, evidence);
+}
+
+function isAbortSignalAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
+}
+
+function shouldRunFocusedPreVerify(
+  level: "plan-only" | "smoke" | "focused" | "real-smoke" | "typecheck" | "test" | "build" | "lint",
+  changedFiles: string[],
+  scope: VerificationScope,
+  constraints?: UserActionConstraints,
+): boolean {
+  if (constraints && forbidsVerificationEvidence(constraints)) return false;
+  if (
+    constraints &&
+    isPreVerifyVerificationStepLevel(level) &&
+    verificationStepConstraintReason(constraints, level)
+  ) {
+    return false;
+  }
+  return (
+    Boolean(scope.requestTurnId) &&
+    !scope.workflowRunId &&
+    isPreVerifyEligibleLevel(level) &&
+    changedFiles.some(isProductGradePreVerifyFile)
+  );
+}
+
+function isPreVerifyEligibleLevel(
+  level: "plan-only" | "smoke" | "focused" | "real-smoke" | "typecheck" | "test" | "build" | "lint",
+): boolean {
+  return (
+    level === "focused" ||
+    level === "test" ||
+    level === "typecheck" ||
+    level === "lint" ||
+    level === "build"
+  );
+}
+
+function isPreVerifyVerificationStepLevel(
+  level: "plan-only" | "smoke" | "focused" | "real-smoke" | "typecheck" | "test" | "build" | "lint",
+): level is "typecheck" | "test" | "build" | "lint" | "smoke" {
+  return (
+    level === "typecheck" ||
+    level === "test" ||
+    level === "build" ||
+    level === "lint" ||
+    level === "smoke"
+  );
+}
+
+function isProductGradePreVerifyFile(file: string): boolean {
+  return /\.(?:[cm]?tsx?|py|rs|go|java)$/iu.test(file);
+}
+
+export const __testShouldRunFocusedPreVerify = shouldRunFocusedPreVerify;
+
 export async function runWorkflowVerificationStep(
   level: "plan-only" | "smoke" | "focused" | "real-smoke" | "typecheck" | "test" | "build" | "lint",
   context: TuiContext,
@@ -2931,6 +3074,16 @@ export async function runWorkflowVerificationStep(
     }
     return report;
   }
+  await recordFocusedPreVerifyEvidence({
+    context,
+    sessionId,
+    level,
+    changedFiles,
+    verificationScope,
+    ownerSignal: effectiveOwnerSignal,
+    userActionConstraints: options.userActionConstraints,
+    commitGuard: ownerStillValid,
+  });
   if (options.workflowRunId && !options.ownerSignal && !workflowController) {
     context.backgroundAbortControllers ??= new Map();
     workflowController = new AbortController();

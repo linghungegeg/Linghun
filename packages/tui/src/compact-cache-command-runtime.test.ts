@@ -4,6 +4,7 @@ import {
   appendUsageEvents,
   markContextUsageStale,
   recordConfirmedContextUsage,
+  refreshCompactPressureSnapshot,
   shouldForceCompactFromConfirmedUsage,
 } from "./compact-cache-command-runtime.js";
 import type { TuiContext } from "./tui-context-runtime.js";
@@ -42,6 +43,39 @@ function makeContext(provider: "deepseek" | "openai-compatible" = "deepseek"): T
         updatedAt: "2026-01-01T00:00:00.000Z",
       },
       startedAt: 1,
+    },
+    memory: {
+      items: [],
+      projectRules: "",
+      candidates: [],
+      accepted: [],
+    },
+    index: {
+      status: "disabled",
+    },
+    skills: {
+      enabled: false,
+      skills: [],
+    },
+    plugins: {
+      enabled: false,
+      plugins: [],
+    },
+    hooks: {
+      enabled: false,
+      hooks: [],
+    },
+    mcp: {
+      enabled: false,
+      servers: [],
+    },
+    evidence: [],
+    backgroundTasks: [],
+    solutionCompleteness: {
+      triggered: false,
+    },
+    failureLearning: {
+      records: [],
     },
   } as unknown as TuiContext;
 }
@@ -133,7 +167,7 @@ describe("context usage ledger", () => {
     });
   });
 
-  it("marks usage stale without clearing the confirmed ledger", () => {
+  it("does not mark low confirmed usage stale", () => {
     const context = makeContext();
     recordConfirmedContextUsage(context, {
       inputTokens: 100,
@@ -147,6 +181,24 @@ describe("context usage ledger", () => {
 
     expect(context.cache.contextUsage).toMatchObject({
       confirmedUsedTokens: 125,
+      staleReason: undefined,
+    });
+  });
+
+  it("marks near-trigger usage stale without clearing the confirmed ledger", () => {
+    const context = makeContext();
+    recordConfirmedContextUsage(context, {
+      inputTokens: 100,
+      outputTokens: 10,
+      totalTokens: 110,
+    });
+    const nearTrigger = Math.ceil((context.cache.contextUsage?.compactTriggerTokens ?? 1) * 0.5);
+    context.cache.contextUsage!.confirmedUsedTokens = nearTrigger;
+
+    markContextUsageStale(context, "disconnected_mid_stream");
+
+    expect(context.cache.contextUsage).toMatchObject({
+      confirmedUsedTokens: nearTrigger,
       staleReason: "disconnected_mid_stream",
     });
   });
@@ -172,26 +224,83 @@ describe("context usage ledger", () => {
 
   it("uses confirmed usage to gate the next compact pass", () => {
     const context = makeContext();
-    context.cache.contextUsage = {
-      estimatedChars: 0,
-      maxChars: 256 * 4,
-      updatedAt: "2026-01-01T00:00:00.000Z",
-      source: "provider_usage",
-      confirmedUsedTokens: 100,
-      contextWindowTokens: 256,
-      compactTriggerTokens: 230,
-    };
+    recordConfirmedContextUsage(context, {
+      inputTokens: 100,
+      outputTokens: 10,
+      totalTokens: 110,
+    });
+    const currentTrigger = context.cache.contextUsage?.compactTriggerTokens ?? 1;
+    context.cache.contextUsage!.confirmedUsedTokens = currentTrigger - 1;
 
     expect(shouldForceCompactFromConfirmedUsage(context)).toBe(false);
 
-    context.cache.contextUsage.confirmedUsedTokens = 230;
+    context.cache.contextUsage!.confirmedUsedTokens = currentTrigger;
     markContextUsageStale(context, "disconnected_mid_stream");
 
     expect(shouldForceCompactFromConfirmedUsage(context)).toBe(true);
     expect(context.cache.contextUsage).toMatchObject({
-      confirmedUsedTokens: 230,
+      confirmedUsedTokens: currentTrigger,
       staleReason: "disconnected_mid_stream",
     });
+  });
+
+  it("records confirmed usage against the executor effective input window", () => {
+    const context = makeContext("openai-compatible");
+    context.model = "custom-model[1m]";
+    context.config.modelRoutes = {
+      ...context.config.modelRoutes,
+      routes: context.config.modelRoutes.routes.map((route) =>
+        route.role === "executor"
+          ? {
+              ...route,
+              provider: "openai-compatible",
+              primaryModel: "custom-model[1m]",
+              maxInputTokens: 200_000,
+            }
+          : route,
+      ),
+    };
+
+    recordConfirmedContextUsage(context, {
+      inputTokens: 10_000,
+      outputTokens: 10,
+      totalTokens: 10_010,
+    });
+
+    expect(context.cache.contextUsage?.contextWindowTokens).toBe(200_000);
+    expect(context.cache.contextUsage?.compactTriggerTokens).toBeLessThan(200_000);
+  });
+
+  it("records pressure usage against the executor effective input window", async () => {
+    const context = makeContext("openai-compatible");
+    context.sessionId = "session-1";
+    context.model = "custom-model[1m]";
+    context.config.modelRoutes = {
+      ...context.config.modelRoutes,
+      routes: context.config.modelRoutes.routes.map((route) =>
+        route.role === "executor"
+          ? {
+              ...route,
+              provider: "openai-compatible",
+              primaryModel: "custom-model[1m]",
+              maxInputTokens: 200_000,
+            }
+          : route,
+      ),
+    };
+    const events: unknown[] = [];
+    context.store = {
+      readRecentTranscriptEvents: async () => ({ events: [] }),
+      appendEvent: async (_sessionId: string, event: unknown) => {
+        events.push(event);
+      },
+    } as unknown as TuiContext["store"];
+
+    await refreshCompactPressureSnapshot(context);
+
+    expect(events).toEqual([]);
+    expect(context.cache.compactPressure?.maxChars).toBe(200_000 * 4);
+    expect(context.cache.contextUsage?.maxChars).toBe(200_000 * 4);
   });
 
   it("does not reuse an old model trigger after the runtime route changes", () => {

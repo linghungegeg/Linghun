@@ -49,6 +49,7 @@ import {
   upsertTranscriptSourceCell,
 } from "./models/transcript-source.js";
 import {
+  createCompactBoundaryBlock,
   createOutputBlock,
   createShellViewModel,
   getComposerPlaceholder,
@@ -4655,9 +4656,9 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
 
     expect(view.taskFooter?.cache).toBe("缓存 84%");
     expect(view.taskFooter?.contextUsage).toMatchObject({
-      wide: "上下文 25% (50k/200k) ↓38%",
-      narrow: "上下文 25% (50k/200k) ↓38%",
-      minimal: "上下文 25% ↓38%",
+      wide: "上下文 25% (50k/200k)",
+      narrow: "上下文 25% (50k/200k)",
+      minimal: "上下文 25%",
       ratio: 0.25,
     });
   });
@@ -4762,7 +4763,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     });
   });
 
-  it("task footer uses the current model total window instead of the route input budget", () => {
+  it("task footer uses the route input budget instead of the native model window", () => {
     const view = createShellViewModel(
       createContext({
         model: "custom-model[1m]",
@@ -4806,10 +4807,10 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     );
 
     expect(view.taskFooter?.contextUsage).toMatchObject({
-      wide: "上下文 8% (83k/1m)",
-      narrow: "上下文 8% (83k/1m)",
-      minimal: "上下文 8%",
-      ratio: 0.083,
+      wide: "上下文 42% (83k/200k)",
+      narrow: "上下文 42% (83k/200k)",
+      minimal: "上下文 42%",
+      ratio: 0.415,
     });
   });
 
@@ -5904,6 +5905,66 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     expect(terminalWrites).toEqual([]);
     output.endAssistantStream();
     expect(terminalWrites).toEqual(["safe final"]);
+  });
+
+  it("hides a stale tool failure after terminal-first final gate replacement commits to transcript source", () => {
+    vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "1");
+    const ctx = createContext({
+      language: "zh-CN",
+      currentRequestTurnId: "turn-current",
+      sessionId: "test-session",
+    } as Partial<TuiContext>);
+    const blocks: ProductBlockViewModel[] = [];
+    let stagedText = "";
+    const output = __testCreateShellBlockOutput(ctx, blocks, () => undefined, {
+      stageStableAssistantText: (text) => {
+        stagedText += text;
+      },
+      commitStableAssistantText: (_id, onFlush) => {
+        stagedText = "";
+        onFlush?.();
+        return true;
+      },
+      rollbackStableAssistantText: () => {
+        stagedText = "";
+      },
+      commitAssistantTurnBreak: () => true,
+    });
+
+    writeStructuredToolOutput(
+      output,
+      createStructuredToolOutput(
+        "Bash",
+        {
+          text: "error: unclosed group 'cli' 不是内部或外部命令，退出码 255",
+          data: { exitCode: 255 },
+        },
+        "zh-CN",
+      ),
+    );
+    output.beginAssistantStream("assistant-terminal-first-cleaned", { holdStableCommit: true });
+    output.replaceAssistantBlockContent(
+      "assistant-terminal-first-cleaned",
+      "我已确认目前检查覆盖到的部分：已有 50 条记录。\n本请求未能证实：验证或测试证据；未输出无证据支撑的结论。",
+    );
+    output.endAssistantStream();
+
+    expect(blocks.some((block) => block.messageKind === "assistant_text")).toBe(false);
+    expect(blocks.some((block) => block.messageKind === "tool_result_error")).toBe(true);
+    expect(ctx.transcriptSource?.cells.map((cell) => cell.kind)).toEqual([
+      "tool_result_error",
+      "assistant",
+    ]);
+    const view = createShellViewModel(ctx, {
+      outputBlocks: blocks,
+      transcriptSource: ctx.transcriptSource,
+      viewMode: "task",
+    });
+
+    expect(view.blocks.some((block) => block.messageKind === "tool_result_error")).toBe(false);
+    expect(view.taskSuggestions?.some((item) => item.source === "tool_error") ?? false).toBe(
+      false,
+    );
   });
 
   it("deduplicates adjacent provider failure error blocks by title and body", () => {
@@ -8997,6 +9058,17 @@ describe("TaskSuggestionBar executable state", () => {
     });
 
     expect(view.blocks.some((block) => block.messageKind === "compact_boundary")).toBe(false);
+  });
+
+  it("shows compact boundary pre/post and trigger details when available", () => {
+    const block = createCompactBoundaryBlock(186_000, 94_000, "zh-CN", {
+      triggerChars: 179_000,
+      reason: "request",
+    });
+
+    expect(block.title).toContain("182K->92K 字符");
+    expect(block.title).toContain("触发线 175K");
+    expect(block.title).toContain("自动");
   });
 
   it("hides compact boundary during submitted fallback activity", () => {

@@ -605,6 +605,10 @@ export async function prepareMessagesForProviderPreflight(input: {
         projection.preCompactChars,
         projection.postCompactChars,
         input.context.language,
+        {
+          triggerChars,
+          reason: input.trigger,
+        },
       ),
     );
     input.context.cache.compactProjection = projection;
@@ -1205,7 +1209,7 @@ function recordCompactStrategy(
     .filter((step) => step.status === "applied")
     .map((step) => step.layer);
   const updatedAt = new Date().toISOString();
-  const windowChars = getProviderContextWindowChars(context, input.runtime);
+  const windowChars = input.contextMaxChars;
   const toolPairingSafe = !input.steps.some((step) => step.reason === "tool_pairing_unsafe");
   context.cache.compactPressure = {
     estimatedChars: input.finalChars,

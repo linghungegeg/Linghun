@@ -393,7 +393,8 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
     //   "推理 High 已发送" / "Reasoning High sent"（生效路径）
     //   "未配置推理等级" / "Reasoning not configured"（缺省）
     //   "推理 High 不会发送（当前网关或模型不接受）" / "Reasoning High not sent ..."（不生效）
-    // 技术字段（effective/sent level High，路径详情）仍写在同一行的括号里，
+    // 技术字段（effective/sent level High、ignored/unsupported/未生效、not configured/未生效）
+    // 仍写在同一行的括号里，
     // 避免再开一段；既不破坏现有 doctor grep 用例（仍含 effective/sent 关键字），
     // 也让普通用户能直接看懂主行。
     const normalizedReasoningLevel = reasoningLevel?.trim().toLowerCase();
@@ -409,14 +410,14 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
       contract.reasoningTransport === "model-controlled"
         ? "model-controlled/not-sent"
         : contract.unsupportedReasoningLevel
-          ? `unsupported/not-sent level=${contract.unsupportedReasoningLevel}`
+          ? `ignored/unsupported/未生效 level=${contract.unsupportedReasoningLevel}`
           : contract.reasoningTransport === "openai-reasoning-effort" && normalizedReasoningLevel
             ? `effective/sent reasoning.effort=${normalizedReasoningLevel}`
             : contract.reasoningTransport === "anthropic-thinking-budget" && anthropicBudget
               ? `effective/sent thinking.budget_tokens=${anthropicBudget}`
               : reasoningLevel
-                ? `not-sent compatibility profile ${compatibilityProfile}`
-                : "not configured/not-sent";
+                ? `ignored/unsupported/未生效 compatibility profile ${compatibilityProfile}`
+                : "not configured/未生效";
     const reasoningPlain =
       contract.reasoningTransport === "model-controlled"
         ? context.language === "en-US"
