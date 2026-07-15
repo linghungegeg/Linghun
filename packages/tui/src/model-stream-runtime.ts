@@ -353,6 +353,16 @@ function replaceCurrentFinalAssistantBlockText(
   return `${committedIntermediateAssistantText}${leadingWhitespace}${replacement}`;
 }
 
+function prepareFinalAssistantVisibleText(
+  assistantText: string,
+  context: Pick<TuiContext, "language">,
+): string {
+  return sanitizeMainScreenLeakage(
+    stripStructuredFinalAnswerClaims(assistantText),
+    context.language,
+  );
+}
+
 function appendAssistantTextWithRoundBoundary(
   assistantText: string,
   committedIntermediateAssistantText: string,
@@ -5292,9 +5302,17 @@ export async function sendMessage(
           }
         }
       }
-      const visibleAssistantText = stripStructuredFinalAnswerClaims(assistantText);
-      if (visibleAssistantText !== assistantText) {
-        assistantText = visibleAssistantText;
+      const finalBlockText = currentFinalAssistantBlockText(
+        assistantText,
+        committedIntermediateAssistantText,
+      );
+      const visibleAssistantText = prepareFinalAssistantVisibleText(finalBlockText, context);
+      if (visibleAssistantText !== finalBlockText) {
+        assistantText = replaceCurrentFinalAssistantBlockText(
+          assistantText,
+          committedIntermediateAssistantText,
+          visibleAssistantText,
+        );
       }
       const evidenceCorrectedDraft = enforceSuccessfulToolCoherence(
         assistantTextBeforeFinalGate,
@@ -5330,16 +5348,26 @@ export async function sendMessage(
     // 避免内部运行时 token 泄漏。doctor/details 诊断能力不受影响。必须在
     // final-answer gate 之后执行，避免提前移除 LinghunFinalAnswerClaims 契约。
     {
-      const beforeSanitize = assistantText;
-      const sanitized = sanitizeMainScreenLeakage(assistantText, context.language);
-      if (sanitized !== assistantText) {
-        assistantText = sanitized;
+      const beforeSanitize = currentFinalAssistantBlockText(
+        assistantText,
+        committedIntermediateAssistantText,
+      );
+      const sanitized = prepareFinalAssistantVisibleText(beforeSanitize, context);
+      if (sanitized !== beforeSanitize) {
+        assistantText = replaceCurrentFinalAssistantBlockText(
+          assistantText,
+          committedIntermediateAssistantText,
+          sanitized,
+        );
       }
       await recordMetaOrchestrationRuntimeEvent(context, sessionId, {
         stepId: "output-presenter",
         executor: "output-presenter-runtime",
         status: sanitized !== beforeSanitize ? "degraded" : "completed",
-        summary: `assistant_chars=${assistantText.length}; sanitized=${sanitized !== beforeSanitize ? "yes" : "no"}`,
+        summary: `assistant_chars=${currentFinalAssistantBlockText(
+          assistantText,
+          committedIntermediateAssistantText,
+        ).length}; sanitized=${sanitized !== beforeSanitize ? "yes" : "no"}`,
         level: sanitized !== beforeSanitize ? "warning" : "info",
       });
       if (await stopStaleRequest()) return;
@@ -5361,23 +5389,27 @@ export async function sendMessage(
         ),
       );
     }
-    const visibleAssistantBlockText = currentFinalAssistantBlockText(
-      assistantText,
-      committedIntermediateAssistantText,
+    const finalAssistantText = prepareFinalAssistantVisibleText(
+      currentFinalAssistantBlockText(
+        assistantText,
+        committedIntermediateAssistantText,
+      ),
+      context,
     );
+    assistantText = finalAssistantText;
     await context.store.appendEvent(sessionId, {
       type: "assistant_text_delta",
       id: assistantEventId,
-      text: assistantText,
+      text: finalAssistantText,
       createdAt: new Date().toISOString(),
     }, requestOwnerIsCurrent);
     if (await stopStaleRequest()) return;
-    if (visibleAssistantBlockText) {
-      replaceAssistantBlockContent(output, assistantStreamBlockId, visibleAssistantBlockText);
+    if (finalAssistantText) {
+      replaceAssistantBlockContent(output, assistantStreamBlockId, finalAssistantText);
     }
     endAssistantStream(output);
     clearRequestActivity(context, { kind: "foreground", requestTurnId });
-    writeFinalAssistantText(output, assistantText);
+    writeFinalAssistantText(output, finalAssistantText);
     output.write("\n");
     enqueueAutoLearningAfterSuccessfulTurn(context, text, {
       requestTurnId,
@@ -6758,7 +6790,7 @@ async function streamFinalModelAnswerWithoutTools(
       );
       maybeExposeFinalNoToolsResult(assistantText);
     }
-    const visibleAssistantText = stripStructuredFinalAnswerClaims(assistantText);
+    const visibleAssistantText = prepareFinalAssistantVisibleText(assistantText, context);
     if (visibleAssistantText !== assistantText) {
       assistantText = visibleAssistantText;
       maybeExposeFinalNoToolsResult(assistantText);
@@ -8160,9 +8192,17 @@ export async function continueModelAfterToolResults(
             }
             }
         }
-        const visibleAssistantText = stripStructuredFinalAnswerClaims(assistantText);
-        if (visibleAssistantText !== assistantText) {
-          assistantText = visibleAssistantText;
+        const finalBlockText = currentFinalAssistantBlockText(
+          assistantText,
+          committedIntermediateAssistantText,
+        );
+        const visibleAssistantText = prepareFinalAssistantVisibleText(finalBlockText, context);
+        if (visibleAssistantText !== finalBlockText) {
+          assistantText = replaceCurrentFinalAssistantBlockText(
+            assistantText,
+            committedIntermediateAssistantText,
+            visibleAssistantText,
+          );
         }
         const evidenceCorrectedDraft = enforceSuccessfulToolCoherence(
           assistantTextBeforeFinalGate,
@@ -8195,9 +8235,17 @@ export async function continueModelAfterToolResults(
       // 同样在 assistant 文本进主屏前清掉内部 system-prompt 字段复述；必须在
       // final-answer gate 之后执行，避免提前移除 LinghunFinalAnswerClaims 契约。
       {
-        const sanitized = sanitizeMainScreenLeakage(assistantText, context.language);
-        if (sanitized !== assistantText) {
-          assistantText = sanitized;
+        const beforeSanitize = currentFinalAssistantBlockText(
+          assistantText,
+          committedIntermediateAssistantText,
+        );
+        const sanitized = prepareFinalAssistantVisibleText(beforeSanitize, context);
+        if (sanitized !== beforeSanitize) {
+          assistantText = replaceCurrentFinalAssistantBlockText(
+            assistantText,
+            committedIntermediateAssistantText,
+            sanitized,
+          );
         }
       }
       const finalVisibleGate = evaluateAggregatedFinalAnswerGate(
@@ -8217,23 +8265,27 @@ export async function continueModelAfterToolResults(
           ),
         );
       }
-      const visibleAssistantBlockText = currentFinalAssistantBlockText(
-        assistantText,
-        committedIntermediateAssistantText,
+      const finalAssistantText = prepareFinalAssistantVisibleText(
+        currentFinalAssistantBlockText(
+          assistantText,
+          committedIntermediateAssistantText,
+        ),
+        context,
       );
+      assistantText = finalAssistantText;
       await context.store.appendEvent(sessionId, {
         type: "assistant_text_delta",
         id: assistantEventId,
-        text: assistantText,
+        text: finalAssistantText,
         createdAt: new Date().toISOString(),
       }, requestOwnerIsCurrent);
       if (await stopStaleContinuation()) return;
-      if (visibleAssistantBlockText) {
-        replaceAssistantBlockContent(output, assistantStreamBlockId, visibleAssistantBlockText);
+      if (finalAssistantText) {
+        replaceAssistantBlockContent(output, assistantStreamBlockId, finalAssistantText);
       }
       endAssistantStream(output);
       clearRequestActivity(context, { kind: "foreground", requestTurnId });
-      writeFinalAssistantText(output, assistantText);
+      writeFinalAssistantText(output, finalAssistantText);
       output.write("\n");
       const reportedAt = new Date().toISOString();
       for (const noticeId of agentCompletionNoticeIdsForTurn) {

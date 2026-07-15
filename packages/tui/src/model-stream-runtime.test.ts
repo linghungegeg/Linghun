@@ -6784,6 +6784,125 @@ describe("final answer gate aggregation", () => {
     expect(context.lastFullOutput).toBe(cleaned);
   });
 
+  it("sanitizes standalone final no-tools output at the final outlet", async () => {
+    const { context } = await makeSendMessageContext();
+    const output = new MemoryOutput();
+    const requestTurnId = "turn-final-no-tools-sanitize";
+    context.currentRequestTurnId = requestTurnId;
+    const gateway = gatewayByTurn([
+      [
+        {
+          type: "assistant_text_delta",
+          text: [
+            "最终回答：已按现有证据收口。",
+            "EvidenceSummary=[]",
+            "AgentCompletionReturnsForMainChain=[]",
+            'LinghunFinalAnswerClaims: {"claims":[]}',
+          ].join("\n"),
+        },
+        { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+      ],
+    ], { count: 0 });
+
+    const cleaned = await __testStreamFinalModelAnswerWithoutTools(
+      {
+        messages: [{ role: "user", content: "给出最终回答" }],
+        provider: "deepseek",
+        model: "deepseek-chat",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+        originalUserText: "给出最终回答",
+        requestTurnId,
+        abortSignal: new AbortController().signal,
+      },
+      context,
+      gateway,
+      context.sessionId!,
+      output,
+      new AbortController().signal,
+    );
+
+    expect(cleaned).toContain("最终回答");
+    expect(cleaned).not.toContain("EvidenceSummary");
+    expect(cleaned).not.toContain("AgentCompletionReturnsForMainChain");
+    expect(cleaned).not.toContain("LinghunFinalAnswerClaims");
+    expect(output.text).toContain(cleaned);
+    expect(output.text).not.toContain("EvidenceSummary");
+    expect(output.text).not.toContain("AgentCompletionReturnsForMainChain");
+  });
+
+  it("commits only the cleaned final answer after intermediate tool narration", async () => {
+    const { context, events } = await makeSendMessageContext();
+    await writeFile(join(context.projectPath, "sample.txt"), "ok\n", "utf8");
+    const output = new MemoryOutput();
+    let rounds = 0;
+    const gateway = {
+      async *stream() {
+        rounds += 1;
+        if (rounds === 1) {
+          yield {
+            type: "assistant_text_delta",
+            text: [
+              "我先检查一下。",
+              "EvidenceSummary=[]",
+              "AgentCompletionReturnsForMainChain=[]",
+            ].join("\n"),
+          } as const;
+          yield {
+            type: "tool_use",
+            id: "read-sample",
+            name: "Read",
+            input: { path: "sample.txt" },
+          } as const;
+          yield {
+            type: "message_stop",
+            chunkCount: 1,
+            hadUsage: false,
+            finishReason: "tool_use",
+          } as const;
+          return;
+        }
+        yield {
+          type: "assistant_text_delta",
+          text: [
+            "最终结论：sample.txt 包含 ok。",
+            "EvidenceSummary=[]",
+            "AgentCompletionReturnsForMainChain=[]",
+            'LinghunFinalAnswerClaims: {"claims":[]}',
+          ].join("\n"),
+        } as const;
+        yield {
+          type: "message_stop",
+          chunkCount: 1,
+          hadUsage: false,
+          finishReason: "stop",
+        } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await __testSendMessage("检查 sample.txt", context, gateway, output);
+
+    const finalText = events
+      .filter(
+        (event): event is { type: string; text: string } =>
+          (event as { type?: string }).type === "assistant_text_delta" &&
+          typeof (event as { text?: unknown }).text === "string",
+      )
+      .at(-1)?.text ?? "";
+
+    expect(finalText).toContain("最终结论");
+    expect(finalText).not.toContain("我先检查一下");
+    expect(finalText).not.toContain("EvidenceSummary");
+    expect(finalText).not.toContain("AgentCompletionReturnsForMainChain");
+    expect(finalText).not.toContain("LinghunFinalAnswerClaims");
+    expect(output.text).toContain("最终结论");
+    expect(output.text).not.toContain("EvidenceSummary");
+    expect(output.text).not.toContain("AgentCompletionReturnsForMainChain");
+  });
+
   it.each(["main", "continuation"] as const)(
     "does not expose a final-gate downgraded candidate before assistant event commit in %s",
     async (entry) => {
