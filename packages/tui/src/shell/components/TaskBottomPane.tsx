@@ -43,7 +43,6 @@ export type BottomPaneSlotEstimates = {
   agentProgressRows?: number;
   workflowProgressRows?: number;
   queuedInputRows?: number;
-  sessionForkRows?: number;
 };
 
 export type BottomPaneBudgetAllocation = {
@@ -60,7 +59,6 @@ export type BottomPaneBudgetAllocation = {
   showAgentProgress: boolean;
   showWorkflowProgress: boolean;
   queuedInputRows: number;
-  showSessionFork: boolean;
 };
 
 export function allocateBottomPaneBudget(
@@ -120,7 +118,6 @@ export function allocateBottomPaneBudget(
   const showTaskList = take(slotEstimates.taskListRows);
   const showRuntimeSummary = take(slotEstimates.runtimeSummaryRows);
   const showNotifications = take(slotEstimates.notificationRows);
-  const showSessionFork = take(slotEstimates.sessionForkRows);
 
   return {
     mode,
@@ -136,7 +133,6 @@ export function allocateBottomPaneBudget(
     showAgentProgress,
     showWorkflowProgress,
     queuedInputRows,
-    showSessionFork,
   };
 }
 
@@ -171,7 +167,6 @@ export function TaskBottomPane({
     workflowProgressRows: estimateWorkflowProgressRows(view.workflowProgressView),
     queuedInputRows:
       (view.queuedInputs?.length ?? 0) > 0 ? Math.min(4, (view.queuedInputs?.length ?? 0) + 1) : 0,
-    sessionForkRows: view.sessionFork ? 1 : 0,
   };
   const allocation = allocateBottomPaneBudget(frameHeight, {
     ...slotEstimates,
@@ -259,10 +254,6 @@ export function TaskBottomPane({
         />
       ) : null}
 
-      {allocation.showSessionFork && view.sessionFork ? (
-        <SessionForkLine fork={view.sessionFork} width={contentWidth} language={view.language} theme={theme} />
-      ) : null}
-
       {allocation.queuedInputRows > 0 && (view.queuedInputs?.length ?? 0) > 0 ? (
         <QueuedInputPreview
           items={view.queuedInputs ?? []}
@@ -334,32 +325,6 @@ function QueuedInputPreview({
           )}
         </Text>
       ))}
-    </Box>
-  );
-}
-
-function SessionForkLine({
-  fork,
-  width,
-  language,
-  theme,
-}: {
-  fork: NonNullable<ShellViewModel["sessionFork"]>;
-  width: number;
-  language: ShellViewModel["language"];
-  theme: ShellTheme;
-}): React.ReactNode {
-  const current = fork.currentSessionId.slice(0, 8);
-  const parent = fork.parentSessionId.slice(0, 8);
-  const text =
-    language === "en-US"
-      ? `Fork ${current} ← parent ${parent} · /sessions to switch`
-      : `会话 Fork ${current} ← 父会话 ${parent} · /sessions 切换`;
-  return (
-    <Box width={width} paddingX={2}>
-      <Text color={theme.muted} dimColor>
-        {fitText(text, width)}
-      </Text>
     </Box>
   );
 }

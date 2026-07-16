@@ -1292,6 +1292,68 @@ describe("verification-command-runtime", () => {
     );
   }, 30_000);
 
+  it("returns failed RunVerification step details to the model", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-tool-failure-"));
+    const target = "packages/tui/src/failing.test.js";
+    await mkdir(join(projectPath, "packages", "tui", "src"), { recursive: true });
+    await Promise.all([
+      writeFile(
+        join(projectPath, "package.json"),
+        JSON.stringify({ scripts: { test: "node test-runner.cjs vitest" } }),
+        "utf8",
+      ),
+      writeFile(join(projectPath, "package-lock.json"), "", "utf8"),
+      writeFile(
+        join(projectPath, "test-runner.cjs"),
+        [
+          "console.error('focused failure marker');",
+          "process.exit(1);",
+        ].join("\n"),
+        "utf8",
+      ),
+      writeFile(join(projectPath, target), "export {};\n", "utf8"),
+    ]);
+    const context = await createRunnableVerificationContext(projectPath);
+    context.currentRequestTurnId = "tool-failure-request";
+
+    const result = await executeLinghunControlToolUse(
+      {
+        id: "verify-tool-failure",
+        name: "RunVerification",
+        input: {
+          level: "test",
+          requestScope: {
+            requestTurnId: "tool-failure-request",
+            changedFiles: [target],
+          },
+        },
+      },
+      context,
+      "session-tool-failure",
+      new MockWritable(),
+      { requestTurnId: "tool-failure-request" } as never,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("Verification FAIL");
+    expect(result.text).toContain("Failed steps:");
+    expect(result.text).toContain("npm run test");
+    expect(result.text).toContain("focused failure marker");
+    expect(result.text).toContain("log:");
+    expect(result.data).toMatchObject({
+      status: "fail",
+      commands: [
+        expect.objectContaining({
+          kind: "test",
+          status: "fail",
+          command: expect.stringContaining("npm run test"),
+          summary: expect.stringContaining("focused failure marker"),
+          logPath: expect.stringContaining("test.log"),
+        }),
+      ],
+    });
+  }, 30_000);
+
   it("does not inherit global changed files into an empty current request scope", async () => {
     const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-request-empty-"));
     const context = await createRunnableVerificationContext(projectPath);

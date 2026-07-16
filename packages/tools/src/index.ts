@@ -264,7 +264,12 @@ const BASH_TIMEOUT_MS = 120_000;
 // Removed: headless auto-background is unsafe (foreground-to-background transition unreliable)
 const MAX_TODO_ITEMS = 100;
 const SEARCH_EXCLUDED_DIR_NAMES = ["node_modules", "dist", ".git", ".codebase-memory"];
-const SEARCH_EXCLUDED_PATH_PREFIXES = [".linghun/logs", ".linghun/agent-runs", ".linghun/failures"];
+const SEARCH_EXCLUDED_PATH_PREFIXES = [
+  ".linghun/session",
+  ".linghun/logs",
+  ".linghun/agent-runs",
+  ".linghun/failures",
+];
 const SEARCH_EXCLUDED_FILE_SUFFIXES = [".tsbuildinfo"];
 const RG_TIMEOUT_MS = 30_000;
 const READ_SNAPSHOT_MAX_ENTRIES = 100;
@@ -3885,22 +3890,32 @@ function sourcePackMatchesFromCandidates(
 ): SourcePackMatch[] {
   if (!candidates || candidates.length === 0) return [];
   const terms = extractSourcePackTerms(query);
-  return candidates.slice(0, limit).map((candidate) => {
-    const start = Math.max(1, candidate.start);
-    const end = Math.max(start, candidate.end);
-    const term = terms[0] ?? query;
-    return {
-      path: candidate.path,
-      line: start,
-      text: candidate.reason ?? candidate.path,
-      term,
-      source: "index",
-      start,
-      end,
-      confidence: candidate.confidence ?? 0.85,
-      reason: candidate.reason ?? `index candidate for "${query}"`,
-    };
-  });
+  return candidates
+    .filter((candidate) => !isDefaultSearchExcludedRelPath(candidate.path))
+    .slice(0, limit)
+    .map((candidate) => {
+      const start = Math.max(1, candidate.start);
+      const end = Math.max(start, candidate.end);
+      const term = terms[0] ?? query;
+      return {
+        path: candidate.path,
+        line: start,
+        text: candidate.reason ?? candidate.path,
+        term,
+        source: "index",
+        start,
+        end,
+        confidence: candidate.confidence ?? 0.85,
+        reason: candidate.reason ?? `index candidate for "${query}"`,
+      };
+    });
+}
+
+function isDefaultSearchExcludedRelPath(path: string): boolean {
+  const rel = stripCurrentDirectoryPrefix(path.replaceAll("\\", "/"));
+  return SEARCH_EXCLUDED_PATH_PREFIXES.some(
+    (prefix) => rel === prefix || rel.startsWith(`${prefix}/`),
+  );
 }
 
 function extractSourcePackTerms(query: string): string[] {

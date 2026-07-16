@@ -207,7 +207,6 @@ describe("TaskBottomPane budget allocation", () => {
       queuedInputRows: 3,
       workflowProgressRows: 4,
       agentProgressRows: 3,
-      sessionForkRows: 1,
     });
 
     expect(allocation.queuedInputRows).toBeGreaterThan(0);

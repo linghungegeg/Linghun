@@ -2596,8 +2596,8 @@ describe("Ink TTY interaction smoke", () => {
 
     expect(visible).toContain("后续输入排队 2 条");
     expect(visible).toContain("first follow-up");
-    expect(visible).toContain("会话 Fork current-");
-    expect(visible).toContain("父会话 parent-s");
+    expect(visible).not.toContain("会话 Fork current-");
+    expect(visible).not.toContain("父会话 parent-s");
 
     await writeInput(input, shell, "\x1b[1;3A");
     expect(events).toContainEqual({ type: "queued-input-edit-latest", id: "queued-input-2" });

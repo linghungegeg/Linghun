@@ -21,7 +21,6 @@ import {
   getAutoCompactTriggerChars,
   getPostCompactTargetChars,
   getProviderContextMaxChars,
-  getProviderContextWindowChars,
   inspectToolPairingSafety,
   prepareMessagesForProviderPreflight,
   sanitizeCompactSummaryText,
@@ -589,11 +588,11 @@ describe("Phase E provider payload budgeting", () => {
     expect(context.cache.compactBoundaries).toHaveLength(0);
   });
 
-  it("compacts persisted tool summaries once when provider-visible results exceed 200k", async () => {
+  it("does not compact only because persisted tool summaries accumulate across separate batches", async () => {
     const context = await createTestContext();
     setExecutorMaxInputTokens(context, 1_000_000);
     const messages: ModelMessage[] = Array.from({ length: 100 }, (_, index) => {
-      const id = `call-summary-cap-${index}`;
+      const id = `call-summary-history-${index}`;
       return [
         {
           role: "assistant" as const,
@@ -621,40 +620,45 @@ describe("Phase E provider payload budgeting", () => {
       (total, message) => (message.role === "tool" ? total + message.content.length : total),
       0,
     );
-    expect(visibleToolChars).toBeLessThanOrEqual(200_000);
-    expect(context.cache.compactBoundaries).toHaveLength(1);
-    const boundaryId = context.cache.compactBoundaries[0]?.id;
-    const projectionHash = stableHash(
-      first.messages.filter((message) => message.content.startsWith("Context compact projection\n")),
+    expect(visibleToolChars).toBeGreaterThan(200_000);
+    expect(first.messages.some((message) => message.content.includes("<persisted-tool-result>"))).toBe(
+      true,
     );
+    expect(context.cache.compactBoundaries).toHaveLength(0);
+  });
 
-    const second = await prepareMessagesForProviderPreflight({
-      messages: [...first.messages, { role: "user", content: "small follow-up" }],
+  it("blocks when one provider-visible tool-result batch stays over 200k", async () => {
+    const context = await createTestContext();
+    setExecutorMaxInputTokens(context, 1_000_000);
+    const toolCalls = Array.from({ length: 100 }, (_, index) => ({
+      id: `call-summary-cap-${index}`,
+      name: "Bash",
+      input: { command: `large-${index}` },
+    }));
+    const messages: ModelMessage[] = [
+      {
+        role: "assistant",
+        content: "",
+        toolCalls,
+      },
+      ...toolCalls.map((toolCall, index) => ({
+        role: "tool" as const,
+        tool_call_id: toolCall.id,
+        content: `SUMMARY_CAP_${index}:${"x".repeat(20_000)}`,
+      })),
+    ];
+    const first = await prepareMessagesForProviderPreflight({
+      messages,
       context,
       sessionId: context.sessionId ?? "session",
       runtime: runtime(),
       trigger: "request",
       deps: compactDeps(),
     });
-    const third = await prepareMessagesForProviderPreflight({
-      messages: [...second.messages, { role: "user", content: "another small follow-up" }],
-      context,
-      sessionId: context.sessionId ?? "session",
-      runtime: runtime(),
-      trigger: "request",
-      deps: compactDeps(),
-    });
-    expect(second.blocked).toBe(false);
-    expect(third.blocked).toBe(false);
-    expect(context.cache.compactBoundaries).toHaveLength(1);
-    expect(context.cache.compactBoundaries[0]?.id).toBe(boundaryId);
-    expect(
-      stableHash(
-        third.messages.filter((message) =>
-          message.content.startsWith("Context compact projection\n"),
-        ),
-      ),
-    ).toBe(projectionHash);
+    expect(first.blocked).toBe(true);
+    if (!first.blocked) throw new Error("provider preflight should block the oversized batch");
+    expect(first.message).toContain("超过 provider 上限");
+    expect(context.cache.compactBoundaries).toHaveLength(0);
   });
 
   it("replays a validated legacy ledger replacement unchanged after hot state loss", async () => {
@@ -1018,7 +1022,7 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     if (!compacted.blocked) {
       expect(context.cache.contextUsage).toMatchObject({
         estimatedChars: estimateModelMessageChars(compacted.messages),
-        maxChars: getProviderContextWindowChars(context, runtime()),
+        maxChars: getProviderContextMaxChars(context, runtime()),
         source: "compact",
         savingsRatio: context.cache.compactProjection?.savingsRatio,
       });
@@ -1209,12 +1213,9 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     );
   });
 
-  it("compacts 100 provider-seen 20k tool results once and keeps later preflight prefixes stable", async () => {
+  it("keeps accumulated separate tool-result batches stable without compacting", async () => {
     const context = await createTestContext();
     setExecutorMaxInputTokens(context, 250_000);
-    context.modelGateway = gateway([
-      { type: "tool_use", id: "stable-pressure-deep-fail", name: "Read", input: {} },
-    ]);
     const state = { seenIds: new Set<string>(), replacements: new Map() };
     context.toolResultBudgetState = state;
     const toolPairs: ModelMessage[] = Array.from({ length: 100 }).flatMap((_, index) => {
@@ -1228,7 +1229,7 @@ describe("Phase E compact preflight and deep compact coverage", () => {
         {
           role: "tool" as const,
           tool_call_id: id,
-          content: `STABLE_PRESSURE_${index}:${"x".repeat(20_000)}`,
+          content: `STABLE_PRESSURE_${index}:${"x".repeat(3_000)}`,
         },
       ];
     });
@@ -1243,7 +1244,7 @@ describe("Phase E compact preflight and deep compact coverage", () => {
       );
     }
 
-    const deps = { ...compactDeps(), runDeepCompact: deepDeps() };
+    const deps = compactDeps();
     const first = await prepareMessagesForProviderPreflight({
       messages: [
         { role: "system", content: "stable pressure system" },
@@ -1262,11 +1263,9 @@ describe("Phase E compact preflight and deep compact coverage", () => {
       (total, message) => (message.role === "tool" ? total + message.content.length : total),
       0,
     );
-    expect(visibleToolChars).toBeLessThanOrEqual(200_000);
-    expect(context.cache.compactBoundaries).toHaveLength(1);
-    const boundaryId = context.cache.compactProjection?.boundaryId;
-    const stablePrefix = providerPrefixThroughCompactProjection(first.messages);
-    const stablePrefixHash = hashProviderMessages(stablePrefix);
+    expect(visibleToolChars).toBeGreaterThan(200_000);
+    expect(context.cache.compactBoundaries).toHaveLength(0);
+    const stablePrefixHash = hashProviderMessages(first.messages);
 
     const second = await prepareMessagesForProviderPreflight({
       messages: [...first.messages, { role: "user", content: "second stable follow-up" }],
@@ -1289,14 +1288,13 @@ describe("Phase E compact preflight and deep compact coverage", () => {
     expect(third.blocked).toBe(false);
     if (third.blocked) throw new Error("third provider preflight unexpectedly blocked");
 
-    const secondPrefix = providerPrefixThroughCompactProjection(second.messages);
-    const thirdPrefix = providerPrefixThroughCompactProjection(third.messages);
-    expect(secondPrefix).toEqual(stablePrefix);
-    expect(thirdPrefix).toEqual(stablePrefix);
+    const secondPrefix = second.messages.slice(0, first.messages.length);
+    const thirdPrefix = third.messages.slice(0, first.messages.length);
+    expect(secondPrefix).toEqual(first.messages);
+    expect(thirdPrefix).toEqual(first.messages);
     expect(hashProviderMessages(secondPrefix)).toBe(stablePrefixHash);
     expect(hashProviderMessages(thirdPrefix)).toBe(stablePrefixHash);
-    expect(context.cache.compactBoundaries).toHaveLength(1);
-    expect(context.cache.compactProjection?.boundaryId).toBe(boundaryId);
+    expect(context.cache.compactBoundaries).toHaveLength(0);
   });
 
   it("marks post-compact retrigger risk and suppresses consecutive full summaries", async () => {

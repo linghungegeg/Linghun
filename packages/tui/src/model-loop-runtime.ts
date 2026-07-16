@@ -1436,16 +1436,37 @@ export function evidenceSupportsLocalCodeFact(
     );
   }
   if (record.kind === "file_read") {
+    const claimTargets = claim ? extractClaimTargets(claim) : [];
     return (
       !negativeClaim &&
       claim !== undefined &&
-      extractClaimTargets(claim).length > 0 &&
+      claimTargets.length > 0 &&
+      evidenceTargetsMatchClaim(record, claimTargets) &&
       record.supportsClaims.includes("read_nonempty") &&
       record.supportsClaims.includes("source_snippet")
     );
   }
   const tokens = evidenceTokens(record);
   return /(?:git_local_fact|git_status)/iu.test(tokens);
+}
+
+function evidenceTargetsMatchClaim(record: EvidenceRecord, claimTargets: string[]): boolean {
+  const evidenceTargets = [
+    ...(record.ownerScope?.targets ?? []),
+    ...record.supportsClaims
+      .filter((item) => item.startsWith("file:"))
+      .map((item) => item.slice("file:".length)),
+  ];
+  if (evidenceTargets.length === 0) return false;
+  return claimTargets.some((claimTarget) =>
+    evidenceTargets.some((evidenceTarget) =>
+      evidencePathMatches(
+        normalizeEvidenceTarget(evidenceTarget),
+        normalizeEvidenceTarget(claimTarget),
+        record.ownerScope?.cwd,
+      )
+    )
+  );
 }
 
 function isNegativeCodeFactPhrase(phrase: string): boolean {

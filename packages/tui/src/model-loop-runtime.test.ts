@@ -1651,6 +1651,40 @@ describe("model-loop-runtime", () => {
       expect(verdict.matchedClaims.map((claim) => claim.kind)).toEqual(["code_fact"]);
     });
 
+    it("does not let a diagnostic snippet for another file prove a source code fact", () => {
+      const auditSnippet = makeEvidence({
+        kind: "file_read",
+        source: "ReadSnippets",
+        summary: "ReadSnippets docs/audits/linghun-main-chain-final-gate-continuity-audit.md",
+        supportsClaims: [
+          "ReadSnippets",
+          "local_read",
+          "read_nonempty",
+          "source_snippet",
+          "file:docs/audits/linghun-main-chain-final-gate-continuity-audit.md",
+        ],
+        ownerScope: {
+          cwd: "C:/repo",
+          targets: ["docs/audits/linghun-main-chain-final-gate-continuity-audit.md"],
+        },
+      });
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims(
+          "packages/tui/src/model-stream-runtime.ts 已实现 final gate 输出收敛。",
+          [
+            {
+              kind: "code_fact",
+              phrase: "packages/tui/src/model-stream-runtime.ts 已实现 final gate 输出收敛",
+            },
+          ],
+        ),
+        [auditSnippet],
+      );
+
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("code_fact");
+    });
+
     it("uses visible file targets when structured code_fact phrase omits the path", () => {
       const readA = makeEvidence({
         kind: "file_read",
@@ -2145,6 +2179,7 @@ describe("model-loop-runtime", () => {
             source: "ReadSnippets",
             summary: "python/consumer.py contains a MessageBuilder call",
             supportsClaims: ["ReadSnippets", "local_read", "read_nonempty", "source_snippet"],
+            ownerScope: { targets: ["python/consumer.py"] },
           }),
         ],
       );
@@ -2652,6 +2687,7 @@ describe("model-loop-runtime", () => {
           source: "src/a.ts",
           supportsClaims: ["ReadSnippets", "local_read", "read_nonempty", "source_snippet"],
           createdAt: minutesAgo(20),
+          ownerScope: { targets: ["src/a.ts"] },
         }),
       ];
       const verdict = evaluateFinalAnswerClaims(
@@ -2671,6 +2707,7 @@ describe("model-loop-runtime", () => {
           source: "src/a.ts",
           supportsClaims: ["SourcePack", "local_read", "read_nonempty", "source_snippet"],
           createdAt: minutesAgo(90),
+          ownerScope: { targets: ["src/a.ts"] },
         }),
       ];
       const verdict = evaluateFinalAnswerClaims(

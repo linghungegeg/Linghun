@@ -33,7 +33,6 @@ export function nativeScrollbackTaskFrameHasContent(view: ShellViewModel): boole
       estimateAgentProgressRows(view.agentProgressTree) > 0 ||
       estimateWorkflowProgressRows(view.workflowProgressView) > 0 ||
       (view.queuedInputs?.length ?? 0) > 0 ||
-      view.sessionFork ||
       (view.taskSuggestions?.length ?? 0) > 0 ||
       view.blocks.length > 0,
   );

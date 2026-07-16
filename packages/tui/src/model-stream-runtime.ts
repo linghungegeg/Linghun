@@ -2520,7 +2520,6 @@ export function planFinalGateEvidenceGapAction(input: {
       reason: "source_fact_gap_readonly",
       directive: formatEvidenceGapToolDirective({
         language,
-        action: "readonly_check",
         missing: mapFinalGateKindsToUserLabels(result.unsupportedKinds, language),
         tools: ["ReadSnippets", "SourcePack", "Grep"],
         note:
@@ -2545,7 +2544,6 @@ export function planFinalGateEvidenceGapAction(input: {
       reason: "artifact_gap_readonly",
       directive: formatEvidenceGapToolDirective({
         language,
-        action: "readonly_check",
         missing: mapFinalGateKindsToUserLabels(result.unsupportedKinds, language),
         tools: ["Read", "ReadSnippets", "SourcePack", "Grep", "Glob"],
         note:
@@ -2562,7 +2560,6 @@ export function planFinalGateEvidenceGapAction(input: {
       reason: "git_gap_readonly",
       directive: formatEvidenceGapToolDirective({
         language,
-        action: "readonly_check",
         missing: mapFinalGateKindsToUserLabels(result.unsupportedKinds, language),
         tools: ["GitStatusInspect"],
         note:
@@ -2610,7 +2607,6 @@ export function planFinalGateEvidenceGapAction(input: {
       reason: "service_runtime_gap_readonly",
       directive: formatEvidenceGapToolDirective({
         language,
-        action: "readonly_check",
         missing: mapFinalGateKindsToUserLabels(result.unsupportedKinds, language),
         tools: ["Read", "Grep", "Glob"],
         note:
@@ -2690,7 +2686,6 @@ function createVerificationEvidenceGapPlan(input: {
     reason: input.reason,
     directive: formatEvidenceGapToolDirective({
       language: input.language,
-      action: "verification_request",
       missing: mapFinalGateKindsToUserLabels(input.missingKinds, input.language),
       tools: input.permissionMode === "default" ? ["Bash"] : ["RunVerification"],
       note: toolDirective,
@@ -3456,7 +3451,6 @@ function formatStructuredClaimContractRetryDirective(language: Language): string
 
 function formatEvidenceGapToolDirective(input: {
   language: Language;
-  action: FinalGateEvidenceGapActionPlan["action"];
   missing: string[];
   tools: string[];
   note: string;
@@ -3467,8 +3461,7 @@ function formatEvidenceGapToolDirective(input: {
   const tools = input.tools.join(", ");
   if (input.language === "en-US") {
     return [
-      "Permission-aware evidence gap plan:",
-      `- Action: ${input.action}.`,
+      "Gather the missing evidence before answering:",
       `- Missing: ${missing}.`,
       `- Use exactly the smallest relevant tool path first: ${tools}.`,
       `- ${input.note}`,
@@ -3476,8 +3469,7 @@ function formatEvidenceGapToolDirective(input: {
     ].join("\n");
   }
   return [
-    "权限感知补证据计划：",
-    `- 动作：${input.action}。`,
+    "回答前先补齐缺失证据：",
     `- 缺少：${missing}。`,
     `- 优先使用最小相关工具路径：${tools}。`,
     `- ${input.note}`,
@@ -6781,9 +6773,9 @@ async function streamFinalModelAnswerWithoutTools(
   // 被 _write 的 ephemeral splice 淘汰，保证完整正文落到 keep:true block。
   const assistantStreamBlockId =
     reuseAssistantStreamBlockId ?? `assistant-stream-final-${randomUUID()}`;
-  const shouldExposeFinalNoToolsResult = !reuseAssistantStreamBlockId;
+  const ownsAssistantStreamBlock = !reuseAssistantStreamBlockId;
   const maybeExposeFinalNoToolsResult = (text: string): void => {
-    if (shouldExposeFinalNoToolsResult) {
+    if (ownsAssistantStreamBlock) {
       replaceAssistantBlockContent(output, assistantStreamBlockId, text);
     }
   };
@@ -6796,8 +6788,6 @@ async function streamFinalModelAnswerWithoutTools(
   let finishReason: string | undefined;
   let hadThinking = false;
   let ignoredRawToolProtocolText = false;
-  let pendingAssistantPreviewText = "";
-  let lastAssistantPreviewFlushAt = 0;
   const originalProvider = continuation.provider;
   const originalModel = continuation.model;
   const runtime = runtimeFromContinuation(continuation);
@@ -6854,8 +6844,6 @@ async function streamFinalModelAnswerWithoutTools(
     discardAssistantBlock(output, assistantStreamBlockId);
     assistantText = "";
     runtimeBoundaryFinalized = false;
-    pendingAssistantPreviewText = "";
-    lastAssistantPreviewFlushAt = 0;
     textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
   };
   let providerAttemptGeneration = 0;
@@ -6905,18 +6893,6 @@ async function streamFinalModelAnswerWithoutTools(
       clearRequestActivity(context, activityOwner);
       const visibleText = textSanitizer.push(event.text);
       assistantText += visibleText;
-      if (shouldExposeFinalNoToolsResult) {
-        pendingAssistantPreviewText += visibleText;
-        if (shouldFlushAssistantPreview(pendingAssistantPreviewText, lastAssistantPreviewFlushAt)) {
-          const result = flushAssistantPreviewDelta(
-            output,
-            assistantStreamBlockId,
-            pendingAssistantPreviewText,
-          );
-          pendingAssistantPreviewText = result.text;
-          if (result.flushed) lastAssistantPreviewFlushAt = Date.now();
-        }
-      }
       continue;
     }
     if (event.type === "assistant_thinking_delta") {
@@ -6944,9 +6920,6 @@ async function streamFinalModelAnswerWithoutTools(
     if (event.type === "tool_use") {
       const visibleText = textSanitizer.flush();
       assistantText += visibleText;
-      if (shouldExposeFinalNoToolsResult) {
-        pendingAssistantPreviewText += visibleText;
-      }
       await appendSystemEvent(
         context,
         sessionId,
@@ -7047,9 +7020,6 @@ async function streamFinalModelAnswerWithoutTools(
   if (requestIsStale()) return "";
   const finalVisibleText = textSanitizer.flush();
   assistantText += finalVisibleText;
-  if (shouldExposeFinalNoToolsResult) {
-    pendingAssistantPreviewText += finalVisibleText;
-  }
   if (textSanitizer.hadRawToolProtocol()) {
     ignoredRawToolProtocolText = true;
     assistantText = "";
@@ -7069,7 +7039,6 @@ async function streamFinalModelAnswerWithoutTools(
         formatRawToolProtocolRetryFailure(context.language),
       );
       runtimeBoundaryFinalized = true;
-      maybeExposeFinalNoToolsResult(assistantText);
     } else {
       const result = await recordProviderEmptyResponse(
         context,
@@ -7216,21 +7185,17 @@ async function streamFinalModelAnswerWithoutTools(
               : undefined,
         });
         runtimeBoundaryFinalized = true;
-        maybeExposeFinalNoToolsResult(assistantText);
       }
     }
     const visibleAssistantText = prepareFinalAssistantVisibleText(assistantText, context);
     if (visibleAssistantText !== assistantText) {
       assistantText = visibleAssistantText;
-      maybeExposeFinalNoToolsResult(assistantText);
-    }
-    if (shouldExposeFinalNoToolsResult) {
-      maybeExposeFinalNoToolsResult(assistantText);
     }
   }
   // D.13V — 仅当我们自己 begin 的 stream 才负责 end；复用外层 id 时由外层 end。
   if (!reuseAssistantStreamBlockId) {
     if (requestIsStale()) return "";
+    maybeExposeFinalNoToolsResult(assistantText);
     endAssistantStream(output);
     clearRequestActivity(context, activityOwner);
     writeFinalAssistantText(output, assistantText);

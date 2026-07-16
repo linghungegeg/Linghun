@@ -6405,11 +6405,63 @@ describe("final answer gate aggregation", () => {
     expect(plan.reason).toBe("completion_gap_verification_requires_permission");
     expect(plan.directive).toContain("Bash");
     expect(plan.directive).toContain("pendingLocalApproval");
+    expect(plan.directive).not.toContain("verification_request");
+    expect(plan.directive).not.toContain("动作：");
     expect(plan.evidenceAction).toMatchObject({
       toolName: "Bash",
       input: { level: "typecheck" },
       strategy: "minimal_bash_verification",
     });
+  });
+
+  it.each([
+    {
+      name: "source",
+      unsupportedKinds: ["code_fact"],
+      expectedTool: "ReadSnippets",
+      text: "packages/tui/src/model-stream-runtime.ts 有 final gate 逻辑。",
+    },
+    {
+      name: "artifact",
+      unsupportedKinds: ["artifact_created"],
+      expectedTool: "Read",
+      text: "报告文件 docs/audits/audit.md 已生成。",
+    },
+    {
+      name: "git",
+      unsupportedKinds: ["git_operation"],
+      expectedTool: "GitStatusInspect",
+      text: "git stable point 已创建。",
+    },
+    {
+      name: "runtime",
+      unsupportedKinds: ["service_runtime"],
+      expectedTool: "Grep",
+      text: "服务已经运行。",
+    },
+  ])("keeps readonly %s final-gap directives free of internal action labels", ({ unsupportedKinds, expectedTool, text }) => {
+    const plan = planFinalGateEvidenceGapAction({
+      result: {
+        status: "needs_disclaimer",
+        unsupportedKinds,
+      },
+      context: {
+        ...makeGateContext(),
+        permissionMode: "full-access",
+        language: "zh-CN",
+      } as never,
+      userText: text,
+      assistantText: text,
+    });
+
+    expect(plan.action).toBe("readonly_check");
+    expect(plan.evidenceAction?.toolName).toBe(expectedTool);
+    expect(plan.directive).not.toContain("readonly_check");
+    expect(plan.directive).not.toContain("verification_request");
+    expect(plan.directive).not.toContain("artifact_readonly_check");
+    expect(plan.directive).not.toContain("source_fact_readonly_check");
+    expect(plan.directive).not.toContain("service_runtime_readonly_check");
+    expect(plan.directive).not.toContain("动作：");
   });
 
   it("does not schedule the same broad completion verification twice", () => {
@@ -7336,6 +7388,21 @@ describe("final answer gate aggregation", () => {
             } as const;
             return;
           }
+          if (rounds === 4) {
+            yield {
+              type: "tool_use",
+              id: `${entry}-source-pack-fact`,
+              name: "SourcePack",
+              input: { query: "fact.ts answer 42", limit: 2 },
+            } as const;
+            yield {
+              type: "message_stop",
+              chunkCount: 1,
+              hadUsage: false,
+              finishReason: "tool_use",
+            } as const;
+            return;
+          }
           yield {
             type: "assistant_text_delta",
             text: withClaims("fact.ts 中的 answer 函数返回 42。", [
@@ -8234,6 +8301,8 @@ describe("final answer gate aggregation", () => {
     expect(plan.directive).toContain("pendingLocalApproval");
     expect(plan.directive).toContain("PermissionPanel");
     expect(plan.directive).toContain("不要用 RunVerification 绕过 ask 模式");
+    expect(plan.directive).not.toContain("verification_request");
+    expect(plan.directive).not.toContain("动作：");
     expect(plan.evidenceAction).toMatchObject({
       toolName: "Bash",
       strategy: "minimal_bash_verification",
@@ -8259,6 +8328,8 @@ describe("final answer gate aggregation", () => {
     expect(plan.directive).toContain("RunVerification");
     expect(plan.directive).toContain("类型检查");
     expect(plan.directive).toContain("不要直接跑全量套件");
+    expect(plan.directive).not.toContain("verification_request");
+    expect(plan.directive).not.toContain("动作：");
     expect(plan.evidenceAction).toMatchObject({
       toolName: "RunVerification",
       input: { level: "typecheck" },

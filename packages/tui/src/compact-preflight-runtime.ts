@@ -125,7 +125,7 @@ export async function prepareMessagesForProviderPreflight(input: {
     canCommit,
   );
   if (!canCommit()) return { blocked: false, messages: input.messages };
-  const budgetedToolResultChars = countProviderVisibleToolResultChars(budgeted);
+  const budgetedToolResultChars = getMaxProviderVisibleToolResultBatchChars(budgeted);
   const toolResultBudgetExceeded =
     budgetedToolResultChars > LINGHUN_MAX_TOOL_RESULTS_PER_MESSAGE_CHARS;
   const contextMaxChars = getProviderContextMaxChars(input.context, input.runtime);
@@ -514,7 +514,7 @@ export async function prepareMessagesForProviderPreflight(input: {
     }
     if (
       providerMessageChars > contextMaxChars ||
-      countProviderVisibleToolResultChars(providerMessages) >
+      getMaxProviderVisibleToolResultBatchChars(providerMessages) >
         LINGHUN_MAX_TOOL_RESULTS_PER_MESSAGE_CHARS
     ) {
       await recordCompactFailure(
@@ -711,11 +711,27 @@ async function prepareMessagesForProviderWithToolResultBudget(
   return commitGuard() ? budgeted.messages : messages;
 }
 
-function countProviderVisibleToolResultChars(messages: readonly ModelMessage[]): number {
-  return messages.reduce(
-    (total, message) => (message.role === "tool" ? total + message.content.length : total),
-    0,
-  );
+function getMaxProviderVisibleToolResultBatchChars(messages: readonly ModelMessage[]): number {
+  let maxChars = 0;
+  let currentChars = 0;
+  const flush = () => {
+    maxChars = Math.max(maxChars, currentChars);
+    currentChars = 0;
+  };
+
+  for (const message of messages) {
+    if (message.role === "assistant") {
+      flush();
+      continue;
+    }
+    if (message.role === "tool") {
+      currentChars += message.content.length;
+      continue;
+    }
+    flush();
+  }
+  flush();
+  return maxChars;
 }
 
 function getToolResultBudgetState(context: TuiContext): ToolResultBudgetState {

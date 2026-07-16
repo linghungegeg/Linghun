@@ -2297,7 +2297,7 @@ export async function executeLinghunControlToolUse(
       }
       const ok = report.status === "pass";
       const text = report
-        ? `Verification ${report.status.toUpperCase()}: ${report.summary} Scope: ${report.scope?.cwd ?? context.projectPath}.`
+        ? formatRunVerificationToolResultText(report, context.projectPath)
         : "Verification runner did not produce a report.";
       const finished = await finishResult(text, !ok, {
         status: report.status,
@@ -2309,6 +2309,9 @@ export async function executeLinghunControlToolUse(
             kind: command.kind,
             status: command.status,
             synthetic: command.synthetic === true,
+            command: command.command,
+            summary: command.summary,
+            logPath: command.logPath,
           })),
       });
       if (!requestIsStale()) context.lastVerification = report;
@@ -2920,6 +2923,26 @@ function controlToolEvidenceSpec(
     source: `control-tool:${toolName}`,
     supportsClaims: isError ? ["tool_failure", toolName] : [toolName, "action_executed"],
   };
+}
+
+function formatRunVerificationToolResultText(
+  report: VerificationReport,
+  projectPath: string,
+): string {
+  const failed = report.commands.filter((command) => command.status !== "pass");
+  const failureDetails = failed.slice(0, 3).map((command, index) => {
+    const parts = [
+      `#${index + 1} ${command.kind} ${command.status.toUpperCase()}`,
+      command.command,
+      command.summary,
+      command.logPath ? `log: ${command.logPath}` : undefined,
+    ].filter((item): item is string => Boolean(item));
+    return parts.join(" | ");
+  });
+  return [
+    `Verification ${report.status.toUpperCase()}: ${report.summary} Scope: ${report.scope?.cwd ?? projectPath}.`,
+    ...(failureDetails.length > 0 ? [`Failed steps: ${failureDetails.join("; ")}`] : []),
+  ].join(" ");
 }
 
 function deriveRunVerificationSupportsClaims(data: unknown): string[] {

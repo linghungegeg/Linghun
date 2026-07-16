@@ -1654,6 +1654,56 @@ describe("Phase 05 core tools", () => {
     expect(empty.output.data).toMatchObject({ count: 0, empty: true });
   });
 
+  it("SourcePack skips Linghun session artifacts by default", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await mkdir(join(project, ".linghun", "session", "tui-output", "s1"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "session", "tui-output", "s1", "old.txt"),
+      "function staleRequestScopeEvidence() { return 'old transcript'; }\n",
+      "utf8",
+    );
+
+    const result = await runTool(
+      "SourcePack",
+      { query: "staleRequestScopeEvidence", limit: 2 },
+      createToolContext(project),
+    );
+
+    expect(result.output.text).toContain("empty");
+    expect(result.output.text).not.toContain(".linghun/session");
+    expect(result.output.data).toMatchObject({ count: 0, empty: true });
+  });
+
+  it("SourcePack skips Linghun session index candidates by default", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    context.sourcePackCandidates = [
+      {
+        path: ".linghun/session/tui-output/s1/old.txt",
+        start: 1,
+        end: 1,
+        reason: "index symbol hit: staleRequestScopeEvidence",
+        confidence: 0.9,
+      },
+    ];
+    await mkdir(join(project, ".linghun", "session", "tui-output", "s1"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "session", "tui-output", "s1", "old.txt"),
+      "function staleRequestScopeEvidence() { return 'old transcript'; }\n",
+      "utf8",
+    );
+
+    const result = await runTool(
+      "SourcePack",
+      { query: "staleRequestScopeEvidence", limit: 2 },
+      context,
+    );
+
+    expect(result.output.text).toContain("empty");
+    expect(result.output.text).not.toContain(".linghun/session");
+    expect(result.output.data).toMatchObject({ count: 0, empty: true });
+  });
+
   it("SourcePack falls back to local scan when rg is unavailable", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     await writeFile(join(project, "local-source.ts"), "export const localNeedle = 1;\n", "utf8");
@@ -2013,6 +2063,7 @@ describe("Phase 05 core tools", () => {
       expect(calls.every((args) => args.includes("!**/dist/**"))).toBe(true);
       expect(calls.every((args) => args.includes("!**/.git/**"))).toBe(true);
       expect(calls.every((args) => args.includes("!**/.codebase-memory/**"))).toBe(true);
+      expect(calls.every((args) => args.includes("!**/.linghun/session/**"))).toBe(true);
       expect(calls.every((args) => args.includes("!**/.linghun/logs/**"))).toBe(true);
       expect(calls.every((args) => args.includes("!**/.linghun/agent-runs/**"))).toBe(true);
       expect(calls.every((args) => args.includes("!**/.linghun/failures/**"))).toBe(true);
@@ -2131,6 +2182,7 @@ describe("Phase 05 core tools", () => {
       expect(grep.output.text).toContain(".linghun/logs/run.txt:1: needle");
       expect(glob.output.text).toContain("run.txt");
       expect(calls.every((args) => !args.includes("!**/.linghun/logs/**"))).toBe(true);
+      expect(calls.every((args) => args.includes("!**/.linghun/session/**"))).toBe(true);
       expect(calls.every((args) => args.includes("!**/.linghun/agent-runs/**"))).toBe(true);
     } finally {
       vi.doUnmock("node:child_process");
@@ -2197,14 +2249,16 @@ describe("Phase 05 core tools", () => {
     }
   });
 
-  it("skips generated cache and Linghun log paths in JS Grep and Glob fallback", async () => {
+  it("skips generated cache and Linghun runtime artifact paths in JS Grep and Glob fallback", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await mkdir(join(project, ".linghun", "session", "tui-output"), { recursive: true });
     await mkdir(join(project, ".linghun", "logs"), { recursive: true });
     await mkdir(join(project, ".linghun", "agent-runs"), { recursive: true });
     await mkdir(join(project, ".linghun", "failures"), { recursive: true });
     await mkdir(join(project, ".codebase-memory"), { recursive: true });
     await writeFile(join(project, "src.txt"), "visible needle\n", "utf8");
     await writeFile(join(project, "tsconfig.tsbuildinfo"), "hidden needle\n", "utf8");
+    await writeFile(join(project, ".linghun", "session", "tui-output", "old.txt"), "hidden needle\n", "utf8");
     await writeFile(join(project, ".linghun", "logs", "run.txt"), "hidden needle\n", "utf8");
     await writeFile(join(project, ".linghun", "agent-runs", "run.txt"), "hidden needle\n", "utf8");
     await writeFile(join(project, ".linghun", "failures", "fail.txt"), "hidden needle\n", "utf8");
@@ -2226,11 +2280,13 @@ describe("Phase 05 core tools", () => {
 
       expect(grep.output.text).toContain("src.txt:1");
       expect(grep.output.text).not.toContain("tsconfig.tsbuildinfo");
+      expect(grep.output.text).not.toContain(".linghun/session");
       expect(grep.output.text).not.toContain(".linghun/logs");
       expect(grep.output.text).not.toContain(".linghun/agent-runs");
       expect(grep.output.text).not.toContain(".linghun/failures");
       expect(grep.output.text).not.toContain(".codebase-memory");
       expect(glob.output.text).toContain("src.txt");
+      expect(glob.output.text).not.toContain(".linghun/session");
       expect(glob.output.text).not.toContain(".linghun/logs");
       expect(glob.output.text).not.toContain(".codebase-memory");
     } finally {
@@ -2251,6 +2307,24 @@ describe("Phase 05 core tools", () => {
     );
 
     expect(read.output.text).toContain("explicit read ok");
+  });
+
+  it("does not exclude explicitly requested Linghun session search roots", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await mkdir(join(project, ".linghun", "session", "tui-output"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "session", "tui-output", "old.txt"),
+      "explicit session artifact needle\n",
+      "utf8",
+    );
+
+    const grep = await runTool(
+      "Grep",
+      { pattern: "needle", path: ".linghun/session" },
+      createToolContext(project),
+    );
+
+    expect(grep.output.text).toContain("tui-output/old.txt:1");
   });
 
   it("stops Glob traversal after the requested limit without entering later large trees", async () => {
