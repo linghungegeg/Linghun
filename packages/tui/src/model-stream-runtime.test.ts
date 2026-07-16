@@ -9070,6 +9070,78 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
     )).toBe(true);
   });
 
+  it("does not count broad source scans as final-gap progress after agent reports were delivered", () => {
+    const context = {
+      evidence: [],
+      currentRequestTurnId: "turn-agent-delivered",
+      sessionId: "session-agent-delivered",
+      projectPath: "/test",
+      agentCompletions: {
+        notices: [
+          {
+            id: "notice-agent-delivered",
+            agentId: "agent-delivered",
+            agentType: "worker",
+            agentRole: "executor",
+            parentSessionId: "session-agent-delivered",
+            task: "audit main chain",
+            status: "completed",
+            validity: "valid",
+            summary: "agent returned source findings",
+            resultFullReport: "full report with source findings for parent synthesis",
+            evidenceRefs: ["agent-ev"],
+            nextAction: "synthesize",
+            createdAt: new Date(0).toISOString(),
+            updatedAt: new Date(0).toISOString(),
+            deliveredAt: new Date(1).toISOString(),
+          },
+        ],
+        batchSummaries: [],
+        lastNotificationAt: {},
+        reportedNoticeIds: [],
+      },
+    } as unknown as TuiContext;
+    const gapResult = {
+      status: "needs_disclaimer" as const,
+      unsupportedKinds: ["code_fact"],
+    };
+    const evidenceAction = {
+      toolName: "SourcePack",
+      input: { query: "audit main chain", limit: 20 },
+      strategy: "source_fact_readonly_check" as const,
+      summary: "broad source pack",
+    };
+    const previous = __testCaptureFinalGapProgressState(gapResult, context, evidenceAction);
+    context.evidence.push({
+      id: "sourcepack-broad",
+      kind: "index_query",
+      summary: "SourcePack broad source scan",
+      source: "SourcePack",
+      supportsClaims: ["SourcePack", "index_code_fact"],
+      createdAt: new Date(2).toISOString(),
+      ownerScope: {
+        ownerSessionId: "session-agent-delivered",
+        requestTurnId: "turn-agent-delivered",
+        cwd: "/test",
+      },
+    } as unknown as EvidenceRecord);
+
+    expect(__testFinalGapHasProgress(gapResult, context, previous)).toBe(false);
+
+    const continuation = { finalGapProgressState: previous };
+    expect(recordSuccessfulToolExecutionProgress(
+      continuation,
+      { name: "SourcePack", input: { query: "audit main chain", limit: 20 } },
+      {
+        ok: true,
+        tool: "SourcePack",
+        text: "source pack result",
+        evidenceId: "sourcepack-broad",
+      },
+      context,
+    )).toBe(false);
+  });
+
   it("does not count plain file reads as source fact progress", () => {
     const context = {
       evidence: [],

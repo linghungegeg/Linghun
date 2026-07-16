@@ -6,6 +6,7 @@ import {
   enqueueAgentCompletionNotice,
   formatAgentCompletionDigest,
   formatAgentCompletionMainChainContext,
+  markAgentCompletionNoticeDelivered,
   markAgentCompletionNoticeReported,
 } from "./agent-completion-finalizer.js";
 import type { TuiContext } from "./tui-context-runtime.js";
@@ -199,6 +200,94 @@ describe("agent-completion-finalizer", () => {
 
     markAgentCompletionNoticeReported(context, notice.id, "2026-06-13T00:00:02.000Z");
     expect(formatAgentCompletionMainChainContext(context)).toBeNull();
+  });
+
+  it("returns bounded full child reports to the main chain without treating them as verification pass", () => {
+    const context = createContext("en-US");
+    const fullReport =
+      "Full child report:\n" +
+      [
+        "Finding A: packages/tui/src/a.ts has scoped evidence.",
+        "Finding B: packages/tui/src/b.ts still needs parent synthesis.",
+      ].join("\n") +
+      "\n" +
+      "x".repeat(9000);
+    const notice = enqueueAgentCompletionNotice(context, {
+      agent: createAgent({
+        id: "agent-full-report",
+        displayName: "worker",
+        lastResultFullReport: fullReport,
+      }),
+      status: "completed",
+      summary: "worker completed with a short digest",
+      evidenceRefs: ["ev-source"],
+      now: "2026-06-13T00:00:01.000Z",
+    });
+
+    const promptContext = formatAgentCompletionMainChainContext(context);
+
+    expect(notice.summary).toBe("worker completed with a short digest");
+    expect(notice.resultFullReport).toContain("Finding A");
+    expect(notice.resultFullReport?.length).toBeLessThanOrEqual(8001);
+    expect(promptContext).toContain("resultFullReport");
+    expect(promptContext).toContain("Finding B");
+    expect(promptContext).toContain("diagnostic context");
+    expect(promptContext).toContain("not as independent verification PASS");
+  });
+
+  it("refreshes an existing notice full report without pushing transcript blocks", () => {
+    const transcriptBlocks: unknown[] = [];
+    const context = createContext();
+    (context as { pushTranscriptBlock?: (block: unknown) => void }).pushTranscriptBlock = (block) =>
+      transcriptBlocks.push(block);
+    const agent = createAgent({
+      id: "agent-refresh-full-report",
+      lastResultFullReport: "first full report",
+    });
+
+    enqueueAgentCompletionNotice(context, {
+      agent,
+      status: "completed",
+      summary: "first summary",
+      evidenceRefs: ["ev-1"],
+      now: "2026-06-13T00:00:01.000Z",
+    });
+    agent.lastResultFullReport = "updated full report with parent synthesis material";
+    enqueueAgentCompletionNotice(context, {
+      agent,
+      status: "completed",
+      summary: "updated summary",
+      evidenceRefs: ["ev-2"],
+      now: "2026-06-13T00:00:02.000Z",
+    });
+
+    expect(collectPendingAgentCompletionNotices(context)).toHaveLength(1);
+    expect(formatAgentCompletionMainChainContext(context)).toContain(
+      "updated full report with parent synthesis material",
+    );
+    expect(transcriptBlocks).toHaveLength(0);
+  });
+
+  it("keeps delivered but unreported completions out of main-chain reinjection", () => {
+    const context = createContext();
+    const notice = enqueueAgentCompletionNotice(context, {
+      agent: createAgent({ id: "agent-delivered", lastResultFullReport: "full delivered report" }),
+      status: "completed",
+      summary: "summary delivered to parent",
+      evidenceRefs: ["ev-delivered"],
+      now: "2026-06-13T00:00:01.000Z",
+    });
+
+    expect(formatAgentCompletionMainChainContext(context)).toContain("full delivered report");
+
+    markAgentCompletionNoticeDelivered(context, notice.id, "2026-06-13T00:00:02.000Z");
+
+    expect(formatAgentCompletionMainChainContext(context)).toBeNull();
+    expect(collectPendingAgentCompletionNotices(context)).toHaveLength(1);
+    expect(formatAgentCompletionDigest(context)).toContain("summary delivered to parent");
+
+    markAgentCompletionNoticeReported(context, notice.id, "2026-06-13T00:00:03.000Z");
+    expect(collectPendingAgentCompletionNotices(context)).toHaveLength(0);
   });
 });
 

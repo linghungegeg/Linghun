@@ -517,6 +517,7 @@ async function enqueueAgentCompletionReturn(
     task,
     status,
     summary,
+    resultFullReport: agent.lastResultFullReport,
     evidenceRefs,
     parentSessionId,
     workflowRunId,

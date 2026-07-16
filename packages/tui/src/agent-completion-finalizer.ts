@@ -16,6 +16,7 @@ export type AgentCompletionInput = {
   task?: BackgroundTaskState;
   status: AgentCompletionStatus;
   summary: string;
+  resultFullReport?: string;
   evidenceRefs?: string[];
   parentSessionId?: string;
   workflowRunId?: string;
@@ -25,6 +26,7 @@ export type AgentCompletionInput = {
 const MAX_AGENT_COMPLETION_NOTICES = 80;
 const MAX_AGENT_COMPLETION_BATCHES = 24;
 const MAX_REPORTED_NOTICE_IDS = 200;
+const MAX_AGENT_COMPLETION_FULL_REPORT_CHARS = 8000;
 
 export function createAgentCompletionState(): AgentCompletionState {
   return {
@@ -42,6 +44,9 @@ export function enqueueAgentCompletionNotice(
   const state = ensureAgentCompletionState(context);
   const now = input.now ?? new Date().toISOString();
   const existing = state.notices.find((notice) => notice.agentId === input.agent.id);
+  const resultFullReport = normalizeAgentCompletionFullReport(
+    input.resultFullReport ?? input.agent.lastResultFullReport,
+  );
   const notice: AgentCompletionNotice = {
     id: existing?.id ?? randomUUID(),
     agentId: input.agent.id,
@@ -59,6 +64,7 @@ export function enqueueAgentCompletionNotice(
     status: input.status,
     validity: classifyAgentCompletionValidity(input.status, input.evidenceRefs ?? []),
     summary: truncateDisplay(input.summary.replace(/\s+/g, " ").trim(), 220),
+    ...(resultFullReport ? { resultFullReport } : {}),
     evidenceRefs: Array.from(new Set(input.evidenceRefs ?? [])),
     nextAction: formatNoticeNextAction(context, input.status, input.agent.id),
     createdAt: existing?.createdAt ?? now,
@@ -81,6 +87,34 @@ export function collectPendingAgentCompletionNotices(context: TuiContext): Agent
   const reported = new Set(state.reportedNoticeIds);
   return state.notices.filter(
     (notice) =>
+      !notice.reportedAt &&
+      !reported.has(notice.id) &&
+      (!context.sessionId || notice.parentSessionId === context.sessionId),
+  );
+}
+
+export function collectUndeliveredAgentCompletionNotices(
+  context: TuiContext,
+): AgentCompletionNotice[] {
+  return collectPendingAgentCompletionNotices(context).filter((notice) => !notice.deliveredAt);
+}
+
+export function markAgentCompletionNoticeDelivered(
+  context: TuiContext,
+  noticeId: string,
+  now: string = new Date().toISOString(),
+): void {
+  const state = ensureAgentCompletionState(context);
+  const notice = state.notices.find((item) => item.id === noticeId);
+  if (notice) notice.deliveredAt = now;
+}
+
+export function hasDeliveredAgentCompletionMainChainContext(context: TuiContext): boolean {
+  const state = ensureAgentCompletionState(context);
+  const reported = new Set(state.reportedNoticeIds);
+  return state.notices.some(
+    (notice) =>
+      !!notice.deliveredAt &&
       !notice.reportedAt &&
       !reported.has(notice.id) &&
       (!context.sessionId || notice.parentSessionId === context.sessionId),
@@ -138,15 +172,15 @@ export function formatAgentCompletionDigest(context: TuiContext): string | null 
 }
 
 export function formatAgentCompletionMainChainContext(context: TuiContext): string | null {
-  const pending = collectPendingAgentCompletionNotices(context);
+  const pending = collectUndeliveredAgentCompletionNotices(context);
   if (pending.length === 0) return null;
   const state = ensureAgentCompletionState(context);
   const latestBatch = findLatestPendingBatch(state.batchSummaries, pending);
   const isEn = context.language === "en-US";
   const lines = [
     isEn
-      ? "AgentCompletionReturnsForMainChain=Child agent/workflow results returned to the main chain. Use them as structured context for your natural answer. Do not print this label or raw fields. Do not treat child-agent completion as final verification PASS unless evidence supports it."
-      : "AgentCompletionReturnsForMainChain=子智能体/workflow 结果已回流主链。请把它作为结构化上下文，自然消化后回复用户；不要原样输出本标签或字段；不要把子智能体完成直接等同最终验证 PASS。",
+      ? "AgentCompletionReturnsForMainChain=Child agent/workflow results returned to the main chain. Use summaries and full reports as diagnostic context for synthesis, not as independent verification PASS unless matching evidence supports it. Do not print this label or raw fields."
+      : "AgentCompletionReturnsForMainChain=子智能体结果已回流主链（含 workflow）。请把摘要和完整报告作为综合用诊断上下文；除非有匹配证据支撑，不要把子智能体完成直接等同最终验证 PASS；不要原样输出本标签或字段。",
   ];
   if (latestBatch) {
     lines.push(`batch=${latestBatch.summary}`);
@@ -161,6 +195,7 @@ export function formatAgentCompletionMainChainContext(context: TuiContext): stri
         validity: notice.validity,
         task: truncateDisplay(notice.task.replace(/\s+/g, " "), 120),
         summary: notice.summary,
+        ...(notice.resultFullReport ? { resultFullReport: notice.resultFullReport } : {}),
         evidenceRefs: notice.evidenceRefs.slice(0, 8),
         nextAction: notice.nextAction,
       }),
@@ -195,6 +230,12 @@ export function refreshAgentCompletionBatchSummaries(
 function ensureAgentCompletionState(context: TuiContext): AgentCompletionState {
   context.agentCompletions ??= createAgentCompletionState();
   return context.agentCompletions;
+}
+
+function normalizeAgentCompletionFullReport(report: string | undefined): string | undefined {
+  const normalized = report?.trim();
+  if (!normalized) return undefined;
+  return truncateDisplay(normalized, MAX_AGENT_COMPLETION_FULL_REPORT_CHARS);
 }
 
 function classifyAgentCompletionValidity(

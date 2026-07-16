@@ -667,10 +667,12 @@ export type AgentCompletionNotice = {
   status: AgentCompletionStatus;
   validity: AgentCompletionValidity;
   summary: string;
+  resultFullReport?: string;
   evidenceRefs: string[];
   nextAction: string;
   createdAt: string;
   updatedAt: string;
+  deliveredAt?: string;
   reportedAt?: string;
 };
 

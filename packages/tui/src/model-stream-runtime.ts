@@ -15,8 +15,10 @@ import type {
 } from "@linghun/providers";
 import type { Language } from "@linghun/shared";
 import {
-  collectPendingAgentCompletionNotices,
+  collectUndeliveredAgentCompletionNotices,
   formatAgentCompletionMainChainContext,
+  hasDeliveredAgentCompletionMainChainContext,
+  markAgentCompletionNoticeDelivered,
   markAgentCompletionNoticeReported,
 } from "./agent-completion-finalizer.js";
 import {
@@ -886,6 +888,11 @@ const FINAL_GAP_READONLY_EVIDENCE_TOOL_NAMES = new Set([
   "Glob",
 ]);
 
+const BROAD_FINAL_GAP_SOURCE_FACT_TOOL_NAMES = new Set([
+  "SourcePack",
+  "Glob",
+]);
+
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -1045,7 +1052,7 @@ function finalGapExecutionStateAdvanced(
   return evidenceForCurrentVerificationScope(context)
     .filter(
       (record) =>
-        evidenceSupportsFinalGapProgress(record, evidenceAction) &&
+        evidenceSupportsFinalGapProgress(record, evidenceAction, context) &&
         evidenceMatchesFinalGapAction(record, evidenceAction),
     )
     .map(createEvidenceProgressFingerprint)
@@ -1093,11 +1100,25 @@ function evidenceSupportsExecutionProgress(record: EvidenceRecord): boolean {
 function evidenceSupportsFinalGapProgress(
   record: EvidenceRecord,
   action?: FinalGateEvidenceGapActionPlan["evidenceAction"],
+  context?: TuiContext,
 ): boolean {
+  if (
+    context &&
+    isBroadSourceFactReadonlyAction(action) &&
+    hasDeliveredAgentCompletionMainChainContext(context)
+  ) return false;
   if (action?.strategy !== "source_fact_readonly_check") {
     return evidenceSupportsExecutionProgress(record);
   }
   return isSourceFactReadonlyProgressEvidence(record);
+}
+
+function isBroadSourceFactReadonlyAction(
+  action: FinalGateEvidenceGapActionPlan["evidenceAction"],
+): boolean {
+  if (action?.strategy !== "source_fact_readonly_check") return false;
+  if (BROAD_FINAL_GAP_SOURCE_FACT_TOOL_NAMES.has(action.toolName)) return true;
+  return action.toolName === "ReadSnippets" && readToolCallSnippetPaths(action.input).length === 0;
 }
 
 function isSourceFactReadonlyProgressEvidence(record: EvidenceRecord): boolean {
@@ -1234,7 +1255,9 @@ function injectAgentCompletionMainChainContext(
   messages: ModelMessage[],
   context: TuiContext,
 ): string[] {
-  const pendingNoticeIds = collectPendingAgentCompletionNotices(context).map((notice) => notice.id);
+  const pendingNoticeIds = collectUndeliveredAgentCompletionNotices(context).map(
+    (notice) => notice.id,
+  );
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (
@@ -1247,6 +1270,10 @@ function injectAgentCompletionMainChainContext(
   const promptContext = formatAgentCompletionMainChainContext(context);
   if (!promptContext) return pendingNoticeIds;
   messages.push({ role: "system", content: promptContext });
+  const deliveredAt = new Date().toISOString();
+  for (const noticeId of pendingNoticeIds) {
+    markAgentCompletionNoticeDelivered(context, noticeId, deliveredAt);
+  }
   return pendingNoticeIds;
 }
 
@@ -1483,7 +1510,7 @@ function captureFinalGapProgressState(
     !evidenceAction && result.unsupportedKinds.includes("final_answer_claim_contract");
   const relevantEvidence = currentEvidence.filter((record) => {
     if (evidenceAction) {
-      return evidenceSupportsFinalGapProgress(record, evidenceAction) &&
+      return evidenceSupportsFinalGapProgress(record, evidenceAction, context) &&
         evidenceMatchesFinalGapAction(record, evidenceAction);
     }
     return trackActionlessExecutionProgress && evidenceSupportsExecutionProgress(record);
@@ -4429,7 +4456,7 @@ export async function sendMessage(
   const _tDirective0 = Date.now();
   const _msDirective = formatMetaSchedulerDirective(metaSchedulerDecision);
   metaSchedulerDecision.internalEvents.push(`perf:scheduler_directive_ms=${Date.now() - _tDirective0}`);
-  const agentCompletionNoticeIdsForTurn = collectPendingAgentCompletionNotices(context).map(
+  const agentCompletionNoticeIdsForTurn = collectUndeliveredAgentCompletionNotices(context).map(
     (notice) => notice.id,
   );
   const _tSysPrompt0 = Date.now();
@@ -4444,6 +4471,10 @@ export async function sendMessage(
     gitStatusSummary,
     { evidence: evidenceForCurrentVerificationScope(context) },
   );
+  const agentCompletionDeliveredAt = new Date().toISOString();
+  for (const noticeId of agentCompletionNoticeIdsForTurn) {
+    markAgentCompletionNoticeDelivered(context, noticeId, agentCompletionDeliveredAt);
+  }
   metaSchedulerDecision.internalEvents.push(`perf:system_prompt_ms=${Date.now() - _tSysPrompt0}`);
   if (context.solutionCompleteness.triggered) {
     await appendSystemEvent(
