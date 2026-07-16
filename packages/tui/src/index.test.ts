@@ -2562,6 +2562,45 @@ describe("runHeadlessTask", () => {
     expect(exitCode).toBe(1);
   });
 
+  it("runs workspace index before the first headless bench model request", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-index-first-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const output = new MemoryOutput();
+    const order: string[] = [];
+
+    const exitCode = await runHeadlessTask({
+      prompt: "bench with index warmup",
+      projectPath: project,
+      stdout: output,
+      stderr: new MemoryOutput(),
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 0,
+        testCommand: `node -e "process.exit(0)"`,
+      },
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testRunBenchIndex: async ({ context }) => {
+        order.push("index");
+        context.index.status = "ready";
+        context.index.nodes = 7;
+        context.index.edges = 11;
+      },
+      __testSendMessage: async () => {
+        order.push("model");
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(order).toEqual(["index", "model"]);
+    expect(output.text).toContain("[headless] bench index: starting");
+    expect(output.text).toContain("[headless] bench index: ready nodes=7 edges=11");
+  });
+
   it("accepts current headless bench test evidence when no official test command is detected", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-tool-test-evidence-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });

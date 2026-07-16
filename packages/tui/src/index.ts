@@ -826,6 +826,7 @@ export type RunHeadlessOptions = {
   __testContext?: TuiContext;
   __testStore?: SessionStore;
   __testSkipHydration?: boolean;
+  __testRunBenchIndex?: HeadlessBenchIndexRunner;
   __testSendMessage?: typeof sendMessage;
 };
 
@@ -835,6 +836,12 @@ const HEADLESS_CONTINUATION_BACKOFF_BASE_MS = 250;
 const HEADLESS_CLEANUP_SETTLE_MS = 500;
 const HEADLESS_ATTEMPT_PROCESS_STOP_TIMEOUT_MS = 3_000;
 const HEADLESS_DEADLINE_CLOSURE_WINDOW_MS = 60_000;
+
+type HeadlessBenchIndexRunner = (input: {
+  context: TuiContext;
+  output: Writable;
+  signal?: AbortSignal;
+}) => Promise<void>;
 
 type HeadlessPhase =
   | "starting"
@@ -861,6 +868,81 @@ function emitHeadlessPhase(
   if (options?.suppress) return;
   const suffix = detail ? `: ${detail}` : "";
   writeLine(output, `[headless] ${phase}${suffix}`);
+}
+
+async function runHeadlessBenchIndexWarmup(input: {
+  context: TuiContext;
+  output: Writable;
+  errorOutput: Writable;
+  deadlineAtMs?: number;
+  hostSignal?: AbortSignal;
+  runner?: HeadlessBenchIndexRunner;
+  skip?: boolean;
+}): Promise<{ exitCode?: number }> {
+  if (input.skip || !input.context.config.index.enabled) return {};
+  if (input.hostSignal?.aborted) return { exitCode: 130 };
+  const remainingMs = remainingHeadlessDeadlineMs(input.deadlineAtMs);
+  if (remainingMs !== undefined && remainingMs <= 0) return { exitCode: 6 };
+
+  const controller = new AbortController();
+  let deadlineExpired = false;
+  const abortFromHost = () => controller.abort(input.hostSignal?.reason ?? "headless_interrupt");
+  input.hostSignal?.addEventListener("abort", abortFromHost, { once: true });
+  const deadlineTimer =
+    remainingMs === undefined
+      ? undefined
+      : setTimeout(() => {
+          deadlineExpired = true;
+          controller.abort("headless_deadline");
+        }, Math.min(remainingMs, 2_147_483_647));
+
+  try {
+    writeLine(input.output, "[headless] bench index: starting");
+    const runner =
+      input.runner ??
+      (async ({ context, output, signal }: Parameters<HeadlessBenchIndexRunner>[0]) => {
+        await runIndexRepository(
+          context,
+          context.config.index.mode,
+          context.config.index.mode === "fast" ? "init fast" : "refresh",
+          false,
+          output,
+          { signal },
+        );
+      });
+    await runner({ context: input.context, output: input.output, signal: controller.signal });
+    if (input.hostSignal?.aborted) return { exitCode: 130 };
+    if (deadlineExpired || controller.signal.aborted || isHeadlessDeadlineExpired(input.deadlineAtMs)) {
+      writeLine(input.errorOutput, "[headless] bench index deadline reached; stopping before model call.");
+      return { exitCode: 6 };
+    }
+    const status = input.context.index.status;
+    const ok =
+      status === "ready" ||
+      status === "stale" ||
+      status === "refresh_completed_but_unverified";
+    if (!ok) {
+      const detail = input.context.index.error ? `; ${input.context.index.error}` : "";
+      writeLine(input.errorOutput, `[headless] bench index failed: status=${status}${detail}`);
+      return { exitCode: 1 };
+    }
+    writeLine(
+      input.output,
+      `[headless] bench index: ${status}${input.context.index.nodes !== undefined ? ` nodes=${input.context.index.nodes}` : ""}${input.context.index.edges !== undefined ? ` edges=${input.context.index.edges}` : ""}`,
+    );
+    return {};
+  } catch (error) {
+    if (input.hostSignal?.aborted) return { exitCode: 130 };
+    if (deadlineExpired || controller.signal.aborted || isHeadlessDeadlineExpired(input.deadlineAtMs)) {
+      writeLine(input.errorOutput, "[headless] bench index deadline reached; stopping before model call.");
+      return { exitCode: 6 };
+    }
+    writeLine(input.errorOutput, `[headless] bench index failed: ${formatError(error, input.context.language)}`);
+    return { exitCode: 1 };
+  } finally {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+    input.hostSignal?.removeEventListener("abort", abortFromHost);
+  }
 }
 
 type HeadlessActivitySnapshot = { phase: HeadlessPhase; detail?: string };
@@ -1795,6 +1877,18 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
       : undefined;
   if (benchConfig.enabled && benchPreflight) {
     writeLine(output, `[headless] bench preflight: ${benchPreflight.summary}`);
+  }
+  if (benchConfig.enabled) {
+    const indexWarmup = await runHeadlessBenchIndexWarmup({
+      context,
+      output,
+      errorOutput,
+      ...(deadlineAtMs === undefined ? {} : { deadlineAtMs }),
+      ...(options.signal ? { hostSignal: options.signal } : {}),
+      ...(options.__testRunBenchIndex ? { runner: options.__testRunBenchIndex } : {}),
+      skip: Boolean(options.__testContext) && !options.__testRunBenchIndex,
+    });
+    if (indexWarmup.exitCode !== undefined) return indexWarmup.exitCode;
   }
   suppressGenericHeadlessPhases = benchConfig.enabled;
   emitHeadlessPhase(output, "starting", `mode=${context.permissionMode}`, {
