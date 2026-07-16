@@ -5410,6 +5410,36 @@ describe("final answer gate aggregation", () => {
       .toBe("passed");
   });
 
+  it("routes code-fact gaps to source readonly evidence instead of artifact probes", () => {
+    const context = {
+      ...makeGateContext(),
+      projectPath: "C:/repo",
+      sessionId: "session-source-gap",
+      currentRequestTurnId: "request-source-gap",
+      currentRequestMentionedFiles: ["packages/tui/src/model-stream-runtime.ts"],
+      evidence: [],
+    } as unknown as TuiContext;
+    const result = {
+      status: "needs_disclaimer" as const,
+      unsupportedKinds: ["code_fact"],
+    };
+
+    const plan = planFinalGateEvidenceGapAction({
+      result,
+      context,
+      assistantText:
+        "packages/tui/src/model-stream-runtime.ts 里的 final gate 会按源码事实补证。",
+    });
+
+    expect(plan.action).toBe("readonly_check");
+    expect(plan.reason).toBe("source_fact_gap_readonly");
+    expect(plan.evidenceAction?.strategy).toBe("source_fact_readonly_check");
+    expect(plan.evidenceAction?.toolName).toBe("ReadSnippets");
+    expect(JSON.stringify(plan.evidenceAction?.input)).toContain(
+      "packages/tui/src/model-stream-runtime.ts",
+    );
+  });
+
   it("allows readonly audit follow-up code facts to reuse only prior readonly evidence", () => {
     const context = {
       ...makeGateContext(),
@@ -7064,6 +7094,74 @@ describe("final answer gate aggregation", () => {
     expect(JSON.stringify(calls.requests[1]?.messages ?? [])).not.toContain("Previous directive");
   });
 
+  it("does not bridge a mixed completion and source terminal boundary into the next request", async () => {
+    const { context } = await makeSendMessageContext();
+    context.permissionMode = "full-access";
+    const calls: { count: number; requests: Array<{ messages?: unknown }> } = {
+      count: 0,
+      requests: [],
+    };
+    const rawDraft = withClaims("已完成，并且 fact.ts 返回 42。", [
+      { kind: "completion_claim", phrase: "已完成" },
+      { kind: "code_fact", phrase: "fact.ts 返回 42" },
+    ]);
+    const gateway = gatewayByTurn([
+      [
+        { type: "assistant_text_delta", text: rawDraft },
+        { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+      ],
+      [
+        { type: "assistant_text_delta", text: "这是新的回答。" },
+        { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+      ],
+    ], calls);
+
+    await __testSendMessage("只读审计 fact.ts，不运行验证", context, gateway, new MemoryOutput());
+    await __testSendMessage("给我结果", context, gateway, new MemoryOutput());
+
+    expect(calls.count).toBe(2);
+    expect(JSON.stringify(calls.requests[1]?.messages ?? [])).not.toContain(
+      "上一轮 final-gate 中断的连续性提示",
+    );
+  });
+
+  it("does not consume a readonly source bridge for an unrelated follow-up", async () => {
+    const { context } = await makeSendMessageContext();
+    context.permissionMode = "full-access";
+    await writeFile(join(context.projectPath, "fact.ts"), "export const answer = () => 42;\n", "utf8");
+    const rawDraft = withClaims("fact.ts 的 answer 返回 42。", [
+      { kind: "code_fact", phrase: "fact.ts 的 answer 返回 42" },
+    ]);
+    let rounds = 0;
+    const gateway = {
+      async *stream() {
+        rounds += 1;
+        if (rounds === 2) {
+          yield {
+            type: "tool_use",
+            id: "bridge-source-snippets",
+            name: "ReadSnippets",
+            input: { ranges: [{ path: "fact.ts", start: 1, end: 80 }] },
+          } as const;
+          yield { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "tool_use" } as const;
+          return;
+        }
+        yield { type: "assistant_text_delta", text: rawDraft } as const;
+        yield { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" } as const;
+      },
+      async countMessagesTokensWithAPI() {
+        return { source: "unavailable", reason: "test" } as const;
+      },
+    } as unknown as ModelGateway;
+
+    await __testSendMessage("只读审计 fact.ts", context, gateway, new MemoryOutput());
+    await __testSendMessage("天气怎么样", context, gateway, new MemoryOutput());
+
+    expect(JSON.stringify(context.lastMetaSchedulerDecision?.internalEvents ?? [])).not.toContain(
+      "meta_scheduler:final_gate_continuation_bridge",
+    );
+  });
+
   it("closes a shrinking final gap identically in main and continuation loops", async () => {
     const runCase = async (entry: "main" | "continuation") => {
       const { context, events } = await makeSendMessageContext();
@@ -7141,7 +7239,7 @@ describe("final answer gate aggregation", () => {
       expect(result.rounds).toBe(5);
       expect(result.finalText).toContain("answer 函数返回 42");
       expect(result.output).toContain("Read(fact.ts)");
-      expect(result.output).toContain("ReadSnippets");
+      expect(result.output).toContain("SourcePack");
       expect(result.finalText).not.toMatch(/PARTIAL|部分完成|如果继续|round.?limit|轮次上限/iu);
       expect(JSON.stringify(result.events)).toContain("final_answer_gap_returned_to_model_loop");
     }
@@ -7207,7 +7305,7 @@ describe("final answer gate aggregation", () => {
 
     for (const entry of ["main", "continuation"] as const) {
       const result = await runCase(entry);
-      expect(result.rounds).toBe(5);
+      expect(result.rounds).toBe(3);
       expect(result.finalText).toContain("ignored.ts 导出 value 42");
       expect(result.output).not.toContain("所有可用且不重复的真实补证路径均已尝试");
       expect(result.output).toContain("ReadSnippets");
@@ -8694,6 +8792,142 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
     expect(continuation.finalGapProgressState.attemptedCommandFingerprints.size).toBe(1);
 
     expect(recordSuccessfulToolExecutionProgress(continuation, toolCall, result, context)).toBe(false);
+  });
+
+  it("counts matching source readonly evidence as progress for source fact gaps", () => {
+    const context = {
+      evidence: [],
+      currentRequestTurnId: "turn-source",
+      sessionId: "session-source",
+      projectPath: "/test",
+    } as unknown as TuiContext;
+    const gapResult = {
+      status: "needs_disclaimer" as const,
+      unsupportedKinds: ["code_fact"],
+    };
+    const evidenceAction = {
+      toolName: "ReadSnippets",
+      input: { ranges: [{ path: "src/a.ts", start: 1, end: 120 }] },
+      strategy: "source_fact_readonly_check" as const,
+      summary: "read source fact snippets",
+    };
+    const previous = __testCaptureFinalGapProgressState(gapResult, context, evidenceAction);
+    context.evidence.push({
+      id: "matching-source-read",
+      kind: "file_read",
+      summary: "ReadSnippets: src/a.ts",
+      source: "ReadSnippets",
+      supportsClaims: ["ReadSnippets", "local_read", "read_nonempty", "source_snippet"],
+      createdAt: new Date(0).toISOString(),
+      ownerScope: {
+        ownerSessionId: "session-source",
+        requestTurnId: "turn-source",
+        cwd: "/test",
+        targets: ["src/a.ts"],
+      },
+    });
+
+    expect(__testFinalGapHasProgress(gapResult, context, previous)).toBe(true);
+    expect(__testEvidenceMatchesFinalGapAction(context.evidence[0], evidenceAction)).toBe(true);
+
+    const continuation = {
+      finalGapProgressState: previous,
+    };
+    expect(recordSuccessfulToolExecutionProgress(
+      continuation,
+      {
+        name: "ReadSnippets",
+        input: { ranges: [{ path: "src/a.ts", start: 40, end: 80 }] },
+      },
+      {
+        ok: true,
+        tool: "ReadSnippets",
+        text: "src/a.ts snippets",
+        evidenceId: "matching-source-read",
+      },
+      context,
+    )).toBe(true);
+  });
+
+  it("does not count plain file reads as source fact progress", () => {
+    const context = {
+      evidence: [],
+      currentRequestTurnId: "turn-source-weak",
+      sessionId: "session-source-weak",
+      projectPath: "/test",
+    } as unknown as TuiContext;
+    const gapResult = {
+      status: "needs_disclaimer" as const,
+      unsupportedKinds: ["code_fact"],
+    };
+    const evidenceAction = {
+      toolName: "ReadSnippets",
+      input: { ranges: [{ path: "src/a.ts", start: 1, end: 120 }] },
+      strategy: "source_fact_readonly_check" as const,
+      summary: "read source fact snippets",
+    };
+    const previous = __testCaptureFinalGapProgressState(gapResult, context, evidenceAction);
+    context.evidence.push({
+      id: "weak-source-read",
+      kind: "file_read",
+      summary: "Read: src/a.ts",
+      source: "Read",
+      supportsClaims: ["Read", "local_read", "read_nonempty"],
+      createdAt: new Date(0).toISOString(),
+      ownerScope: {
+        ownerSessionId: "session-source-weak",
+        requestTurnId: "turn-source-weak",
+        cwd: "/test",
+        targets: ["src/a.ts"],
+      },
+    });
+
+    expect(__testFinalGapHasProgress(gapResult, context, previous)).toBe(false);
+  });
+
+  it("does not repeat carried source snippets as the next source fact probe", () => {
+    const context = {
+      ...makeGateContext(),
+      evidence: [
+        {
+          id: "carried-source-read",
+          kind: "file_read",
+          summary: "ReadSnippets: src/a.ts",
+          source: "ReadSnippets",
+          supportsClaims: ["ReadSnippets", "local_read", "read_nonempty", "source_snippet"],
+          createdAt: new Date(0).toISOString(),
+          ownerScope: {
+            ownerSessionId: "session-carry-source",
+            requestTurnId: "previous-source-turn",
+            cwd: "/test",
+            targets: ["src/a.ts"],
+          },
+        },
+      ],
+      currentRequestTurnId: "current-source-turn",
+      currentRequestMentionedFiles: ["src/a.ts"],
+      sessionId: "session-carry-source",
+      projectPath: "/test",
+      language: "zh-CN",
+    } as unknown as TuiContext;
+    __testActivateReadonlyEvidenceCarryover(
+      context,
+      "previous-source-turn",
+      "current-source-turn",
+    );
+
+    const plan = planFinalGateEvidenceGapAction({
+      result: {
+        status: "needs_disclaimer",
+        unsupportedKinds: ["code_fact"],
+      },
+      context,
+      assistantText: "src/a.ts 中的 answer 返回 42。",
+    });
+
+    expect(plan.reason).toBe("source_fact_gap_readonly");
+    expect(plan.evidenceAction?.strategy).toBe("source_fact_readonly_check");
+    expect(plan.evidenceAction?.toolName).not.toBe("ReadSnippets");
   });
 
   it("does not count unrelated evidence and records an attempted path only when it executes", () => {

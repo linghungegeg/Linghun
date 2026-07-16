@@ -134,6 +134,28 @@ describe("Meta scheduler runtime", () => {
     );
   });
 
+  it("does not route through compact only because the session has many turns", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      messages: [{ role: "user", content: "small follow-up" }],
+      estimatedContextChars: 200,
+      contextMaxChars: 10_000,
+      triggerChars: 8_000,
+      totalTurns: 31,
+    });
+
+    expect(decision.shouldCompactBeforeProvider).toBe(false);
+    expect(decision.policyDecision.contextPlan.compactBeforeProvider).toBe(false);
+    expect(
+      decision.policyDecision.hints.some((hint) => hint.id === "compact-before-provider"),
+    ).toBe(false);
+    expect(decision.internalEvents).toContain("meta_scheduler:continuity_long_session_observed");
+    expect(decision.orchestrationPlan.primaryAction).not.toBe("compact");
+    expect(decision.orchestrationPlan.steps).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "compact-context" })]),
+    );
+  });
+
   it("creates source-first typed policy for code fact requests with bilingual hints", () => {
     const decision = evaluateMetaScheduler({
       ...baseInput(),
@@ -1368,6 +1390,29 @@ describe("Meta scheduler runtime", () => {
       expect(decision.policyDecision.taskKind).toBe("chat");
       expect(decision.internalEvents).toContain("meta_scheduler:intent_unclear_clarify");
       expect(decision.directives).toContain("用户意图不明确，先澄清再操作");
+    });
+
+    it("keeps final-gate readonly follow-up on the source-fact route", () => {
+      const decision = evaluateMetaScheduler({
+        ...baseInput(),
+        userText: "给我结果可以吗",
+        taskDomainSwitched: true,
+        finalGateContinuation: {
+          readonlyAuditFollowup: true,
+          unsupportedKinds: ["code_fact"],
+          actionReason: "final_gate_no_new_evidence_path",
+        },
+      });
+
+      expect(decision.policyDecision.taskKind).toBe("code_fact");
+      expect(decision.policyDecision.executionPlan.preferSourceFirst).toBe(true);
+      expect(decision.internalEvents).toContain(
+        "meta_scheduler:final_gate_continuation_bridge reason=final_gate_no_new_evidence_path",
+      );
+      expect(decision.internalEvents).not.toContain("meta_scheduler:intent_unclear_clarify");
+      expect(decision.internalEvents).not.toContain(
+        "meta_scheduler:continuity_domain_switch_failure_reset",
+      );
     });
 
     it("appends verification to secondaries when last verification failed", () => {

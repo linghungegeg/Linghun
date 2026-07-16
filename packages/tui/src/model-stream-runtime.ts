@@ -278,7 +278,11 @@ export type FinalGateEvidenceGapActionPlan = {
   evidenceAction?: {
     toolName: string;
     input?: unknown;
-    strategy?: "minimal_bash_verification" | "artifact_readonly_check" | "service_runtime_readonly_check";
+    strategy?:
+      | "minimal_bash_verification"
+      | "artifact_readonly_check"
+      | "source_fact_readonly_check"
+      | "service_runtime_readonly_check";
     summary: string;
   };
 };
@@ -988,6 +992,7 @@ export function recordSuccessfulToolExecutionProgress(
     const wasAttempted = attempted?.has(actionFingerprint) === true;
     if (
       evidenceAction.strategy === "artifact_readonly_check" ||
+      evidenceAction.strategy === "source_fact_readonly_check" ||
       evidenceAction.strategy === "service_runtime_readonly_check"
     ) {
       const attemptedAction = FINAL_GAP_READONLY_EVIDENCE_TOOL_NAMES.has(toolCall.name)
@@ -1040,7 +1045,7 @@ function finalGapExecutionStateAdvanced(
   return evidenceForCurrentVerificationScope(context)
     .filter(
       (record) =>
-        evidenceSupportsExecutionProgress(record) &&
+        evidenceSupportsFinalGapProgress(record, evidenceAction) &&
         evidenceMatchesFinalGapAction(record, evidenceAction),
     )
     .map(createEvidenceProgressFingerprint)
@@ -1083,6 +1088,30 @@ function evidenceSupportsExecutionProgress(record: EvidenceRecord): boolean {
     claims.has("diff_check_passed") ||
     claims.has("smoke_passed")
   );
+}
+
+function evidenceSupportsFinalGapProgress(
+  record: EvidenceRecord,
+  action?: FinalGateEvidenceGapActionPlan["evidenceAction"],
+): boolean {
+  if (action?.strategy !== "source_fact_readonly_check") {
+    return evidenceSupportsExecutionProgress(record);
+  }
+  return isSourceFactReadonlyProgressEvidence(record);
+}
+
+function isSourceFactReadonlyProgressEvidence(record: EvidenceRecord): boolean {
+  if (record.supportsClaims.includes("tool_failure")) return false;
+  if (record.kind === "index_query") return record.supportsClaims.includes("index_code_fact");
+  if (record.kind === "grep_result") {
+    return record.supportsClaims.includes("grep_match") ||
+      record.supportsClaims.includes("grep_no_matches");
+  }
+  if (record.kind === "file_read") {
+    return record.supportsClaims.includes("source_snippet") &&
+      record.supportsClaims.includes("read_nonempty");
+  }
+  return false;
 }
 
 function recordCacheRequestObservation(
@@ -1453,7 +1482,10 @@ function captureFinalGapProgressState(
   const trackActionlessExecutionProgress =
     !evidenceAction && result.unsupportedKinds.includes("final_answer_claim_contract");
   const relevantEvidence = currentEvidence.filter((record) => {
-    if (evidenceAction) return evidenceMatchesFinalGapAction(record, evidenceAction);
+    if (evidenceAction) {
+      return evidenceSupportsFinalGapProgress(record, evidenceAction) &&
+        evidenceMatchesFinalGapAction(record, evidenceAction);
+    }
     return trackActionlessExecutionProgress && evidenceSupportsExecutionProgress(record);
   });
   const relevantEvidenceIds = new Set(
@@ -1586,8 +1618,26 @@ const readonlyEvidenceCarryoverScopes = new WeakMap<
 
 function shouldCaptureFinalGateContinuationBridge(
   actionPlan: FinalGateEvidenceGapActionPlan,
+  result?: Pick<Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>, "unsupportedKinds">,
 ): boolean {
-  return actionPlan.action !== "blocked_explanation" && actionPlan.action !== "downgrade_only";
+  if (actionPlan.action !== "blocked_explanation" && actionPlan.action !== "downgrade_only") {
+    return true;
+  }
+  return isReadonlySourceFactFinalGapAction(actionPlan, result);
+}
+
+function isReadonlySourceFactFinalGapAction(
+  actionPlan: FinalGateEvidenceGapActionPlan,
+  result?: Pick<Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>, "unsupportedKinds">,
+): boolean {
+  const sourceKinds = new Set(["code_fact", "source_read", "source_search", "local_read"]);
+  return actionPlan.reason === "source_fact_gap_readonly" ||
+    actionPlan.evidenceAction?.strategy === "source_fact_readonly_check" ||
+    (
+      result?.unsupportedKinds.length !== undefined &&
+      result.unsupportedKinds.length > 0 &&
+      result.unsupportedKinds.every((kind) => sourceKinds.has(kind))
+    );
 }
 
 function captureFinalGateContinuationBridgeHint(input: {
@@ -1634,7 +1684,11 @@ function isReadonlyAuditFollowupBridgeRequest(
 ): boolean {
   if (!canCarryReadonlyEvidenceFromHint(hint)) return false;
   if (!hasPriorReadonlyEvidenceForRequest(context, hint.requestTurnId)) return false;
-  return isImplicitInterruptedTurnFollowupRequest(userText);
+  const normalized = userText.trim();
+  if (!normalized) return false;
+  if (extractFileMentions(normalized).length > 0) return false;
+  if (hasNewExecutableOrScopeIntent(normalized)) return false;
+  return isImplicitInterruptedTurnFollowupRequest(normalized);
 }
 
 function shouldResumeInterruptedTurnRequest(context: TuiContext, text: string): boolean {
@@ -1658,8 +1712,11 @@ function isImplicitInterruptedTurnFollowupRequest(text: string): boolean {
 function canCarryReadonlyEvidenceFromHint(hint: FinalGateContinuationBridgeHint): boolean {
   if (hint.readonlyEvidenceHints.length === 0) return false;
   return hint.unsupportedKinds.some((kind) =>
-    /(?:code_fact|source_read|source_search|local_read|artifact)/iu.test(kind)
-  ) || /readonly|artifact|source|code_fact|local_read/iu.test(hint.actionReason);
+    kind === "code_fact" ||
+    kind === "source_read" ||
+    kind === "source_search" ||
+    kind === "local_read"
+  ) || hint.actionReason === "source_fact_gap_readonly";
 }
 
 function hasNewExecutableOrScopeIntent(text: string): boolean {
@@ -1712,6 +1769,10 @@ function summarizeReadonlyEvidenceHints(context: TuiContext): string[] {
     .filter((record) =>
       record.supportsClaims.some((claim) =>
         claim === "code_fact" ||
+        claim === "source_snippet" ||
+        claim === "grep_match" ||
+        claim === "grep_no_matches" ||
+        claim === "index_code_fact" ||
         claim === "artifact_exists" ||
         claim === "git_status" ||
         claim === "tool_output" ||
@@ -1837,6 +1898,7 @@ function createCommandFingerprint(
 ): string {
   if (
     evidenceAction.strategy === "artifact_readonly_check" ||
+    evidenceAction.strategy === "source_fact_readonly_check" ||
     evidenceAction.strategy === "service_runtime_readonly_check"
   ) {
     const scopedPath = readToolCallPath(evidenceAction.input) ?? ".";
@@ -1894,6 +1956,17 @@ function toolCallMatchesFinalGapAction(
     if (!actualPath || !pathsReferToSameArtifactHint(actualPath, expectedPath)) return false;
     if (expectedPattern) return true;
   }
+  const expectedSnippetPaths = readToolCallSnippetPaths(action.input);
+  if (expectedSnippetPaths.length > 0) {
+    const actualSnippetPaths = readToolCallSnippetPaths(toolCall.input);
+    if (
+      actualSnippetPaths.length === 0 ||
+      !expectedSnippetPaths.some((expected) =>
+        actualSnippetPaths.some((actual) => pathsReferToSameArtifactHint(actual, expected))
+      )
+    ) return false;
+    return true;
+  }
   if (expectedPattern) return true;
   const expectedLevel = readRequestedVerificationLevel(action.input);
   if (expectedLevel) {
@@ -1944,7 +2017,14 @@ function evidenceMatchesFinalGapAction(
     record.supportsClaims.includes(action.toolName);
   if (!toolMatches) return false;
   const expectedPath = readToolCallPath(action.input);
-  if (!expectedPath) return true;
+  const expectedSnippetPaths = readToolCallSnippetPaths(action.input);
+  if (!expectedPath && expectedSnippetPaths.length === 0) return true;
+  if (expectedSnippetPaths.length > 0) {
+    return record.ownerScope?.targets?.some((target) =>
+      expectedSnippetPaths.some((expected) => pathsReferToSameArtifactHint(target, expected))
+    ) === true;
+  }
+  if (!expectedPath) return false;
   return (
     record.ownerScope?.targets?.some((target) =>
       pathsReferToSameArtifactHint(target, expectedPath)
@@ -2053,6 +2133,7 @@ function isReadonlyEvidenceCarryoverRecord(
   if (!evidenceCwdBelongsToProject(owner.cwd, context.projectPath)) return false;
   return record.supportsClaims.includes("readonly_low_noise_evidence") ||
     record.supportsClaims.includes("code_fact") ||
+    isSourceFactReadonlyProgressEvidence(record) ||
     record.kind === "index_query";
 }
 
@@ -2346,6 +2427,31 @@ export function planFinalGateEvidenceGapAction(input: {
       reason: "user_forbid_commands",
       directive: formatEvidenceGapBlocker("user_forbid_commands", language),
     };
+  }
+  if (gap === "source_fact") {
+    const sourceFactAction = createSourceFactReadonlyEvidenceAction({
+      text: [input.assistantText, input.userText].filter(Boolean).join("\n"),
+      context,
+      attemptedEvidenceActionFingerprints: input.attemptedEvidenceActionFingerprints,
+    });
+    if (!sourceFactAction) {
+      return createNoEvidencePathPlan();
+    }
+    return finalizeEvidencePlan({
+      action: "readonly_check",
+      reason: "source_fact_gap_readonly",
+      directive: formatEvidenceGapToolDirective({
+        language,
+        action: "readonly_check",
+        missing: mapFinalGateKindsToUserLabels(result.unsupportedKinds, language),
+        tools: ["ReadSnippets", "SourcePack", "Grep"],
+        note:
+          language === "en-US"
+            ? "Only inspect source files or source index snippets; do not write files and do not run Bash."
+            : "只检查源码文件或源码索引片段；不要写文件，也不要运行 Bash。",
+      }),
+      evidenceAction: sourceFactAction,
+    });
   }
   if (gap === "artifact") {
     const artifactAction = createArtifactReadonlyEvidenceAction({
@@ -2855,13 +2961,20 @@ function createFinalGateEvidenceTaskDirective(
       ].join("\n");
 }
 
-function classifyFinalGateEvidenceGap(kinds: string[]): "verification" | "completion" | "artifact" | "git" | "runtime" | "other" {
+function classifyFinalGateEvidenceGap(
+  kinds: string[],
+): "verification" | "completion" | "source_fact" | "artifact" | "git" | "runtime" | "other" {
   if (kinds.some((kind) => /git|commit|branch|push|stable_point/iu.test(kind))) return "git";
   if (kinds.some((kind) => /completion_claim|task_completion|task_completed/iu.test(kind))) {
     return "completion";
   }
-  if (kinds.some((kind) => /code_fact|source_read|source_search|local_read/iu.test(kind))) {
-    return "artifact";
+  if (kinds.some((kind) =>
+    kind === "code_fact" ||
+    kind === "source_read" ||
+    kind === "source_search" ||
+    kind === "local_read"
+  )) {
+    return "source_fact";
   }
   if (kinds.some((kind) => /artifact|file|report|write/iu.test(kind))) return "artifact";
   if (kinds.some((kind) => /service|runtime|port|health|log|daemon|server/iu.test(kind))) {
@@ -2871,6 +2984,93 @@ function classifyFinalGateEvidenceGap(kinds: string[]): "verification" | "comple
     return "verification";
   }
   return "other";
+}
+
+function createSourceFactReadonlyEvidenceAction(input: {
+  text: string;
+  context: Pick<TuiContext, "evidence"> &
+    Partial<Pick<TuiContext, "tools" | "recentlyMentionedFiles" | "currentRequestTurnId" | "currentRequestMentionedFiles" | "currentRequestChangedFiles" | "sessionId" | "projectPath">>;
+  attemptedEvidenceActionFingerprints?: ReadonlySet<string>;
+}): FinalGateEvidenceGapActionPlan["evidenceAction"] {
+  const currentRequestTurnId = input.context.currentRequestTurnId;
+  const projectPath = input.context.projectPath;
+  const currentEvidence = currentRequestTurnId && projectPath
+    ? evidenceForCurrentVerificationScope(input.context as TuiContext)
+    : input.context.evidence;
+  const candidatePaths = uniqueArtifactTargets([
+    ...extractLikelyFilePathsFromText(input.text),
+    ...(input.context.currentRequestMentionedFiles ?? []),
+    ...(input.context.currentRequestChangedFiles ?? []),
+    ...(input.context.tools?.changedFiles ?? []),
+    ...(input.context.recentlyMentionedFiles ?? []),
+    ...currentEvidence.flatMap((record) => record.ownerScope?.targets ?? []),
+  ]).filter((item) => !item.includes("*"));
+  const path = candidatePaths.find((item) => !hasSourceFactProbeEvidenceForPath(currentEvidence, item));
+  const query = createSourceFactReadonlyQuery(input.text, path);
+  const actions: NonNullable<FinalGateEvidenceGapActionPlan["evidenceAction"]>[] = path
+    ? [
+      {
+        toolName: "ReadSnippets",
+        input: { ranges: [{ path, start: 1, end: 240 }] },
+        strategy: "source_fact_readonly_check",
+        summary: `read source snippets for ${path}`,
+      },
+      {
+        toolName: "SourcePack",
+        input: { query: path, limit: 5 },
+        strategy: "source_fact_readonly_check",
+        summary: `locate source facts for ${path}`,
+      },
+      {
+        toolName: "Grep",
+        input: { pattern: createSourceFactGrepPattern(input.text), path, limit: 30 },
+        strategy: "source_fact_readonly_check",
+        summary: `grep source facts in ${path}`,
+      },
+    ]
+    : [
+      {
+        toolName: "SourcePack",
+        input: { query, limit: 6 },
+        strategy: "source_fact_readonly_check",
+        summary: "locate source facts for final answer claims",
+      },
+      {
+        toolName: "Grep",
+        input: { pattern: createSourceFactGrepPattern(input.text), path: ".", limit: 30 },
+        strategy: "source_fact_readonly_check",
+        summary: "grep source facts for final answer claims",
+      },
+    ];
+  return actions.find((action) =>
+    !input.attemptedEvidenceActionFingerprints?.has(createCommandFingerprint(action))
+  );
+}
+
+function hasSourceFactProbeEvidenceForPath(evidence: TuiContext["evidence"], path: string): boolean {
+  return evidence.some((record) =>
+    isSourceFactReadonlyProgressEvidence(record) &&
+    record.ownerScope?.targets?.some((target) => pathsReferToSameArtifactHint(target, path)) === true
+  );
+}
+
+function createSourceFactReadonlyQuery(text: string, path: string | undefined): string {
+  if (path) return path;
+  const tokens = Array.from(new Set(
+    text.match(/[\p{L}\p{N}_$./\\-]{3,}/gu)?.filter((item) =>
+      !/^(?:LinghunFinalAnswerClaims|claims|code_fact|source_read|source_search|local_read)$/iu.test(item)
+    ) ?? [],
+  ));
+  return tokens.slice(0, 12).join(" ") || "source fact final answer evidence";
+}
+
+function createSourceFactGrepPattern(text: string): string {
+  const tokens = Array.from(new Set(
+    text.match(/[\p{L}\p{N}_$.-]{4,}/gu)?.filter((item) =>
+      !/^(?:LinghunFinalAnswerClaims|claims|code_fact|source_read|source_search|local_read)$/iu.test(item)
+    ) ?? [],
+  ));
+  return tokens.slice(0, 8).join("|") || "function|class|const|export|import|return";
 }
 
 function createArtifactReadonlyEvidenceAction(input: {
@@ -4014,7 +4214,13 @@ export async function sendMessage(
   context.failureLearning.records = failureLearningRecords;
 
   const _tMsInput0 = Date.now();
-  const _msInput = createMetaSchedulerInput(context, selectedRuntime, text, false);
+  const _msInput = createMetaSchedulerInput(
+    context,
+    selectedRuntime,
+    text,
+    false,
+    finalGateContinuationHint,
+  );
   perfEvents.push(`perf:scheduler_input_ms=${Date.now() - _tMsInput0}`);
   const _tMsEval0 = Date.now();
   const metaSchedulerDecision = evaluateMetaScheduler({
@@ -4881,7 +5087,7 @@ export async function sendMessage(
                 : "info",
             );
             if (await stopStaleRequest()) return;
-            if (shouldCaptureFinalGateContinuationBridge(actionPlan)) {
+            if (shouldCaptureFinalGateContinuationBridge(actionPlan, gateResult)) {
               captureFinalGateContinuationBridgeHint({
                 context,
                 requestTurnId,
@@ -5592,6 +5798,7 @@ function createMetaSchedulerInput(
   runtime: ReturnType<typeof getSelectedModelRuntime>,
   userText: string,
   providerCooldownBlocked: boolean,
+  finalGateContinuationHint?: FinalGateContinuationBridgeHint,
 ): MetaSchedulerInput {
   const currentVerification = currentVerificationReportForRequest(context);
   return {
@@ -5616,6 +5823,15 @@ function createMetaSchedulerInput(
     routeFallbackUsed: context.lastProviderFallbackAttempt?.status === "attempted",
     routeProviderCooldown: providerCooldownBlocked,
     routeProviderFailure: Boolean(context.lastProviderFailure),
+    ...(finalGateContinuationHint
+      ? {
+          finalGateContinuation: {
+            readonlyAuditFollowup: readonlyEvidenceCarryoverActive(context),
+            unsupportedKinds: finalGateContinuationHint.unsupportedKinds,
+            actionReason: finalGateContinuationHint.actionReason,
+          },
+        }
+      : {}),
     currentArchitectureCard: Boolean(context.currentArchitectureCard),
     architectureDriftPending: context.pendingLocalApproval?.kind === "architecture_drift",
     hasActiveProviderFailure: hasActiveProviderFailure(context.failureLearning),
@@ -6766,7 +6982,7 @@ async function streamFinalModelAnswerWithoutTools(
             : "info",
         );
         if (requestIsStale()) return "";
-        if (requestTurnId && shouldCaptureFinalGateContinuationBridge(actionPlan)) {
+        if (requestTurnId && shouldCaptureFinalGateContinuationBridge(actionPlan, gateResult)) {
           captureFinalGateContinuationBridgeHint({
             context,
             requestTurnId,
@@ -7842,7 +8058,7 @@ export async function continueModelAfterToolResults(
             if (await stopStaleContinuation()) return;
             if (
               continuation.requestTurnId &&
-              shouldCaptureFinalGateContinuationBridge(actionPlan)
+              shouldCaptureFinalGateContinuationBridge(actionPlan, gateResult)
             ) {
               captureFinalGateContinuationBridgeHint({
                 context,
@@ -8173,7 +8389,7 @@ export async function continueModelAfterToolResults(
             if (await stopStaleContinuation()) return;
             if (
               continuation.requestTurnId &&
-              shouldCaptureFinalGateContinuationBridge(actionPlan)
+              shouldCaptureFinalGateContinuationBridge(actionPlan, gateResult)
             ) {
               captureFinalGateContinuationBridgeHint({
                 context,

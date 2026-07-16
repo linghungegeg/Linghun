@@ -140,6 +140,11 @@ export type MetaSchedulerInput = {
   workflow?: ActiveWorkflowRun;
   providerFailure?: { provider: string; model: string; code?: string; message: string };
   providerCooldownBlocked?: boolean;
+  finalGateContinuation?: {
+    readonlyAuditFollowup: boolean;
+    unsupportedKinds: string[];
+    actionReason: string;
+  };
   engineeringProfile?: EngineeringTaskProfile;
   engineeringFailureCategory?: EngineeringFailureCategory;
   permissionMode?: PermissionMode;
@@ -454,11 +459,23 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     failureLearning: input.failureLearning,
     hasActiveProviderFailure: input.hasActiveProviderFailure,
   });
-  let taskKind = adjustTaskKindForUserState(classification.primary, userStateDecision);
-  if (classification.intentUnclear) {
+  const readonlyFinalGateContinuation =
+    input.finalGateContinuation?.readonlyAuditFollowup === true;
+  let taskKind = readonlyFinalGateContinuation
+    ? "code_fact"
+    : adjustTaskKindForUserState(classification.primary, userStateDecision);
+  if (classification.intentUnclear && !readonlyFinalGateContinuation) {
     taskKind = "chat";
     directives.push("用户意图不明确，先澄清再操作");
     internalEvents.push("meta_scheduler:intent_unclear_clarify");
+  }
+  if (readonlyFinalGateContinuation) {
+    if (!classification.secondaries.includes("code_fact")) {
+      classification.secondaries.push("code_fact");
+    }
+    internalEvents.push(
+      `meta_scheduler:final_gate_continuation_bridge reason=${input.finalGateContinuation?.actionReason ?? "unknown"}`,
+    );
   }
   if (classification.reason) {
     internalEvents.push(`meta_scheduler:classifier_reason=${classification.reason}`);
@@ -480,6 +497,9 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
   let preferSourceFirst = initialIntent.sourceFirst;
   let requireVerification = initialIntent.verificationRequired;
   if (classification.secondaries.includes("code_fact")) {
+    preferSourceFirst = true;
+  }
+  if (readonlyFinalGateContinuation) {
     preferSourceFirst = true;
   }
   if (classification.secondaries.includes("verification")) {
@@ -557,7 +577,7 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     internalEvents.push("meta_scheduler:continuity_verification_downgrade");
   }
 
-  if (taskDomainSwitched) {
+  if (taskDomainSwitched && !readonlyFinalGateContinuation) {
     adjustedIncludeFailureLearning = false;
     internalEvents.push("meta_scheduler:continuity_domain_switch_failure_reset");
   }
@@ -570,8 +590,7 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
   }
 
   if (totalTurns > 30) {
-    adjustedShouldCompact = true;
-    internalEvents.push("meta_scheduler:continuity_long_session_compact");
+    internalEvents.push("meta_scheduler:continuity_long_session_observed");
   }
 
   if (highRiskClaim) {

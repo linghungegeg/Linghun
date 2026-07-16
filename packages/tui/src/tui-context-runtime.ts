@@ -278,7 +278,11 @@ export type PendingModelContinuation = {
     evidenceAction?: {
       toolName: string;
       input?: unknown;
-      strategy?: "minimal_bash_verification" | "artifact_readonly_check" | "service_runtime_readonly_check";
+      strategy?:
+        | "minimal_bash_verification"
+        | "artifact_readonly_check"
+        | "source_fact_readonly_check"
+        | "service_runtime_readonly_check";
       summary: string;
     };
     commandFingerprint?: string;
