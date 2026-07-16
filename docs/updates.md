@@ -7,6 +7,31 @@
 - 桌面端即将上线。
 - 特定训练的随机全模态模型（可选安装）即将随桌面端一起发布，通过底座自带的 App Bridge 进行链接，无需安装其他软件。在当前底座 + 索引 + 预检引擎下，10 分钟的任务能缩短至 3-5 分钟，更快、更稳。
 
+## 2026-07-16 主链事实驱动与预检引擎跨平台发布
+
+这次更新继续收口 7 月 12 日后的主链与旁路线：把最终回答、继续/恢复、agent/workflow 汇总、验证补证据和 UI 可见层统一到“当前请求 + 事实证据 + 明确作用域”的判断上。目标不是增加关键词拦截，而是让模型能继续追证据、能按当前问题收尾，也不会把旧审计、旧失败或无关报告当成当前答案。
+
+### 主链连续性与反幻觉
+
+- final gate 和 evidence action 更依赖当前 request scope、owner、claim 类型和实际证据，减少普通追问被旧审计状态拉回循环的情况。
+- `RunVerification` 和 final-gap 补证据使用 focused verification plan；有明确 changed/mentioned files 时只跑定点测试，缺少定点计划时边界化说明，不退回全仓验证。
+- 主链最终可见输出统一经过结构化 claim strip 与主屏清洗，避免内部 evidence、agent completion、final-answer claim 标签或降级草稿漏到用户可见层。
+- 宽扫、agent 报告和 completion 交付有更清楚的进展边界：能补证据就继续追，重复宽扫不能无限续命，真正缺证据时诚实收口。
+
+### Agent、workflow 与 UI 可见层
+
+- 子智能体完整报告以有界上下文回流，父链可获得比简短 summary 更完整的结论，同时避免超长报告污染主上下文。
+- agent/workflow/verification 证据按 owner、request、workflow 和 cwd 对齐，减少不同任务之间互相误用验证结果。
+- UI 失败残留和任务状态继续收敛：同一请求已经恢复或出现有效进展时，不再让旧的失败建议长期停在主屏误导用户。
+- 普通问答、审计追问和明确继续/恢复被拆成更清楚的请求语义；上下文仍继承，但不会只因为旧任务存在就强行重跑旧审计。
+
+### 预检引擎、CI 与发布
+
+- pre-engine CI 使用打包内置的 TypeScript/Pyright helper 依赖，修正 Windows `.CMD` helper 查找和跨平台测试环境差异。
+- GitHub bundled runtime workflow 的 Windows、Linux、macOS pre-engine jobs 和 assemble job 已在 7 月 16 日重新跑绿。
+- 对应 release 提交已推送到 main，npm 已同步发布 `@linghun/cli@0.1.30`、`@linghun/pre-engine-win32-x64@0.1.5`、`@linghun/pre-engine-linux-x64@0.1.3`、`@linghun/pre-engine-darwin-x64@0.1.2`、`@linghun/pre-engine-darwin-arm64@0.1.2`。
+- 其他系统重新安装 `@linghun/cli@latest` 即可拿到对应平台的最新预检引擎二进制包；这次没有改变主链底座设计，而是把已完成的主链修复和预检引擎发布链路同步到公开包。
+
 ## 2026-07-12 主链与产品级预检整体收口
 
 这次更新不是只有预检引擎。它收口了 7 月 8/9 日最后一轮 npm 发布之后进入主链的长任务、缓存、Provider、请求生命周期、agent/workflow、MCP/Web/memory、终端可见层和反幻觉证据链，并把对应公共包重新同步到 npm。目标仍然是同一件事：模型在真实项目里工作得更快、更稳，能恢复、能中断、能验证，也不会因为多套状态或未经验证的能力互相打架。

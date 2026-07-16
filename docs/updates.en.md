@@ -7,6 +7,31 @@ This page records product updates that directly affect user experience. For the 
 - The desktop app is coming soon.
 - A specially trained random full-modal model (optional install) is coming with the desktop app. It connects through the foundation's built-in App Bridge and does not require any other software. With the current foundation + index + pre-check engine, a 10-minute task can be shortened to 3-5 minutes, making the workflow faster and steadier.
 
+## July 16, 2026: Evidence-driven Mainline and Cross-platform Pre-check Publishing
+
+This update continues the post-July 12 convergence of the mainline and side paths. Final answers, continue/resume, agent/workflow summaries, verification evidence gathering, and the UI-visible layer now align around the current request, factual evidence, and explicit scope. The goal is not more keyword blocking; it is to let the model keep pursuing evidence, close out the current question, and avoid treating stale audits, stale failures, or unrelated reports as the current answer.
+
+### Mainline Continuity and Anti-hallucination
+
+- Final gates and evidence actions rely more consistently on the current request scope, owner, claim type, and actual evidence, reducing cases where a normal follow-up is pulled back into an old audit loop.
+- `RunVerification` and final-gap evidence gathering use the focused verification plan. When changed or mentioned files are available, Linghun runs targeted tests; when no focused plan exists, it states the boundary instead of falling back to a full-repo test run.
+- User-visible final output passes through structured-claim stripping and main-screen cleanup, preventing internal evidence, agent completion, final-answer claim labels, or degraded drafts from leaking into the main screen.
+- Broad scans, agent reports, and completion delivery now have clearer progress boundaries: Linghun can keep chasing evidence when it can make progress, repeated broad scans cannot extend work forever, and truly missing evidence is closed out honestly.
+
+### Agents, Workflows, and the Visible Layer
+
+- Child-agent full reports flow back to the parent chain with bounded context, giving the parent more than a short summary while preventing oversized reports from polluting the main context.
+- Agent, workflow, and verification evidence is aligned by owner, request, workflow, and cwd, reducing accidental reuse of another task's verification result.
+- UI failure residue and task state were tightened: once the same request has recovered or made real progress, stale failure suggestions should no longer remain on the main screen as misleading guidance.
+- Normal Q&A, audit follow-ups, and explicit continue/resume requests now have clearer request semantics. Context is still inherited, but an old task alone should not force the next message to rerun the old audit.
+
+### Pre-check Engine, CI, and Publishing
+
+- The pre-engine CI now uses bundled TypeScript/Pyright helper dependencies, with the Windows `.CMD` helper lookup and cross-platform test environment differences fixed.
+- The GitHub bundled-runtime workflow's Windows, Linux, and macOS pre-engine jobs plus the assemble job were rerun green on July 16.
+- The release commit has been pushed to main, and npm now publishes `@linghun/cli@0.1.30`, `@linghun/pre-engine-win32-x64@0.1.5`, `@linghun/pre-engine-linux-x64@0.1.3`, `@linghun/pre-engine-darwin-x64@0.1.2`, and `@linghun/pre-engine-darwin-arm64@0.1.2`.
+- Other systems can reinstall `@linghun/cli@latest` to receive the latest pre-check engine binary for their platform. This update does not redesign the mainline foundation; it synchronizes the completed mainline fixes and pre-check publishing path into the public packages.
+
 ## July 12, 2026: Mainline and Product-grade Pre-check Convergence
 
 This release is not only about the pre-check engine. It converges the long-task, cache, provider, request-lifecycle, agent/workflow, MCP/Web/memory, terminal-visible, and anti-hallucination evidence work that entered main after the last July 8/9 npm release, then synchronizes every affected public package back to npm. The goal remains one coherent runtime: faster and steadier work in real projects, with reliable recovery, interruption, verification, and no competing state machines or unverified capabilities fighting each other.
