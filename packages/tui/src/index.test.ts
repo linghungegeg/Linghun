@@ -2562,6 +2562,40 @@ describe("runHeadlessTask", () => {
     expect(exitCode).toBe(1);
   });
 
+  it("accepts current headless bench test evidence when no official test command is detected", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-tool-test-evidence-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+
+    const exitCode = await runHeadlessTask({
+      prompt: "bench with tool verification",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      bench: { enabled: true, maxRepairAttempts: 0 },
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        const evidence = createEvidenceRecord(
+          "command_output",
+          "Bash: python3 -m pytest tests -q; 1 passed",
+          "Bash",
+          ["Bash", "command_ran", "bash_exit_0", "test_attempted", "test_passed"],
+        );
+        evidence.ownerScope = {
+          ownerSessionId: session.id,
+          requestTurnId: "headless-tool-test",
+          cwd: project,
+        };
+        rememberEvidence(context, evidence);
+      },
+    });
+
+    expect(exitCode).toBe(0);
+  });
+
   it("reuses remaining continuation budget for a repair provider interruption", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-repair-continuation-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });

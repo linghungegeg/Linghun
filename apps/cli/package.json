@@ -1,11 +1,11 @@
 {
   "name": "@linghun/cli",
-  "version": "0.1.30",
+  "version": "0.1.31",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
-    "linghun": "./dist/main.js",
-    "Linghun": "./dist/main.js"
+    "linghun": "dist/main.js",
+    "Linghun": "dist/main.js"
   },
   "files": ["dist", "scripts"],
   "publishConfig": {

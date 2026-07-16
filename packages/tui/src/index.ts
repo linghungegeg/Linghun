@@ -2055,7 +2055,13 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
         }
         lastValidation = validation;
         if (validation.ok) {
-          if (!validation.testRan && benchConfig.requiredArtifacts.length === 0) {
+          const hasRealValidation =
+            validation.testRan ||
+            hasHeadlessBenchVerificationEvidence(context, {
+              initialEvidenceIds,
+              requestTurnIds: headlessRequestTurnIds,
+            });
+          if (!hasRealValidation && benchConfig.requiredArtifacts.length === 0) {
             writeLine(
               errorOutput,
               "错误：没有真实 test 或 artifact verification，不能返回成功。",
@@ -2497,6 +2503,38 @@ function hasHeadlessOwnerProgress(
     }
     if (!record.ownerScope.cwd) return false;
     return normalizeHeadlessProgressPath(context.projectPath, record.ownerScope.cwd) === projectPath;
+  });
+}
+
+function hasHeadlessBenchVerificationEvidence(
+  context: TuiContext,
+  owner: HeadlessProgressOwner,
+): boolean {
+  const projectPath = normalizeHeadlessProgressPath(context.projectPath, context.projectPath);
+  return context.evidence.some((record) => {
+    if (owner.initialEvidenceIds.has(record.id)) return false;
+    if (record.supportsClaims.includes("provider_failure")) return false;
+    if (record.supportsClaims.includes("tool_failure")) return false;
+    if (record.ownerScope?.ownerAgentId || record.ownerScope?.workflowRunId) return false;
+    if (/^(?:agent|workflow):/u.test(record.source)) return false;
+    if (!context.sessionId || record.ownerScope?.ownerSessionId !== context.sessionId) return false;
+    if (owner.requestTurnIds.size > 0) {
+      if (
+        !record.ownerScope?.requestTurnId ||
+        !owner.requestTurnIds.has(record.ownerScope.requestTurnId)
+      ) {
+        return false;
+      }
+    }
+    if (!record.ownerScope?.cwd) return false;
+    if (normalizeHeadlessProgressPath(context.projectPath, record.ownerScope.cwd) !== projectPath) {
+      return false;
+    }
+    return record.supportsClaims.some((claim) =>
+      claim === "test_passed" ||
+      claim === "smoke_passed" ||
+      claim === "verification_passed"
+    );
   });
 }
 
