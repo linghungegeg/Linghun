@@ -48,31 +48,31 @@ importers:
     optionalDependencies:
       '@linghun/codebase-memory-darwin-arm64':
         specifier: 0.1.0
-        version: 0.1.0
+        version: link:../../packages/codebase-memory-darwin-arm64
       '@linghun/codebase-memory-darwin-x64':
         specifier: 0.1.0
-        version: 0.1.0
+        version: link:../../packages/codebase-memory-darwin-x64
       '@linghun/codebase-memory-linux-x64':
         specifier: 0.1.0
-        version: 0.1.0
+        version: link:../../packages/codebase-memory-linux-x64
       '@linghun/codebase-memory-win32-x64':
         specifier: 0.1.0
-        version: 0.1.0
+        version: link:../../packages/codebase-memory-win32-x64
       '@linghun/native-runner-win32-x64':
         specifier: 0.1.0
-        version: 0.1.0
+        version: link:../../packages/native-runner-win32-x64
       '@linghun/pre-engine-darwin-arm64':
-        specifier: 0.1.1
-        version: 0.1.1
-      '@linghun/pre-engine-darwin-x64':
-        specifier: 0.1.1
-        version: 0.1.1
-      '@linghun/pre-engine-linux-x64':
         specifier: 0.1.2
-        version: 0.1.2
+        version: link:../../packages/pre-engine-darwin-arm64
+      '@linghun/pre-engine-darwin-x64':
+        specifier: 0.1.2
+        version: link:../../packages/pre-engine-darwin-x64
+      '@linghun/pre-engine-linux-x64':
+        specifier: 0.1.3
+        version: link:../../packages/pre-engine-linux-x64
       '@linghun/pre-engine-win32-x64':
-        specifier: 0.1.4
-        version: 0.1.4
+        specifier: 0.1.5
+        version: link:../../packages/pre-engine-win32-x64
 
   packages/codebase-memory-darwin-arm64: {}
 
@@ -201,16 +201,16 @@ importers:
     optionalDependencies:
       '@linghun/codebase-memory-darwin-arm64':
         specifier: 0.1.0
-        version: 0.1.0
+        version: link:../codebase-memory-darwin-arm64
       '@linghun/codebase-memory-darwin-x64':
         specifier: 0.1.0
-        version: 0.1.0
+        version: link:../codebase-memory-darwin-x64
       '@linghun/codebase-memory-linux-x64':
         specifier: 0.1.0
-        version: 0.1.0
+        version: link:../codebase-memory-linux-x64
       '@linghun/codebase-memory-win32-x64':
         specifier: 0.1.0
-        version: 0.1.0
+        version: link:../codebase-memory-win32-x64
 
 packages:
 
@@ -598,51 +598,6 @@ packages:
 
   '@larksuiteoapi/node-sdk@1.59.0':
     resolution: {integrity: sha512-sBpkruTvZDOxnVtoTbepWKRX0j1Y1ZElQYu0x7+v088sI9pcpbVp6ZzCGn62dhrKPatzNyCJyzYCPXPYQWccrA==}
-
-  '@linghun/codebase-memory-darwin-arm64@0.1.0':
-    resolution: {integrity: sha512-Rty1tya4ppz4mGGaK5s1ECubac4ohj0usOhFW8CDgfDvQTt5ZROjQl1hpJ9ymsjToC+68pAxK91gekTIvn7m8Q==}
-    cpu: [arm64]
-    os: [darwin]
-
-  '@linghun/codebase-memory-darwin-x64@0.1.0':
-    resolution: {integrity: sha512-Jgl4E99bXxSp0Lw8deOVMjTBmpvZU3HgzwVLOXONJC8l/ApAy4/UBcOdbFFJZwYkaow9gHQixU3Q7p6Nsr/vBg==}
-    cpu: [x64]
-    os: [darwin]
-
-  '@linghun/codebase-memory-linux-x64@0.1.0':
-    resolution: {integrity: sha512-oYBg33tT6iAtLg5E3BXTio5AbZdN8rmvY64B5uhLHxScFAfjXQxz7mXvyztelp/Prp34qo+P4MtVh9M+Dir/gA==}
-    cpu: [x64]
-    os: [linux]
-
-  '@linghun/codebase-memory-win32-x64@0.1.0':
-    resolution: {integrity: sha512-QmI+ZatTsznyWChUedwl5BlKFasILw1OX9yLii8T4rewOSRWwdqTv5HW0oKp7+NrHrg7QM5fjy5VI5IHBgMAow==}
-    cpu: [x64]
-    os: [win32]
-
-  '@linghun/native-runner-win32-x64@0.1.0':
-    resolution: {integrity: sha512-8qm0o4/1xtGidJuj6CqUPuC+X+en5RLul37VoDQrvlGPMvdlseWglVyvuRDF4k16IWh4jB7lv7OO047Cx1+I8w==}
-    cpu: [x64]
-    os: [win32]
-
-  '@linghun/pre-engine-darwin-arm64@0.1.1':
-    resolution: {integrity: sha512-PpyCMzr28Ul3F0+WFENjO6DBhZJx+VBh81aCq+uFPJ7RZsrOsKWQEtVIX+kLIARM+W/PgUY0cxPSkMrTX9darA==}
-    cpu: [arm64]
-    os: [darwin]
-
-  '@linghun/pre-engine-darwin-x64@0.1.1':
-    resolution: {integrity: sha512-fP+wn9cluexQNgGCh0WsIDEtKalxt/UP6tonBQ8eOhXm2waaKYTqothcRVCF9OTeirgAZMlr0ajHibAY6K3FYQ==}
-    cpu: [x64]
-    os: [darwin]
-
-  '@linghun/pre-engine-linux-x64@0.1.2':
-    resolution: {integrity: sha512-xRTU3PFCUB9TaCkJuBHwXOCyzFAAytylDBjgtGMOzfPUWdzH9FyCsaAvLSUCOkZx0Te1Ut5rzljDOcWSgzBKLw==}
-    cpu: [x64]
-    os: [linux]
-
-  '@linghun/pre-engine-win32-x64@0.1.4':
-    resolution: {integrity: sha512-DagAqFSJIKIPRDGPvli13Yham0N5HrhKmwAb6Ef0Zdkipn01p6DHmTpa/vhTirLg/h0E6gXC8k4jr4Ir7iIOpA==}
-    cpu: [x64]
-    os: [win32]
 
   '@protobufjs/aspromise@1.1.2':
     resolution: {integrity: sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ==}
@@ -1890,45 +1845,6 @@ snapshots:
       - bufferutil
       - debug
       - utf-8-validate
-
-  '@linghun/codebase-memory-darwin-arm64@0.1.0':
-    optional: true
-
-  '@linghun/codebase-memory-darwin-x64@0.1.0':
-    optional: true
-
-  '@linghun/codebase-memory-linux-x64@0.1.0':
-    optional: true
-
-  '@linghun/codebase-memory-win32-x64@0.1.0':
-    optional: true
-
-  '@linghun/native-runner-win32-x64@0.1.0':
-    optional: true
-
-  '@linghun/pre-engine-darwin-arm64@0.1.1':
-    dependencies:
-      pyright: 1.1.410
-      typescript: 5.9.3
-    optional: true
-
-  '@linghun/pre-engine-darwin-x64@0.1.1':
-    dependencies:
-      pyright: 1.1.410
-      typescript: 5.9.3
-    optional: true
-
-  '@linghun/pre-engine-linux-x64@0.1.2':
-    dependencies:
-      pyright: 1.1.410
-      typescript: 5.9.3
-    optional: true
-
-  '@linghun/pre-engine-win32-x64@0.1.4':
-    dependencies:
-      pyright: 1.1.410
-      typescript: 5.9.3
-    optional: true
 
   '@protobufjs/aspromise@1.1.2': {}
 
