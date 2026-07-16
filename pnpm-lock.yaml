@@ -70,9 +70,6 @@ importers:
       '@linghun/pre-engine-linux-x64':
         specifier: 0.1.2
         version: 0.1.2
-      '@linghun/pre-engine-win32-x64':
-        specifier: 0.1.3
-        version: 0.1.3
 
   packages/codebase-memory-darwin-arm64: {}
 
@@ -638,11 +635,6 @@ packages:
     resolution: {integrity: sha512-xRTU3PFCUB9TaCkJuBHwXOCyzFAAytylDBjgtGMOzfPUWdzH9FyCsaAvLSUCOkZx0Te1Ut5rzljDOcWSgzBKLw==}
     cpu: [x64]
     os: [linux]
-
-  '@linghun/pre-engine-win32-x64@0.1.3':
-    resolution: {integrity: sha512-AhKG9R7lgjeItU901r58iGVpmMc800+L5UXpi2zeukg1XglVNCTmF4awochVcntd7IoGFacL/3qkkXQAqLBNww==}
-    cpu: [x64]
-    os: [win32]
 
   '@protobufjs/aspromise@1.1.2':
     resolution: {integrity: sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ==}
@@ -1919,12 +1911,6 @@ snapshots:
     optional: true
 
   '@linghun/pre-engine-linux-x64@0.1.2':
-    dependencies:
-      pyright: 1.1.410
-      typescript: 5.9.3
-    optional: true
-
-  '@linghun/pre-engine-win32-x64@0.1.3':
     dependencies:
       pyright: 1.1.410
       typescript: 5.9.3
