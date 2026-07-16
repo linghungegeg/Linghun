@@ -77,7 +77,19 @@ jobs:
       - run: corepack pnpm install --frozen-lockfile
       - uses: dtolnay/rust-toolchain@stable
       - name: Test pre-engine
-        run: cargo test --manifest-path prototypes/pre-engine/Cargo.toml -- --test-threads=1
+        shell: bash
+        run: |
+          set +e
+          cargo test --manifest-path prototypes/pre-engine/Cargo.toml -- --test-threads=1 2>&1 | tee pre-engine-test.log
+          status="${PIPESTATUS[0]}"
+          if [[ "$status" != "0" ]]; then
+            summary="$(tail -n 80 pre-engine-test.log)"
+            summary="${summary//'%'/'%25'}"
+            summary="${summary//$'\r'/'%0D'}"
+            summary="${summary//$'\n'/'%0A'}"
+            echo "::error title=pre-engine cargo test failed (${{ matrix.platform_arch }})::$summary"
+            exit "$status"
+          fi
       - name: Install Linux musl target
         if: matrix.platform_arch == 'linux-x64'
         shell: bash
