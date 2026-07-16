@@ -206,6 +206,131 @@ describe("child agent summary claim gate", () => {
     expect(result.text).toContain("只读审计完成");
   });
 
+  it("does not downgrade readonly audit reports because details mention pass or fixes", () => {
+    const report = [
+      "**审计结论**",
+      "",
+      "P0：未发现。TaskBottomPane 本身不解析错误文案，也不按关键词判断失败。",
+      "",
+      "P1：后台 blocked banner 仍有一条正则/关键词路径，可能误导 running task。",
+      "证据：view-model.ts 里仍可看到 resource cap 文案判断。",
+      "最小修复：去掉 running 文本分支，改为结构状态字段；历史讨论里出现 updated/fixed/implemented 也只是引用。",
+      "",
+      "P2：provider failure 残留整体处理较好。",
+      "历史文档中提到 PASS 和验证记录，但本报告没有声明测试通过。",
+    ].join("\n");
+
+    const result = evaluateChildAgentSummaryClaims(report, [], "zh-CN");
+
+    expect(result.status).toBe("passed");
+    expect(result.text).toContain("P1：后台 blocked banner");
+    expect(result.text).not.toContain("按当前证据边界清洗");
+  });
+
+  it("does not downgrade single-paragraph readonly audit reports with pass and recommendation terms", () => {
+    const result = evaluateChildAgentSummaryClaims(
+      "只读审计报告：P0 无阻断；P1/P2 为风险分级。PASS 表示本条审计结论可读，不代表测试通过。验证状态：未运行。修复建议：补测试。",
+      [],
+      "zh-CN",
+    );
+
+    expect(result.status).toBe("passed");
+    expect(result.text).toContain("P0 无阻断");
+    expect(result.text).toContain("修复建议");
+    expect(result.missingEvidenceKinds).toEqual([]);
+  });
+
+  it("ignores structured claim examples that are not the final child contract", () => {
+    const report = [
+      "**审计结论**",
+      "",
+      "P1：prompt 示例中展示了结构化 claims，不能当作本次 child 自己的完成声明。",
+      "",
+      '示例：LinghunFinalAnswerClaims: {"claims":[{"kind":"test_claim","phrase":"测试通过"}]}',
+      "",
+      "本报告没有运行测试。",
+    ].join("\n");
+
+    const result = evaluateChildAgentSummaryClaims(report, [], "zh-CN");
+
+    expect(result.status).toBe("passed");
+    expect(result.text).toContain("本报告没有运行测试");
+  });
+
+  it("does not downgrade long report body examples when the final contract has no claims", () => {
+    const report = [
+      "**审计结论**",
+      "",
+      "P1：某条历史输出示例写过：已修复完成，测试通过，PASS。",
+      "这只是被审计对象的示例文本，不是 child agent 本轮执行结果。",
+      "",
+      "最终结论：只读审计完成；本报告没有运行测试，也没有修改文件。",
+      'LinghunFinalAnswerClaims: {"claims":[]}',
+    ].join("\n");
+
+    const result = evaluateChildAgentSummaryClaims(report, [], "zh-CN");
+
+    expect(result.status).toBe("passed");
+    expect(result.text).toContain("只读审计完成");
+  });
+
+  it("downgrades empty final contracts when the final closure still claims execution", () => {
+    const report = [
+      "**执行结果**",
+      "",
+      "检查了相关路径。",
+      "",
+      "最终结论：已修复完成，测试通过，PASS。",
+      'LinghunFinalAnswerClaims: {"claims":[]}',
+    ].join("\n");
+
+    const result = evaluateChildAgentSummaryClaims(report, [], "zh-CN");
+
+    expect(result.status).toBe("downgraded");
+    expect(result.missingEvidenceKinds).toContain("test result evidence");
+    expect(result.missingEvidenceKinds).toContain("file change evidence");
+  });
+
+  it("downgrades structured contracts that under-report visible final closure claims", () => {
+    const report = [
+      "**执行结果**",
+      "",
+      "检查了相关路径。",
+      "",
+      "最终结论：已修复完成，测试通过。",
+      'LinghunFinalAnswerClaims: {"claims":[{"kind":"test_claim","phrase":"测试通过"}]}',
+    ].join("\n");
+
+    const result = evaluateChildAgentSummaryClaims(
+      report,
+      [evidence(["test_passed"])],
+      "zh-CN",
+    );
+
+    expect(result.status).toBe("downgraded");
+    expect(result.missingEvidenceKinds).toContain("file change evidence");
+  });
+
+  it("downgrades final closure claims even when earlier body contains fenced code", () => {
+    const report = [
+      "**执行结果**",
+      "",
+      "示例代码：",
+      "```ts",
+      "const status = 'PASS';",
+      "```",
+      "",
+      "最终结论：已修复完成，测试通过。",
+      'LinghunFinalAnswerClaims: {"claims":[]}',
+    ].join("\n");
+
+    const result = evaluateChildAgentSummaryClaims(report, [], "zh-CN");
+
+    expect(result.status).toBe("downgraded");
+    expect(result.missingEvidenceKinds).toContain("test result evidence");
+    expect(result.missingEvidenceKinds).toContain("file change evidence");
+  });
+
   it("cleans unsupported test pass claims before agent summary returns", () => {
     const result = evaluateChildAgentSummaryClaims("测试通过，PASS。", [], "zh-CN");
 
@@ -226,6 +351,52 @@ describe("child agent summary claim gate", () => {
     );
 
     expect(result.status).toBe("passed");
+  });
+
+  it("allows real pass and fix claims when matching child evidence exists", () => {
+    const result = evaluateChildAgentSummaryClaims(
+      "已修复完成，测试通过，PASS。",
+      [evidence(["test_passed"]), evidence(["Edit", "file_written"])],
+      "zh-CN",
+    );
+
+    expect(result.status).toBe("passed");
+    expect(result.missingEvidenceKinds).toEqual([]);
+  });
+
+  it("still enforces structured claims in long child reports", () => {
+    const report = [
+      "**审计结论**",
+      "",
+      "P0：未发现。",
+      "",
+      "详细证据已整理。",
+      'LinghunFinalAnswerClaims: {"claims":[{"kind":"test_claim","phrase":"测试通过"}]}',
+    ].join("\n");
+
+    const result = evaluateChildAgentSummaryClaims(report, [], "zh-CN");
+
+    expect(result.status).toBe("downgraded");
+    expect(result.missingEvidenceKinds).toContain("test result evidence");
+  });
+
+  it("passes structured claims in long child reports when child evidence matches", () => {
+    const report = [
+      "**执行结果**",
+      "",
+      "已修复完成并运行 focused tests。",
+      "",
+      'LinghunFinalAnswerClaims: {"claims":[{"kind":"test_claim","phrase":"focused tests passed"},{"kind":"file_change_claim","phrase":"已修复完成"}]}',
+    ].join("\n");
+
+    const result = evaluateChildAgentSummaryClaims(
+      report,
+      [evidence(["test_passed"]), evidence(["Edit", "file_written"])],
+      "zh-CN",
+    );
+
+    expect(result.status).toBe("passed");
+    expect(result.missingEvidenceKinds).toEqual([]);
   });
 
   it("evaluates child summary claims only against current agent request workflow cwd evidence", () => {

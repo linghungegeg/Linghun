@@ -81,8 +81,10 @@ import {
   AGENT_CONTROL_DESCRIPTION,
   AGENT_CONTROL_TOOL_NAME,
   type FinalAnswerClaimMatch,
+  STRUCTURED_FINAL_ANSWER_CLAIM_PREFIX,
   createAgentControlInputSchema,
   createModelToolDefinitionsForTools,
+  extractStructuredFinalAnswerClaims,
   evaluateStructuredFinalAnswerClaims,
 } from "./model-loop-runtime.js";
 import {
@@ -3802,31 +3804,119 @@ function detectChildAgentSummaryClaims(text: string): FinalAnswerClaimMatch[] {
     seen.add(key);
     claims.push({ kind, phrase });
   };
+  const contractText = childAgentFinalClaimContractText(text);
+  const structuredClaims = contractText ? extractStructuredFinalAnswerClaims(contractText) : [];
+  for (const claim of structuredClaims) {
+    add(claim.kind, claim.phrase);
+  }
+  const scanText = childAgentSummaryNaturalLanguageFallbackText(
+    contractText ? childAgentSummaryTextWithoutFinalContract(text) : text,
+  );
   const patterns: Array<{ kind: FinalAnswerClaimMatch["kind"]; pattern: RegExp }> = [
     {
       kind: "test_claim",
-      pattern: /测试(?:已)?通过|tests?\s+passed|pytest\s+passed|vitest\s+passed|jest\s+passed/iu,
+      pattern:
+        /(?:已|已经|全部)?\s*(?:测试|用例).{0,16}(?:通过|passed)|\b(?:tests?|pytest|vitest|jest)\s+passed\b/iu,
     },
     {
       kind: "completion_pass",
       pattern:
-        /(?:typecheck|type\s+check|tsc|build|smoke|测试|构建|类型检查|冒烟).{0,32}(?:PASS|passed|通过)|\bPASS\b/iu,
+        /(?:typecheck|type\s+check|tsc|build|smoke|构建|类型检查|冒烟).{0,32}(?:PASS|passed|通过)/iu,
     },
     {
       kind: "verification_claim",
-      pattern: /验证(?:已)?通过|verification\s+passed|verified\s+pass|verified\s+success/iu,
+      pattern:
+        /(?:已|已经)?验证.{0,16}(?:通过|成功)|\bverification\s+passed\b|\bverified\s+(?:pass|success)\b/iu,
     },
     {
       kind: "file_change_claim",
       pattern:
-        /(?:已|已经)?(?:修复|修改|写入|更新)(?:完成|成功|好了)?|fixed\b|implemented\b|wrote\b|updated\b/iu,
+        /(?:已|已经|本轮|这次|我)?\s*(?:修复|修改|写入|更新)(?:完成|成功|好了|完毕|了)|\b(?:fixed|implemented|wrote|updated)\b(?:\s+(?:successfully|done|completed))?/iu,
     },
   ];
   for (const { kind, pattern } of patterns) {
-    const match = pattern.exec(text);
-    if (match?.[0]) add(kind, match[0]);
+    const match = pattern.exec(scanText);
+    if (match?.[0] && !isNegatedChildSummaryClaim(scanText, match.index, match[0].length)) {
+      add(kind, match[0]);
+    }
   }
   return claims;
+}
+
+function isNegatedChildSummaryClaim(text: string, index: number, length: number): boolean {
+  const start = Math.max(0, index - 12);
+  const end = Math.min(text.length, index + length + 12);
+  return /(?:不代表|未|没有|无|无需|not|no|without)/iu.test(text.slice(start, end));
+}
+
+function childAgentFinalClaimContractText(text: string): string | undefined {
+  const meaningfulLines: string[] = [];
+  let inFence = false;
+  for (const rawLine of text.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (/^```/u.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (!line || inFence || line.startsWith(">")) continue;
+    meaningfulLines.push(line);
+  }
+  const lastLine = meaningfulLines.at(-1);
+  return lastLine?.startsWith(STRUCTURED_FINAL_ANSWER_CLAIM_PREFIX) ? lastLine : undefined;
+}
+
+function childAgentSummaryTextWithoutFinalContract(text: string): string {
+  const lines = text.split(/\r?\n/u);
+  let index = lines.length - 1;
+  while (index >= 0 && !lines[index]?.trim()) index -= 1;
+  if (index >= 0 && lines[index]?.trim().startsWith(STRUCTURED_FINAL_ANSWER_CLAIM_PREFIX)) {
+    lines.splice(index, 1);
+  }
+  return lines.join("\n").trim();
+}
+
+function childAgentSummaryNaturalLanguageFallbackText(text: string): string {
+  const normalized = text.trim();
+  if (!normalized) return "";
+  const nonEmptyLines = normalized.split(/\r?\n/u).filter((line) => line.trim());
+  const paragraphs = normalized
+    .split(/\r?\n\s*\r?\n/u)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (
+    !normalized.includes("```") &&
+    normalized.length <= 500 &&
+    nonEmptyLines.length <= 3 &&
+    paragraphs.length <= 2
+  ) {
+    return normalized;
+  }
+  const finalParagraph = childAgentFinalVisibleParagraph(text);
+  return finalParagraph.length <= 500 ? finalParagraph : "";
+}
+
+function childAgentFinalVisibleParagraph(text: string): string {
+  const paragraphs: string[] = [];
+  let current: string[] = [];
+  let inFence = false;
+  for (const rawLine of text.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (/^```/u.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence || line.startsWith(">")) continue;
+    if (!line) {
+      if (current.length > 0) {
+        paragraphs.push(current.join("\n"));
+        current = [];
+      }
+      continue;
+    }
+    current.push(line);
+  }
+  if (current.length > 0) paragraphs.push(current.join("\n"));
+  return paragraphs.at(-1) ?? "";
 }
 
 async function executeAgentToolCall(
@@ -4325,6 +4415,7 @@ function createAgentLoopSystemPrompt(agent: AgentRun, context: TuiContext): stri
     readonlyAuditHint,
     "Respect the actual OS/shell before Bash. On Windows/PowerShell, prefer PowerShell cmdlets or Node one-liners; avoid Unix-only find|sed|head pipelines unless verified available.",
     `EngineeringTaskProfile: profile=${engineeringProfile}; strategy=${engineeringStrategy}; not validation evidence.`,
+    `End the final answer with one internal-only line: ${STRUCTURED_FINAL_ANSWER_CLAIM_PREFIX} {"claims":[]}. If you claim completion, verification, file changes, actions, or test/build results, list only evidence-backed claim objects in that line.`,
     "If a required tool is denied, asks for approval, or fails, report blocked instead of claiming completion.",
   ].join("\n");
 }
