@@ -71,6 +71,10 @@ jobs:
             binary: linghun-pre-engine
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: corepack pnpm install --frozen-lockfile
       - uses: dtolnay/rust-toolchain@stable
       - name: Test pre-engine
         run: cargo test --manifest-path prototypes/pre-engine/Cargo.toml
