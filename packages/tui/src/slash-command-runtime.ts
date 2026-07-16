@@ -2590,6 +2590,13 @@ export async function recordAgentExecutionEvidence(
       ? ["agent_execution", `agent_${agent.type}`, "action_executed", "agent_terminal_status"]
       : ["tool_failure", "agent_execution", `agent_${agent.type}`],
   );
+  evidence.ownerScope = {
+    ownerSessionId: sessionId,
+    requestTurnId: agent.invokingRequestTurnId,
+    ownerAgentId: agent.id,
+    workflowRunId: context.backgroundTasks?.find((task) => task.id === agent.id)?.workflowRunId,
+    cwd: agent.cwd ?? context.projectPath,
+  };
   rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, {
     type: "evidence_record",
@@ -2613,6 +2620,13 @@ export async function recordAgentMailboxEvidence(
     `agent:${agent.id}:mailbox`,
     ["agent_mailbox", `agent_${agent.type}`, "mailbox_consumed"],
   );
+  evidence.ownerScope = {
+    ownerSessionId: sessionId,
+    requestTurnId: agent.invokingRequestTurnId,
+    ownerAgentId: agent.id,
+    workflowRunId: context.backgroundTasks?.find((task) => task.id === agent.id)?.workflowRunId,
+    cwd: agent.cwd ?? context.projectPath,
+  };
   rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, {
     type: "evidence_record",

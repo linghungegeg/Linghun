@@ -317,7 +317,7 @@ export function parseUserActionConstraints(text: string | undefined): UserAction
 }
 
 export function forbidsVerificationEvidence(constraints: UserActionConstraints): boolean {
-  return constraints.readonlyOnly || constraints.forbidAllTools || constraints.forbidShell;
+  return constraints.forbidAllTools || constraints.forbidShell;
 }
 
 export function verificationStepConstraintReason(
@@ -325,7 +325,6 @@ export function verificationStepConstraintReason(
   kind: VerificationStepKind,
 ): string | undefined {
   if (!constraints) return undefined;
-  if (constraints.readonlyOnly) return "the current request is read-only";
   if (constraints.forbidAllTools) return "the current request forbids all tools";
   if (constraints.forbidShell) return "the current request forbids shell commands";
   if (kind === "test" && constraints.forbidTests) return "the current request forbids tests";

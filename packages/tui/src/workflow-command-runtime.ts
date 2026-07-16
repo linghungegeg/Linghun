@@ -2879,6 +2879,9 @@ async function recordFocusedPreVerifyEvidence(input: {
     ...(input.verificationScope.requestTurnId
       ? { requestTurnId: input.verificationScope.requestTurnId }
       : {}),
+    ...(input.verificationScope.workflowRunId
+      ? { workflowRunId: input.verificationScope.workflowRunId }
+      : {}),
     cwd: input.verificationScope.cwd,
     targets: [...input.changedFiles],
   };
@@ -2910,8 +2913,7 @@ function shouldRunFocusedPreVerify(
     return false;
   }
   return (
-    Boolean(scope.requestTurnId) &&
-    !scope.workflowRunId &&
+    Boolean(scope.requestTurnId || scope.workflowRunId) &&
     isPreVerifyEligibleLevel(level) &&
     changedFiles.some(isProductGradePreVerifyFile)
   );
@@ -3010,21 +3012,21 @@ export async function runWorkflowVerificationStep(
     }
     return report;
   }
-  const shouldUseRequestScopedTestPlan =
+  const shouldUseScopedTestPlan =
     level === "test" &&
     changedFiles.length > 0 &&
-    Boolean(options.requestTurnId) &&
-    !options.workflowRunId;
-  const scopedTestPlan = shouldUseRequestScopedTestPlan
+    (Boolean(options.requestTurnId) ||
+      (Boolean(options.workflowRunId) && changedFiles.some(isProductGradePreVerifyFile)));
+  const scopedTestPlan = shouldUseScopedTestPlan
     ? (await createVerificationPlan(verificationRoot, "focused", {
         workspaceRoot: verificationRoot,
         changedFiles,
       })).filter((step) => step.kind === "test")
-    : undefined;
+    : [];
   const plan =
     level === "smoke" || level === "focused" || level === "real-smoke"
       ? await createVerificationPlan(verificationCwd, "smoke")
-      : scopedTestPlan !== undefined
+      : shouldUseScopedTestPlan
         ? scopedTestPlan
       : (await createVerificationPlan(verificationCwd, "default")).filter(
           (step) => step.kind === level,
@@ -3037,12 +3039,12 @@ export async function runWorkflowVerificationStep(
         })
       : level === "real-smoke"
         ? await createVerificationPlan(verificationCwd, "real-smoke")
-        : scopedTestPlan !== undefined
+        : shouldUseScopedTestPlan
           ? scopedTestPlan
         : plan.length > 0
           ? plan
           : await createVerificationPlan(verificationCwd, "smoke");
-  if (shouldUseRequestScopedTestPlan && effectivePlan.length === 0) {
+  if (shouldUseScopedTestPlan && effectivePlan.length === 0) {
     const report = createVerificationUnavailableReport(
       "focused",
       "the current changed-files scope has no executable focused test verification.",

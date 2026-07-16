@@ -109,12 +109,12 @@ describe("user-action-constraints", () => {
     expect(hasReadOnlyUserConstraint(constraints)).toBe(true);
   });
 
-  it("treats readonly-only audit as forbidding verification evidence", () => {
+  it("does not treat readonly-only audit as forbidding verification evidence", () => {
     const constraints = parseUserActionConstraints("只读审计，只给审计结果，不改代码");
 
     expect(constraints.readonlyOnly).toBe(true);
-    expect(forbidsVerificationEvidence(constraints)).toBe(true);
-    expect(verificationStepConstraintReason(constraints, "test")).toContain("read-only");
+    expect(forbidsVerificationEvidence(constraints)).toBe(false);
+    expect(verificationStepConstraintReason(constraints, "test")).toBeUndefined();
   });
 
   it.each([

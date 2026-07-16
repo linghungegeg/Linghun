@@ -156,7 +156,14 @@ export class ShellBlockOutput extends Writable {
         callback();
         return;
       }
-      const block = createOutputBlock(normalized, this.context.language);
+      const baseBlock = createOutputBlock(normalized, this.context.language);
+      const block: ProductBlockViewModel = baseBlock.messageKind === "tool_result_error"
+        ? {
+            ...baseBlock,
+            failureDomain: baseBlock.failureDomain ?? "tool",
+            failureRequestTurnId: baseBlock.failureRequestTurnId ?? this.context.currentRequestTurnId,
+          }
+        : baseBlock;
       this.appendTranscriptSourceBlock(block);
       this.blocks.push(block);
       this.commitTerminalFirstStableBlock(block);

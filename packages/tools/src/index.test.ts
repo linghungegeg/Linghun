@@ -2513,7 +2513,23 @@ describe("Phase 05 core tools", () => {
     const hereString = adaptShellCommandForPlatform("$x = @'\nhello\n'@; Write-Output $x", "win32");
     expect(hereString.adapter).toBe("powershell-adapted");
     expect(hereString.command).toContain("powershell.exe");
+    expect(hereString.command).toContain("-EncodedCommand");
     expect(hereString.logCommand).toContain("<powershell script>");
+
+    const multiLineArray = adaptShellCommandForPlatform(
+      [
+        "$paths = @(",
+        "'C:\\temp\\a.log',",
+        "'C:\\temp\\b.log'",
+        ");",
+        "foreach ($p in $paths) { Write-Output $p }",
+      ].join("\n"),
+      "win32",
+    );
+    expect(multiLineArray.adapter).toBe("powershell-adapted");
+    expect(multiLineArray.command).toContain("-EncodedCommand");
+    expect(multiLineArray.command).not.toContain("$paths");
+    expect(multiLineArray.logCommand).toContain("<powershell script>");
 
     const explicitPowerShell = adaptShellCommandForPlatform("pwsh -NoProfile -Command Get-Date", "win32");
     expect(explicitPowerShell.adapter).toBe("native");

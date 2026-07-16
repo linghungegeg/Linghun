@@ -9497,6 +9497,44 @@ describe("D.13Q-UX Real Smoke Fix v3 — diagnostic 不被关键词误伤", () =
     expect(ctx.transcriptSource?.cells[0]?.block.fullText).toContain("error: build failed");
   });
 
+  it("_write inferred tool errors carry request owner and hide after progress", () => {
+    const ctx = createContext({
+      currentRequestTurnId: "turn-write-error-owner",
+      lastFullOutput: undefined,
+      suppressLastFullOutputCapture: false,
+    } as Partial<TuiContext>);
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks);
+
+    output.write("Bash ✗ command failed，退出码 7\n");
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.messageKind).toBe("tool_result_error");
+    expect(blocks[0]?.failureDomain).toBe("tool");
+    expect(blocks[0]?.failureRequestTurnId).toBe("turn-write-error-owner");
+
+    const view = createShellViewModel(ctx, {
+      outputBlocks: [
+        ...blocks,
+        {
+          id: "assistant-progress-after-write-error",
+          kind: "details",
+          status: "partial",
+          title: "assistant",
+          summary: "已改用安全命令继续验证。",
+          fullText: "已改用安全命令继续验证。",
+          messageKind: "assistant_text",
+        },
+      ],
+      viewMode: "task",
+    });
+
+    expect(view.blocks.some((block) => block.messageKind === "tool_result_error")).toBe(false);
+    expect(view.taskSuggestions?.some((item) => item.source === "tool_error") ?? false).toBe(
+      false,
+    );
+  });
+
   it("Bash/local command producer 写入 local_command_output，从属输出不走 CommandPanel", () => {
     const ctx = createContext({
       lastFullOutput: undefined,

@@ -372,8 +372,9 @@ export function createShellViewModel(
       !isProviderFailureOutputBlock(block, language) &&
       (block.status === "fail" || block.status === "blocked" || isToolFailureOutputBlock(block)) &&
       block.failureDomain !== "provider" &&
-      block.failureRequestTurnId !== undefined &&
-      block.failureRequestTurnId === context.currentRequestTurnId;
+      context.currentRequestTurnId !== undefined &&
+      (block.failureRequestTurnId === context.currentRequestTurnId ||
+        block.failureRequestTurnId === undefined);
     const staleProviderFailureBlockIds = new Set<string>();
     const staleToolFailureBlockIds = new Set<string>();
     const staleCompactBoundaryBlockIds = new Set<string>();

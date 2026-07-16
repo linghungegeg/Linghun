@@ -2667,8 +2667,9 @@ function convertNativePowerShellCommand(
     return undefined;
   }
   const script = `$ErrorActionPreference='Stop'; ${normalized}`;
+  const useEncodedCommand = force || /\r?\n/u.test(normalized);
   return {
-    command: force
+    command: useEncodedCommand
       ? `powershell.exe -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`
       : [
           "powershell.exe -NoProfile -NonInteractive -Command",

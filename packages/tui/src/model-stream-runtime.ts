@@ -1610,6 +1610,11 @@ type FinalGateContinuationBridgeHint = {
   readonlyEvidenceHints: string[];
 };
 
+type FinalGateContinuationBridgeUse = {
+  hint: FinalGateContinuationBridgeHint;
+  mode: "resume" | "followup";
+};
+
 const finalGateContinuationBridgeHints = new WeakMap<TuiContext, FinalGateContinuationBridgeHint>();
 const readonlyEvidenceCarryoverScopes = new WeakMap<
   TuiContext,
@@ -1663,18 +1668,19 @@ function captureFinalGateContinuationBridgeHint(input: {
 function consumeFinalGateContinuationBridgeHint(
   context: TuiContext,
   userText: string,
-): FinalGateContinuationBridgeHint | undefined {
+): FinalGateContinuationBridgeUse | undefined {
   const hint = finalGateContinuationBridgeHints.get(context);
   if (!hint) return undefined;
+  const mode = isBareInterruptedTurnResumeRequest(userText) ? "resume" : "followup";
   if (
-    !isBareInterruptedTurnResumeRequest(userText) &&
+    mode !== "resume" &&
     !isReadonlyAuditFollowupBridgeRequest(context, userText, hint)
   ) {
     finalGateContinuationBridgeHints.delete(context);
     return undefined;
   }
   finalGateContinuationBridgeHints.delete(context);
-  return hint;
+  return { hint, mode };
 }
 
 function isReadonlyAuditFollowupBridgeRequest(
@@ -1688,24 +1694,27 @@ function isReadonlyAuditFollowupBridgeRequest(
   if (!normalized) return false;
   if (extractFileMentions(normalized).length > 0) return false;
   if (hasNewExecutableOrScopeIntent(normalized)) return false;
-  return isImplicitInterruptedTurnFollowupRequest(normalized);
+  return isContextualFollowupRequest(normalized);
 }
 
 function shouldResumeInterruptedTurnRequest(context: TuiContext, text: string): boolean {
   const interrupted = context.lastInterruptedTurn;
   if (!interrupted) return false;
-  if (isBareInterruptedTurnResumeRequest(text)) return true;
-  if (!isImplicitInterruptedTurnFollowupRequest(text)) return false;
-  return hasPriorEvidenceForRequest(context, interrupted.requestTurnId);
+  return isBareInterruptedTurnResumeRequest(text);
 }
 
-function isImplicitInterruptedTurnFollowupRequest(text: string): boolean {
+function isContextualFollowupRequest(text: string): boolean {
   const normalized = text.trim();
   if (!normalized) return false;
   if (extractFileMentions(normalized).length > 0) return false;
   if (hasNewExecutableOrScopeIntent(normalized)) return false;
-  return /(?:继续|接着|刚才|上面|前面|上一(?:轮|次)|原来|之前|审计|结论|结果|汇总|回答|说完|收拢|闭环|continue|resume|previous|earlier|result|conclusion|summary|answer)/iu.test(
-    normalized,
+  if (normalized.length > 200) return false;
+  return hasConversationalBackreference(normalized);
+}
+
+function hasConversationalBackreference(text: string): boolean {
+  return /(?:刚才|上面|前面|之前|上一(?:轮|次)|原来|那个|这个|这里|这块|这条|这面|那块|那条|结果|结论|报告|原因|源头|所以|然后|previous|earlier|above|that|this|result|conclusion|report|reason|root\s+cause)/iu.test(
+    text,
   );
 }
 
@@ -1745,13 +1754,29 @@ function hasPriorEvidenceForRequest(context: TuiContext, requestTurnId: string):
 
 function configureReadonlyEvidenceCarryover(
   context: TuiContext,
-  hint: FinalGateContinuationBridgeHint | undefined,
+  bridgeUse: FinalGateContinuationBridgeUse | undefined,
   userText: string,
   currentRequestTurnId: string,
+  interruptedTurn?: NonNullable<TuiContext["lastInterruptedTurn"]>,
 ): void {
-  if (hint && isReadonlyAuditFollowupBridgeRequest(context, userText, hint)) {
+  if (
+    bridgeUse?.mode === "followup" &&
+    isReadonlyAuditFollowupBridgeRequest(context, userText, bridgeUse.hint)
+  ) {
     readonlyEvidenceCarryoverScopes.set(context, {
-      previousRequestTurnId: hint.requestTurnId,
+      previousRequestTurnId: bridgeUse.hint.requestTurnId,
+      currentRequestTurnId,
+    });
+    return;
+  }
+  if (
+    !bridgeUse &&
+    interruptedTurn &&
+    isContextualFollowupRequest(userText) &&
+    hasPriorReadonlyEvidenceForRequest(context, interruptedTurn.requestTurnId)
+  ) {
+    readonlyEvidenceCarryoverScopes.set(context, {
+      previousRequestTurnId: interruptedTurn.requestTurnId,
       currentRequestTurnId,
     });
     return;
@@ -1817,6 +1842,36 @@ function formatFinalGateContinuationBridgeHint(
   }
   lines.push(language === "en-US" ? "Previous directive:" : "上一轮指令：");
   lines.push(hint.directive);
+  return lines.join("\n");
+}
+
+function formatFinalGateFollowupContextHint(
+  hint: FinalGateContinuationBridgeHint,
+  language: Language,
+): string {
+  const lines = language === "en-US"
+    ? [
+        "Previous final-gate context for this follow-up question:",
+        `- Previous request: ${hint.requestTurnId}`,
+        `- Previous task intent: ${hint.userText || "prior task"}`,
+        `- Previous missing evidence kinds: ${hint.unsupportedKinds.join(", ") || "unknown"}`,
+        `- Previous gate reason: ${hint.actionReason}`,
+        "- Answer the current user message from available transcript and evidence context. Do not restart the previous evidence action or continue the old execution plan unless the user explicitly asks to continue it.",
+      ]
+    : [
+        "当前追问可参考的上一轮 final-gate 上下文：",
+        `- 上一请求：${hint.requestTurnId}`,
+        `- 上一任务意图：${hint.userText || "上一任务"}`,
+        `- 上一轮缺失证据类型：${hint.unsupportedKinds.join(", ") || "unknown"}`,
+        `- 上一轮 gate 原因：${hint.actionReason}`,
+        "- 按当前用户消息回答，可参考 transcript 和证据上下文；除非用户明确要求继续，否则不要重启上一轮补证据动作或旧执行计划。",
+      ];
+  if (hint.readonlyEvidenceHints.length > 0) {
+    lines.push(language === "en-US" ? "- Readonly hints:" : "- 只读线索：");
+    for (const item of hint.readonlyEvidenceHints) {
+      lines.push(`  - ${item}`);
+    }
+  }
   return lines.join("\n");
 }
 
@@ -2211,6 +2266,29 @@ export function __testActivateReadonlyEvidenceCarryover(
   currentRequestTurnId: string,
 ): void {
   readonlyEvidenceCarryoverScopes.set(context, { previousRequestTurnId, currentRequestTurnId });
+}
+
+export function __testSetFinalGateContinuationBridgeHint(
+  context: TuiContext,
+  hint: {
+    requestTurnId: string;
+    userText?: string;
+    unsupportedKinds?: string[];
+    actionReason?: string;
+    directive?: string;
+    readonlyEvidenceHints?: string[];
+    progressState?: FinalGapProgressState;
+  },
+): void {
+  finalGateContinuationBridgeHints.set(context, {
+    requestTurnId: hint.requestTurnId,
+    userText: hint.userText ?? "",
+    unsupportedKinds: hint.unsupportedKinds ?? [],
+    actionReason: hint.actionReason ?? "test",
+    directive: hint.directive ?? "",
+    readonlyEvidenceHints: hint.readonlyEvidenceHints ?? [],
+    progressState: hint.progressState,
+  });
 }
 
 function evaluateEngineeringFinalBoundary(
@@ -2769,6 +2847,99 @@ export function buildEvidenceBackedFinalBoundaryAnswer(
       : []),
     `本请求未能证实：${missing}；未输出无证据支撑的结论。`,
   ].join("\n");
+}
+
+function buildEvidenceBoundedFinalAnswer(input: {
+  assistantText: string;
+  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>;
+  context: TuiContext;
+  externalBlockReason?: FinalGapProgressState["externalBlockReason"];
+}): string {
+  const visible = prepareFinalAssistantVisibleText(input.assistantText, input.context);
+  const retained = redactUnsupportedFinalClaimPhrases(
+    visible,
+    input.result,
+    input.context.language,
+  );
+  if (!retained.trim()) {
+    return buildEvidenceBackedFinalBoundaryAnswer(
+      input.result,
+      input.context.language,
+      evidenceForCurrentVerificationScope(input.context),
+      input.externalBlockReason,
+    );
+  }
+  return appendUnsupportedEvidenceBoundaryNote({
+    retained,
+    result: input.result,
+    language: input.context.language,
+    externalBlockReason: input.externalBlockReason,
+  });
+}
+
+function redactUnsupportedFinalClaimPhrases(
+  text: string,
+  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
+  language: Language,
+): string {
+  const phrases = unsupportedFinalClaimPhrases(result);
+  if (phrases.length === 0) return text.trim();
+  const redactedMarker = language === "en-US" ? "[not established]" : "[未证实]";
+  const lines = text.split(/\r?\n/u).map((line) => {
+    let next = line;
+    for (const phrase of phrases) {
+      next = next.replace(new RegExp(escapeRegExp(phrase), "giu"), redactedMarker);
+    }
+    return /^[\s\-*•:：,，.。;；()[\]【】]*\[未证实\][\s\-*•:：,，.。;；()[\]【】]*$/u.test(next) ||
+      /^[\s\-*•:：,，.。;；()[\]【】]*\[not established\][\s\-*•:：,，.。;；()[\]【】]*$/iu.test(next)
+      ? ""
+      : next;
+  });
+  return lines.join("\n").replace(/\n{3,}/gu, "\n\n").trim();
+}
+
+function unsupportedFinalClaimPhrases(
+  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>,
+): string[] {
+  const phrases = result.claimVerdict?.missingEvidenceByClaim
+    .map((item) => item.phrase.trim())
+    .filter((phrase) => phrase.length > 0 && !isGenericFinalClaimPhrase(phrase)) ?? [];
+  return [...new Set(phrases)].sort((a, b) => b.length - a.length);
+}
+
+function isGenericFinalClaimPhrase(phrase: string): boolean {
+  return /^(?:completion_claim|test_claim|file_change_claim|verification_claim|workflow_status_claim|agent_status_claim|completion_pass|code_fact|external_current_fact|ccb_parity|beta_readiness|git_operation|action_executed|architecture_boundary|completeness)$/iu.test(
+    phrase.trim(),
+  );
+}
+
+function appendUnsupportedEvidenceBoundaryNote(input: {
+  retained: string;
+  result: Extract<AggregatedFinalAnswerGateResult, { status: "needs_disclaimer" }>;
+  language: Language;
+  externalBlockReason?: FinalGapProgressState["externalBlockReason"];
+}): string {
+  const labels = mapFinalGateKindsToUserLabels(input.result.unsupportedKinds, input.language);
+  const missing = labels.length > 0
+    ? labels.join(input.language === "en-US" ? ", " : "、")
+    : input.language === "en-US" ? "matching evidence" : "匹配证据";
+  const blocker = input.externalBlockReason
+    ? input.language === "en-US"
+      ? input.externalBlockReason === "permission_denied"
+        ? "The planned evidence action was denied for this request."
+        : "The planned evidence action was cancelled for this request."
+      : input.externalBlockReason === "permission_denied"
+        ? "本请求中计划的补证动作被拒绝。"
+        : "本请求中计划的补证动作已被取消。"
+    : undefined;
+  const note = input.language === "en-US"
+    ? `Not established here: ${missing}. Unsupported claims were not promoted.`
+    : `未证实项：${missing}；未把无证据声明提升为结论。`;
+  return [input.retained.trim(), blocker, note].filter(Boolean).join("\n\n");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[\\^$.*+?()[\]{}|]/gu, "\\$&");
 }
 
 export function recordFinalGapExternalBlock(
@@ -4001,18 +4172,24 @@ export async function sendMessage(
     text: string;
     createdAt: string;
   };
-  const interruptedTurnToResume = context.lastInterruptedTurn &&
-    shouldResumeInterruptedTurnRequest(context, text)
-    ? context.lastInterruptedTurn
+  const interruptedTurn = context.lastInterruptedTurn;
+  const interruptedTurnToResume = interruptedTurn &&
+      shouldResumeInterruptedTurnRequest(context, text)
+    ? interruptedTurn
     : undefined;
-  const finalGateContinuationHint = !interruptedTurnToResume
-    ? consumeFinalGateContinuationBridgeHint(context, text)
-    : undefined;
+  const finalGateContinuation = consumeFinalGateContinuationBridgeHint(context, text);
+  const finalGateContinuationHint = finalGateContinuation?.hint;
   const requestTurnId = interruptedTurnToResume
     ? resumeInterruptedForegroundRequestTurn(context, userMessageEvent.id) ??
       beginForegroundRequestTurn(context, userMessageEvent.id)
     : beginForegroundRequestTurn(context, userMessageEvent.id);
-  configureReadonlyEvidenceCarryover(context, finalGateContinuationHint, text, requestTurnId);
+  configureReadonlyEvidenceCarryover(
+    context,
+    finalGateContinuation,
+    text,
+    requestTurnId,
+    interruptedTurnToResume ? undefined : interruptedTurn,
+  );
   const resumedInterruptedTurn = requestTurnId === interruptedTurnToResume?.requestTurnId;
   if (!resumedInterruptedTurn) {
     context.lastInterruptedTurn = undefined;
@@ -4026,7 +4203,8 @@ export async function sendMessage(
   let committedIntermediateAssistantText = "";
   let finalAnswerEvidenceActionRetries = 0;
   let finalAnswerClaimAlignmentRewrites = 0;
-  let finalGapProgressState: FinalGapProgressState | undefined = finalGateContinuationHint?.progressState;
+  let finalGapProgressState: FinalGapProgressState | undefined =
+    finalGateContinuation?.mode === "resume" ? finalGateContinuation.hint.progressState : undefined;
   let runtimeBoundaryFinalized = false;
   let modelLoopCompleted = false;
   let staleRequestRecorded = false;
@@ -4293,10 +4471,12 @@ export async function sendMessage(
     resumedInterruptedTurn,
   );
   let messagesForProvider = messages;
-  if (finalGateContinuationHint) {
+  if (finalGateContinuation) {
     messagesForProvider.push({
       role: "user",
-      content: formatFinalGateContinuationBridgeHint(finalGateContinuationHint, context.language),
+      content: finalGateContinuation.mode === "resume"
+        ? formatFinalGateContinuationBridgeHint(finalGateContinuation.hint, context.language)
+        : formatFinalGateFollowupContextHint(finalGateContinuation.hint, context.language),
     });
   }
   if (reportWriteGuard) {
@@ -5105,14 +5285,15 @@ export async function sendMessage(
               assistantText = replaceCurrentFinalAssistantBlockText(
                 assistantText,
                 committedIntermediateAssistantText,
-                buildEvidenceBackedFinalBoundaryAnswer(
-                  gateResult,
-                  context.language,
-                  evidenceForCurrentVerificationScope(context),
-                  actionPlan.reason === "permission_denied" || actionPlan.reason === "user_cancelled"
-                    ? actionPlan.reason
-                    : undefined,
-                ),
+                buildEvidenceBoundedFinalAnswer({
+                  assistantText: finalGateAssistantText,
+                  result: gateResult,
+                  context,
+                  externalBlockReason:
+                    actionPlan.reason === "permission_denied" || actionPlan.reason === "user_cancelled"
+                      ? actionPlan.reason
+                      : undefined,
+                }),
               );
               runtimeBoundaryFinalized = true;
               break;
@@ -5130,11 +5311,11 @@ export async function sendMessage(
                       ? "all distinct applicable evidence paths were exhausted before the final gap closed"
                       : "所有可用且不重复的真实补证路径均已尝试，但最终证据缺口仍未闭合",
                   )
-                : buildEvidenceBackedFinalBoundaryAnswer(
-                    gateResult,
-                    context.language,
-                    evidenceForCurrentVerificationScope(context),
-                  );
+                : buildEvidenceBoundedFinalAnswer({
+                    assistantText: finalGateAssistantText,
+                    result: gateResult,
+                    context,
+                  });
               assistantText = replaceCurrentFinalAssistantBlockText(
                 assistantText,
                 committedIntermediateAssistantText,
@@ -5179,11 +5360,11 @@ export async function sendMessage(
                 );
                 if (await stopStaleRequest()) return;
               } else {
-                assistantText = buildEvidenceBackedFinalBoundaryAnswer(
-                  gateResult,
-                  context.language,
-                  evidenceForCurrentVerificationScope(context),
-                );
+                assistantText = buildEvidenceBoundedFinalAnswer({
+                  assistantText: finalGateAssistantText,
+                  result: gateResult,
+                  context,
+                });
                 runtimeBoundaryFinalized = true;
                 roundAssistantText = assistantText;
                 break;
@@ -5516,14 +5697,15 @@ export async function sendMessage(
             assistantText = replaceCurrentFinalAssistantBlockText(
               assistantText,
               committedIntermediateAssistantText,
-              buildEvidenceBackedFinalBoundaryAnswer(
-                gateResult,
-                context.language,
-                evidenceForCurrentVerificationScope(context),
-                actionPlan.reason === "permission_denied" || actionPlan.reason === "user_cancelled"
-                  ? actionPlan.reason
-                  : undefined,
-              ),
+              buildEvidenceBoundedFinalAnswer({
+                assistantText: assistantTextBeforeFinalGate,
+                result: gateResult,
+                context,
+                externalBlockReason:
+                  actionPlan.reason === "permission_denied" || actionPlan.reason === "user_cancelled"
+                    ? actionPlan.reason
+                    : undefined,
+              }),
             );
             runtimeBoundaryFinalized = true;
           }
@@ -5609,11 +5791,11 @@ export async function sendMessage(
       assistantText = replaceCurrentFinalAssistantBlockText(
         assistantText,
         committedIntermediateAssistantText,
-        buildEvidenceBackedFinalBoundaryAnswer(
-          finalVisibleGate,
-          context.language,
-          evidenceForCurrentVerificationScope(context),
-        ),
+        buildEvidenceBoundedFinalAnswer({
+          assistantText: currentFinalAssistantBlockText(assistantText, committedIntermediateAssistantText),
+          result: finalVisibleGate,
+          context,
+        }),
       );
     }
     const finalAssistantText = prepareFinalAssistantVisibleText(
@@ -6447,7 +6629,7 @@ function appendInterruptedTurnBoundaryHint(
   if (resumesInterruptedTurn) {
     return `${text}\n\nPrevious foreground turn was interrupted (reason: ${reason}). This user message requests continuing that interrupted task. Continue from the prior request context instead of treating this short resume request as a new task.`;
   }
-  return `${text}\n\nPrevious foreground turn was interrupted (reason: ${reason}). Treat this user message as the authoritative task. Do not infer the task only from current git diff, pending file changes, or unrelated background state unless the user explicitly asks to audit them.`;
+  return `${text}\n\nPrevious foreground turn was interrupted (reason: ${reason}). Treat this user message as the authoritative task in the same conversation. If it asks about prior results, answer from available transcript and evidence context without restarting the interrupted execution. Do not infer the task only from current git diff, pending file changes, or unrelated background state unless the user explicitly asks to audit them.`;
 }
 
 export const __testBuildModelMessagesWithRecentContext = buildModelMessagesWithRecentContext;
@@ -7024,14 +7206,15 @@ async function streamFinalModelAnswerWithoutTools(
         }
         await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
         if (requestIsStale()) return "";
-        assistantText = buildEvidenceBackedFinalBoundaryAnswer(
-          gateResult,
-          context.language,
-          evidenceForCurrentVerificationScope(context),
-          actionPlan.reason === "permission_denied" || actionPlan.reason === "user_cancelled"
-            ? actionPlan.reason
-            : undefined,
-        );
+        assistantText = buildEvidenceBoundedFinalAnswer({
+          assistantText,
+          result: gateResult,
+          context,
+          externalBlockReason:
+            actionPlan.reason === "permission_denied" || actionPlan.reason === "user_cancelled"
+              ? actionPlan.reason
+              : undefined,
+        });
         runtimeBoundaryFinalized = true;
         maybeExposeFinalNoToolsResult(assistantText);
       }
@@ -8077,14 +8260,15 @@ export async function continueModelAfterToolResults(
               assistantText = replaceCurrentFinalAssistantBlockText(
                 assistantText,
                 committedIntermediateAssistantText,
-                buildEvidenceBackedFinalBoundaryAnswer(
-                  gateResult,
-                  context.language,
-                  evidenceForCurrentVerificationScope(context),
-                  actionPlan.reason === "permission_denied" || actionPlan.reason === "user_cancelled"
-                    ? actionPlan.reason
-                    : undefined,
-                ),
+                buildEvidenceBoundedFinalAnswer({
+                  assistantText: finalGateAssistantText,
+                  result: gateResult,
+                  context,
+                  externalBlockReason:
+                    actionPlan.reason === "permission_denied" || actionPlan.reason === "user_cancelled"
+                      ? actionPlan.reason
+                      : undefined,
+                }),
               );
               runtimeBoundaryFinalized = true;
               break;
@@ -8102,11 +8286,11 @@ export async function continueModelAfterToolResults(
                       ? "all distinct applicable evidence paths were exhausted before the final gap closed"
                       : "所有可用且不重复的真实补证路径均已尝试，但最终证据缺口仍未闭合",
                   )
-                : buildEvidenceBackedFinalBoundaryAnswer(
-                    gateResult,
-                    context.language,
-                    evidenceForCurrentVerificationScope(context),
-                  );
+                : buildEvidenceBoundedFinalAnswer({
+                    assistantText: finalGateAssistantText,
+                    result: gateResult,
+                    context,
+                  });
               assistantText = replaceCurrentFinalAssistantBlockText(
                 assistantText,
                 committedIntermediateAssistantText,
@@ -8151,11 +8335,11 @@ export async function continueModelAfterToolResults(
                 );
                 if (await stopStaleContinuation()) return;
               } else {
-                assistantText = buildEvidenceBackedFinalBoundaryAnswer(
-                  gateResult,
-                  context.language,
-                  evidenceForCurrentVerificationScope(context),
-                );
+                assistantText = buildEvidenceBoundedFinalAnswer({
+                  assistantText: finalGateAssistantText,
+                  result: gateResult,
+                  context,
+                });
                 runtimeBoundaryFinalized = true;
                 roundAssistantText = assistantText;
                 break;
@@ -8446,14 +8630,15 @@ export async function continueModelAfterToolResults(
               assistantText = replaceCurrentFinalAssistantBlockText(
                 assistantText,
                 committedIntermediateAssistantText,
-                buildEvidenceBackedFinalBoundaryAnswer(
-                  gateResult,
-                  context.language,
-                  evidenceForCurrentVerificationScope(context),
-                  actionPlan.reason === "permission_denied" || actionPlan.reason === "user_cancelled"
-                    ? actionPlan.reason
-                    : undefined,
-                ),
+                buildEvidenceBoundedFinalAnswer({
+                  assistantText: assistantTextBeforeFinalGate,
+                  result: gateResult,
+                  context,
+                  externalBlockReason:
+                    actionPlan.reason === "permission_denied" || actionPlan.reason === "user_cancelled"
+                      ? actionPlan.reason
+                      : undefined,
+                }),
               );
               runtimeBoundaryFinalized = true;
             }
@@ -8525,11 +8710,11 @@ export async function continueModelAfterToolResults(
         assistantText = replaceCurrentFinalAssistantBlockText(
           assistantText,
           committedIntermediateAssistantText,
-          buildEvidenceBackedFinalBoundaryAnswer(
-            finalVisibleGate,
-            context.language,
-            evidenceForCurrentVerificationScope(context),
-          ),
+          buildEvidenceBoundedFinalAnswer({
+            assistantText: currentFinalAssistantBlockText(assistantText, committedIntermediateAssistantText),
+            result: finalVisibleGate,
+            context,
+          }),
         );
       }
       const finalAssistantText = prepareFinalAssistantVisibleText(

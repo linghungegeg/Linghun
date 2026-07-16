@@ -430,10 +430,24 @@ describe("verification-command-runtime", () => {
           },
         ),
       ).toBe(true);
+      expect(
+        __testShouldRunFocusedPreVerify(
+          level,
+          ["packages/tui/src/model-stream-runtime.ts"],
+          {
+            ownerKey: "workflow:session-a:workflow-a",
+            cwd: "/repo",
+            changedFiles: ["packages/tui/src/model-stream-runtime.ts"],
+            ownerSessionId: "session-a",
+            workflowRunId: "workflow-a",
+            level,
+          },
+        ),
+      ).toBe(true);
     },
   );
 
-  it("does not run pre_verify for readonly verification or unsupported files", () => {
+  it("runs pre_verify for readonly product files but skips unsupported or forbidden verification", () => {
     const scope = {
       ownerKey: "request:session-a:turn-a",
       cwd: "/repo",
@@ -452,6 +466,14 @@ describe("verification-command-runtime", () => {
         ["packages/tui/src/model-stream-runtime.ts"],
         { ...scope, changedFiles: ["packages/tui/src/model-stream-runtime.ts"] },
         parseUserActionConstraints("只读审计，只给审计结果"),
+      ),
+    ).toBe(true);
+    expect(
+      __testShouldRunFocusedPreVerify(
+        "typecheck",
+        ["packages/tui/src/model-stream-runtime.ts"],
+        { ...scope, changedFiles: ["packages/tui/src/model-stream-runtime.ts"] },
+        parseUserActionConstraints("只读审计，不要运行 shell 命令"),
       ),
     ).toBe(false);
   });
@@ -1090,6 +1112,128 @@ describe("verification-command-runtime", () => {
     expect(report.commands[0]?.command).toContain(target);
     expect(report.commands[0]?.command).not.toBe("corepack pnpm test");
     expect(report.scope?.changedFiles).toEqual([target]);
+  }, 30_000);
+
+  it("runs workflow-owned test verification through the focused targeted plan", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-workflow-scoped-test-"));
+    const target = "packages/tui/src/shell/view-model.test.ts";
+    await mkdir(join(projectPath, "packages", "tui", "src", "shell"), { recursive: true });
+    await Promise.all([
+      writeFile(
+        join(projectPath, "package.json"),
+        JSON.stringify({ scripts: { test: "node test-runner.cjs vitest" } }),
+        "utf8",
+      ),
+      writeFile(join(projectPath, "pnpm-lock.yaml"), "", "utf8"),
+      writeFile(
+        join(projectPath, "test-runner.cjs"),
+        [
+          `const target = ${JSON.stringify(target)};`,
+          "if (!process.argv.includes(target)) {",
+          "  require('fs').writeFileSync('root-test-ran.txt', 'bad');",
+          "  console.error(`missing focused target ${target}`);",
+          "  process.exit(1);",
+          "}",
+          "console.log(`workflow focused target ${target}`);",
+        ].join("\n"),
+        "utf8",
+      ),
+      writeFile(join(projectPath, target), "export {};\n", "utf8"),
+    ]);
+    const context = await createRunnableVerificationContext(projectPath);
+    context.workflows = {
+      enabled: true,
+      templates: [],
+      disabledIds: [],
+      activeRun: {
+        id: "workflow-scoped-test",
+        ownerSessionId: "session-workflow-scoped-test",
+        cwd: projectPath,
+        changedFiles: [target],
+        goal: "verify scoped workflow test",
+        planId: "workflow-scoped-test-plan",
+        status: "running",
+        steps: [],
+        startedAt: new Date().toISOString(),
+        result: "partial",
+      },
+    };
+
+    const report = await runWorkflowVerificationStep("test", context, new MockWritable(), {
+      ownerSessionId: "session-workflow-scoped-test",
+      workflowRunId: "workflow-scoped-test",
+      cwd: projectPath,
+      changedFiles: [target],
+    });
+
+    expect(report.status).toBe("pass");
+    expect(report.commands).toHaveLength(1);
+    expect(report.commands[0]?.kind).toBe("test");
+    expect(report.commands[0]?.command).toContain(target);
+    expect(report.commands[0]?.command).not.toBe("corepack pnpm test");
+    expect(report.scope).toMatchObject({
+      workflowRunId: "workflow-scoped-test",
+      changedFiles: [target],
+    });
+    expect(await readdir(projectPath)).not.toContain("root-test-ran.txt");
+    expect(context.evidence.some((item) =>
+      item.source === "pre-engine:pre_verify" &&
+      item.ownerScope?.workflowRunId === "workflow-scoped-test"
+    )).toBe(true);
+  }, 30_000);
+
+  it("keeps workflow-owned test verification PARTIAL when no focused test target exists", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-verify-workflow-test-gap-"));
+    const changedFile = "packages/tui/src/model-stream-runtime.ts";
+    await mkdir(join(projectPath, "packages", "tui", "src"), { recursive: true });
+    await Promise.all([
+      writeFile(
+        join(projectPath, "package.json"),
+        JSON.stringify({ scripts: { test: "node test-runner.cjs vitest" } }),
+        "utf8",
+      ),
+      writeFile(join(projectPath, "pnpm-lock.yaml"), "", "utf8"),
+      writeFile(
+        join(projectPath, "test-runner.cjs"),
+        [
+          "require('fs').writeFileSync('root-test-ran.txt', 'bad');",
+          "throw new Error('root test must not run for workflow-owned focused gap');",
+        ].join("\n"),
+        "utf8",
+      ),
+      writeFile(join(projectPath, changedFile), "export {};\n", "utf8"),
+    ]);
+    const context = await createRunnableVerificationContext(projectPath);
+    context.workflows = {
+      enabled: true,
+      templates: [],
+      disabledIds: [],
+      activeRun: {
+        id: "workflow-test-gap",
+        ownerSessionId: "session-workflow-test-gap",
+        cwd: projectPath,
+        changedFiles: [changedFile],
+        goal: "verify scoped workflow gap",
+        planId: "workflow-test-gap-plan",
+        status: "running",
+        steps: [],
+        startedAt: new Date().toISOString(),
+        result: "partial",
+      },
+    };
+
+    const report = await runWorkflowVerificationStep("test", context, new MockWritable(), {
+      ownerSessionId: "session-workflow-test-gap",
+      workflowRunId: "workflow-test-gap",
+      cwd: projectPath,
+      changedFiles: [changedFile],
+    });
+
+    expect(report).toMatchObject({ status: "partial", commands: [] });
+    expect(report.unverified).toEqual([
+      "focused: the current changed-files scope has no executable focused test verification.",
+    ]);
+    expect(await readdir(projectPath)).not.toContain("root-test-ran.txt");
   }, 30_000);
 
   it("uses RunVerification requestScope to select the focused test target", async () => {
