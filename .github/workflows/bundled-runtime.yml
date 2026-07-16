@@ -75,6 +75,9 @@ jobs:
         with:
           node-version: 22
       - run: corepack pnpm install --frozen-lockfile
+      - name: Add pre-engine helper tools to PATH
+        shell: bash
+        run: node -e "console.log(require('node:path').join(process.env.GITHUB_WORKSPACE, 'packages', 'pre-engine-${{ matrix.platform_arch }}', 'node_modules', '.bin'))" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
       - name: Test pre-engine
         shell: bash

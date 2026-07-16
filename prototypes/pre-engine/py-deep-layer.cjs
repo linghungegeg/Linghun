@@ -36,7 +36,7 @@ function findExecutable(root, name) {
   });
   if (result.status !== 0) return null;
   const matches = result.stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-  return matches.find(candidate => candidate.endsWith(".cmd")) || matches[0] || null;
+  return matches.find(candidate => candidate.toLowerCase().endsWith(".cmd")) || matches[0] || null;
 }
 
 function spawnExecutable(executable, args, options) {
