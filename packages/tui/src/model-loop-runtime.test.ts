@@ -1685,6 +1685,37 @@ describe("model-loop-runtime", () => {
       expect(verdict.unsupportedKinds).toContain("code_fact");
     });
 
+    it("does not let a diagnostic snippet prove a source code fact about itself", () => {
+      const auditSnippet = makeEvidence({
+        kind: "file_read",
+        source: "ReadSnippets",
+        summary: "ReadSnippets docs/audits/main-chain-audit.md",
+        supportsClaims: [
+          "ReadSnippets",
+          "local_read",
+          "read_nonempty",
+          "source_snippet",
+          "file:docs/audits/main-chain-audit.md",
+        ],
+        ownerScope: {
+          cwd: "C:/repo",
+          targets: ["docs/audits/main-chain-audit.md"],
+        },
+      });
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("docs/audits/main-chain-audit.md 已实现 final gate 修复。", [
+          {
+            kind: "code_fact",
+            phrase: "docs/audits/main-chain-audit.md 已实现 final gate 修复",
+          },
+        ]),
+        [auditSnippet],
+      );
+
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("code_fact");
+    });
+
     it("uses visible file targets when structured code_fact phrase omits the path", () => {
       const readA = makeEvidence({
         kind: "file_read",

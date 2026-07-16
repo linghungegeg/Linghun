@@ -76,6 +76,16 @@ function withClaims(text: string, claims: Array<{ kind: string; phrase: string }
   return `${text}\nLinghunFinalAnswerClaims: ${JSON.stringify({ claims })}`;
 }
 
+function evaluateVisibleFallbackGate(
+  context: Parameters<typeof evaluateAggregatedFinalAnswerGate>[0],
+  assistantText: string,
+  runExtendedGate = false,
+) {
+  return evaluateAggregatedFinalAnswerGate(context, assistantText, runExtendedGate, {
+    visibleClaimInference: "result_only",
+  });
+}
+
 function makeCompactRestoreContext(overrides: Record<string, unknown> = {}) {
   return {
     goal: "continue",
@@ -4002,7 +4012,9 @@ describe("model message prompt cache layout", () => {
         }
         yield {
           type: "assistant_text_delta",
-          text: attempts < 4 ? "测试已经通过。" : "本请求尚未获得测试通过证据。",
+          text: attempts < 4
+            ? withClaims("测试已经通过。", [{ kind: "verification_claim", phrase: "测试已经通过" }])
+            : "本请求尚未获得测试通过证据。",
         } as const;
         yield {
           type: "message_stop",
@@ -5227,8 +5239,13 @@ describe("high reasoning tool empty response retry", () => {
 });
 
 describe("final answer gate aggregation", () => {
+  it("keeps real main-chain visible claim inference contract-only", async () => {
+    const source = await readFile(new URL("./model-stream-runtime.ts", import.meta.url), "utf8");
+    expect(source).toContain('const MAIN_CHAIN_VISIBLE_CLAIM_INFERENCE = "none"');
+  });
+
   it("treats structured claims as hints when visible text asserts a stronger result", () => {
-    const result = evaluateAggregatedFinalAnswerGate(
+    const result = evaluateVisibleFallbackGate(
       makeGateContext() as never,
       withClaims("测试已经通过。", [{ kind: "code_fact", phrase: "查看了代码" }]),
       false,
@@ -5472,14 +5489,14 @@ describe("final answer gate aggregation", () => {
       ],
     };
 
-    expect(evaluateAggregatedFinalAnswerGate(context as never, "测试已经通过。", false).status)
+    expect(evaluateVisibleFallbackGate(context as never, "测试已经通过。", false).status)
       .toBe("needs_disclaimer");
     context.evidence[0]!.ownerScope!.requestTurnId = "request-new";
     const scope = (context.evidence[0]!.data as { verificationScope: { requestTurnId: string; ownerKey: string } })
       .verificationScope;
     scope.requestTurnId = "request-new";
     scope.ownerKey = "request:session-owner:request-new";
-    expect(evaluateAggregatedFinalAnswerGate(context as never, "测试已经通过。", false).status)
+    expect(evaluateVisibleFallbackGate(context as never, "测试已经通过。", false).status)
       .toBe("passed");
   });
 
@@ -5511,6 +5528,31 @@ describe("final answer gate aggregation", () => {
     expect(JSON.stringify(plan.evidenceAction?.input)).toContain(
       "packages/tui/src/model-stream-runtime.ts",
     );
+  });
+
+  it("does not target diagnostic audit paths for source fact probes", () => {
+    const context = {
+      ...makeGateContext(),
+      projectPath: "C:/repo",
+      sessionId: "session-diagnostic-source-gap",
+      currentRequestTurnId: "request-diagnostic-source-gap",
+      currentRequestMentionedFiles: ["docs/audits/main-chain-audit.md"],
+      recentlyMentionedFiles: ["docs/audits/main-chain-audit.md"],
+      evidence: [],
+    } as unknown as TuiContext;
+    const plan = planFinalGateEvidenceGapAction({
+      result: {
+        status: "needs_disclaimer",
+        unsupportedKinds: ["code_fact"],
+      },
+      context,
+      assistantText:
+        "docs/audits/main-chain-audit.md 说明 packages/tui/src/model-stream-runtime.ts 已实现 final gate 收敛。",
+    });
+
+    expect(plan.reason).toBe("source_fact_gap_readonly");
+    expect(plan.evidenceAction?.strategy).toBe("source_fact_readonly_check");
+    expect(JSON.stringify(plan.evidenceAction)).not.toContain("docs/audits");
   });
 
   it("allows readonly audit follow-up code facts to reuse only prior readonly evidence", () => {
@@ -5560,8 +5602,54 @@ describe("final answer gate aggregation", () => {
     );
     expect(codeFact.status).toBe("passed");
 
-    expect(evaluateAggregatedFinalAnswerGate(context, "测试已经通过。", false).status)
+    expect(evaluateVisibleFallbackGate(context, "测试已经通过。", false).status)
       .toBe("needs_disclaimer");
+  });
+
+  it("does not carry diagnostic snippets as readonly source fact evidence", () => {
+    const context = {
+      ...makeGateContext(),
+      projectPath: "C:/repo",
+      sessionId: "session-diagnostic-followup",
+      currentRequestTurnId: "request-followup",
+      evidence: [
+        makeEvidence({
+          id: "old-diagnostic-source",
+          kind: "file_read",
+          source: "ReadSnippets",
+          summary: "ReadSnippets docs/audits/main-chain-audit.md",
+          supportsClaims: [
+            "ReadSnippets",
+            "read_nonempty",
+            "source_snippet",
+            "readonly_low_noise_evidence",
+            "file:docs/audits/main-chain-audit.md",
+          ],
+          ownerScope: {
+            ownerSessionId: "session-diagnostic-followup",
+            requestTurnId: "request-audit",
+            cwd: "C:/repo",
+            targets: ["docs/audits/main-chain-audit.md"],
+          },
+        }),
+      ],
+      lastMetaSchedulerDecision: {
+        policyDecision: { taskKind: "code_fact" },
+        shouldRunFinalAnswerGate: false,
+      },
+    } as unknown as TuiContext;
+    __testActivateReadonlyEvidenceCarryover(context, "request-audit", "request-followup");
+
+    const codeFact = evaluateAggregatedFinalAnswerGate(
+      context,
+      withClaims("docs/audits/main-chain-audit.md 已实现 final gate 修复。", [{
+        kind: "code_fact",
+        phrase: "docs/audits/main-chain-audit.md 已实现 final gate 修复",
+      }]),
+      false,
+    );
+
+    expect(codeFact.status).toBe("needs_disclaimer");
   });
 
   it("keeps owner-scoped verification deterministic across 1000 request transitions", () => {
@@ -5597,7 +5685,7 @@ describe("final answer gate aggregation", () => {
       evidence.ownerScope!.requestTurnId = requestTurnId;
       scope.verificationScope.requestTurnId = requestTurnId;
       scope.verificationScope.ownerKey = `request:session-pressure:${requestTurnId}`;
-      expect(evaluateAggregatedFinalAnswerGate(context as never, "测试已经通过。", false).status)
+      expect(evaluateVisibleFallbackGate(context as never, "测试已经通过。", false).status)
         .toBe(index % 2 === 0 ? "passed" : "needs_disclaimer");
     }
   });
@@ -5618,7 +5706,7 @@ describe("final answer gate aggregation", () => {
       "测试已通过，建议再跑 build。",
       "Tests passed, but we should run build.",
     ]) {
-      expect(evaluateAggregatedFinalAnswerGate(makeGateContext() as never, text, false).status)
+      expect(evaluateVisibleFallbackGate(makeGateContext() as never, text, false).status)
         .toBe("needs_disclaimer");
     }
   });
@@ -5629,7 +5717,7 @@ describe("final answer gate aggregation", () => {
       "We should investigate, tests passed.",
       "测试未通过，修复后测试通过。",
     ]) {
-      expect(evaluateAggregatedFinalAnswerGate(makeGateContext() as never, text, false).status)
+      expect(evaluateVisibleFallbackGate(makeGateContext() as never, text, false).status)
         .toBe("needs_disclaimer");
     }
   });
@@ -5672,7 +5760,7 @@ describe("final answer gate aggregation", () => {
       "修改 packages/a.ts 和 packages/b.ts 文件。",
       "修改 packages/a.ts 文件。修改 packages/b.ts 文件。",
     ]) {
-      expect(evaluateAggregatedFinalAnswerGate(context as never, answer, false).status)
+      expect(evaluateVisibleFallbackGate(context as never, answer, false).status)
         .toBe("needs_disclaimer");
     }
   });
@@ -5689,7 +5777,7 @@ describe("final answer gate aggregation", () => {
         }),
       ],
     };
-    expect(evaluateAggregatedFinalAnswerGate(fileContext as never, "修改 a.ts 文件。", false).status)
+    expect(evaluateVisibleFallbackGate(fileContext as never, "修改 a.ts 文件。", false).status)
       .toBe("needs_disclaimer");
 
     const agentContext = {
@@ -5703,7 +5791,7 @@ describe("final answer gate aggregation", () => {
         }),
       ],
     };
-    expect(evaluateAggregatedFinalAnswerGate(agentContext as never, "agent-1 已完成。", false).status)
+    expect(evaluateVisibleFallbackGate(agentContext as never, "agent-1 已完成。", false).status)
       .toBe("needs_disclaimer");
   });
 
@@ -5720,7 +5808,7 @@ describe("final answer gate aggregation", () => {
       ],
     };
 
-    expect(evaluateAggregatedFinalAnswerGate(context as never, "修改 packages/a.ts 文件。", false).status)
+    expect(evaluateVisibleFallbackGate(context as never, "修改 packages/a.ts 文件。", false).status)
       .toBe("passed");
   });
 
@@ -5745,7 +5833,7 @@ describe("final answer gate aggregation", () => {
       ],
     };
 
-    expect(evaluateAggregatedFinalAnswerGate(context as never, "修改 packages/a.ts 文件。", false).status)
+    expect(evaluateVisibleFallbackGate(context as never, "修改 packages/a.ts 文件。", false).status)
       .toBe("needs_disclaimer");
   });
 
@@ -5778,7 +5866,7 @@ describe("final answer gate aggregation", () => {
       ],
     };
 
-    expect(evaluateAggregatedFinalAnswerGate(context as never, "测试已经通过。", false).status)
+    expect(evaluateVisibleFallbackGate(context as never, "测试已经通过。", false).status)
       .toBe("needs_disclaimer");
   });
 
@@ -5808,14 +5896,14 @@ describe("final answer gate aggregation", () => {
       evidence: [evidence],
     };
 
-    expect(evaluateAggregatedFinalAnswerGate(context as never, "测试已经通过。", false).status)
+    expect(evaluateVisibleFallbackGate(context as never, "测试已经通过。", false).status)
       .toBe("needs_disclaimer");
     const scope = (evidence.data as { verificationScope: { requestTurnId?: string } }).verificationScope;
     scope.requestTurnId = "request-current";
-    expect(evaluateAggregatedFinalAnswerGate(context as never, "测试已经通过。", false).status)
+    expect(evaluateVisibleFallbackGate(context as never, "测试已经通过。", false).status)
       .toBe("needs_disclaimer");
     evidence.ownerScope!.requestTurnId = "request-current";
-    expect(evaluateAggregatedFinalAnswerGate(context as never, "测试已经通过。", false).status)
+    expect(evaluateVisibleFallbackGate(context as never, "测试已经通过。", false).status)
       .toBe("passed");
   });
 
@@ -9068,6 +9156,67 @@ describe("Final Gap Progress Detection (Stage 4)", () => {
       },
       context,
     )).toBe(true);
+  });
+
+  it("does not count diagnostic source snippets as source fact progress", () => {
+    const context = {
+      evidence: [],
+      currentRequestTurnId: "turn-diagnostic-source",
+      sessionId: "session-diagnostic-source",
+      projectPath: "/test",
+    } as unknown as TuiContext;
+    const gapResult = {
+      status: "needs_disclaimer" as const,
+      unsupportedKinds: ["code_fact"],
+    };
+    const evidenceAction = {
+      toolName: "ReadSnippets",
+      input: { ranges: [{ path: "docs/audits/main-chain-audit.md", start: 1, end: 120 }] },
+      strategy: "source_fact_readonly_check" as const,
+      summary: "read diagnostic snippets",
+    };
+    const previous = __testCaptureFinalGapProgressState(gapResult, context, evidenceAction);
+    context.evidence.push({
+      id: "diagnostic-source-read",
+      kind: "file_read",
+      summary: "ReadSnippets: docs/audits/main-chain-audit.md",
+      source: "ReadSnippets",
+      supportsClaims: [
+        "ReadSnippets",
+        "local_read",
+        "read_nonempty",
+        "source_snippet",
+        "file:docs/audits/main-chain-audit.md",
+      ],
+      createdAt: new Date(0).toISOString(),
+      ownerScope: {
+        ownerSessionId: "session-diagnostic-source",
+        requestTurnId: "turn-diagnostic-source",
+        cwd: "/test",
+        targets: ["docs/audits/main-chain-audit.md"],
+      },
+    });
+
+    expect(__testFinalGapHasProgress(gapResult, context, previous)).toBe(false);
+    expect(__testEvidenceMatchesFinalGapAction(context.evidence[0], evidenceAction)).toBe(false);
+
+    const continuation = {
+      finalGapProgressState: previous,
+    };
+    expect(recordSuccessfulToolExecutionProgress(
+      continuation,
+      {
+        name: "ReadSnippets",
+        input: { ranges: [{ path: "docs/audits/main-chain-audit.md", start: 1, end: 120 }] },
+      },
+      {
+        ok: true,
+        tool: "ReadSnippets",
+        text: "docs/audits/main-chain-audit.md snippets",
+        evidenceId: "diagnostic-source-read",
+      },
+      context,
+    )).toBe(false);
   });
 
   it("does not count broad source scans as final-gap progress after agent reports were delivered", () => {

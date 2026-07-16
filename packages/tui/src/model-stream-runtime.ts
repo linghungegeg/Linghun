@@ -113,6 +113,8 @@ import {
   createModelToolDefinitionsForReportGuard,
   deriveToolSupportsClaims,
   extractFileMentions,
+  isDiagnosticSourceFactEvidence,
+  isDiagnosticSourceFactPath,
   isPreEngineToolName,
 } from "./model-loop-runtime.js";
 import type {
@@ -293,7 +295,7 @@ const ASSISTANT_PREVIEW_FLUSH_MIN_CHARS = 16;
 const ASSISTANT_PREVIEW_FLUSH_MAX_INTERVAL_MS = 24;
 const MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES = 0;
 const MAX_FINAL_GATE_CONTRACT_RETRY_ROUNDS = 2;
-const MAIN_CHAIN_VISIBLE_CLAIM_INFERENCE = "result_only" satisfies NonNullable<
+const MAIN_CHAIN_VISIBLE_CLAIM_INFERENCE = "none" satisfies NonNullable<
   FinalAnswerClaimEvaluationOptions["visibleClaimInference"]
 >;
 const SAME_TOOL_FAILURE_RETRY_GUARD_LIMIT = 4;
@@ -1123,6 +1125,7 @@ function isBroadSourceFactReadonlyAction(
 
 function isSourceFactReadonlyProgressEvidence(record: EvidenceRecord): boolean {
   if (record.supportsClaims.includes("tool_failure")) return false;
+  if (isDiagnosticSourceFactEvidence(record)) return false;
   if (record.kind === "index_query") return record.supportsClaims.includes("index_code_fact");
   if (record.kind === "grep_result") {
     return record.supportsClaims.includes("grep_match") ||
@@ -1382,7 +1385,7 @@ export function evaluateAggregatedFinalAnswerGate(
   context: TuiContext,
   assistantText: string,
   runExtendedGate = true,
-  claimOptions: FinalAnswerClaimEvaluationOptions = { visibleClaimInference: "result_only" },
+  claimOptions: FinalAnswerClaimEvaluationOptions = { visibleClaimInference: "none" },
 ): AggregatedFinalAnswerGateResult {
   const scopedEvidence = evidenceForCurrentVerificationScope(context);
   const claimVerdict = evaluateFinalAnswerClaims(
@@ -1818,6 +1821,7 @@ function readonlyEvidenceCarryoverActive(context: TuiContext): boolean {
 
 function summarizeReadonlyEvidenceHints(context: TuiContext): string[] {
   return context.evidence
+    .filter((record) => !isDiagnosticSourceFactEvidence(record))
     .filter((record) =>
       record.supportsClaims.some((claim) =>
         claim === "code_fact" ||
@@ -2093,6 +2097,10 @@ function evidenceMatchesFinalGapAction(
       )
     );
   }
+  if (
+    action.strategy === "source_fact_readonly_check" &&
+    !isSourceFactReadonlyProgressEvidence(record)
+  ) return false;
   const toolMatches =
     record.source === action.toolName ||
     record.source.startsWith(`${action.toolName}:`) ||
@@ -2208,6 +2216,7 @@ function isReadonlyEvidenceCarryoverRecord(
     return false;
   }
   if (record.supportsClaims.includes("tool_failure")) return false;
+  if (isDiagnosticSourceFactEvidence(record)) return false;
   const owner = record.ownerScope;
   if (!owner || owner.ownerAgentId || owner.workflowRunId) return false;
   if (owner.requestTurnId !== requestTurnId) return false;
@@ -3197,7 +3206,7 @@ function createSourceFactReadonlyEvidenceAction(input: {
     ...(input.context.tools?.changedFiles ?? []),
     ...(input.context.recentlyMentionedFiles ?? []),
     ...currentEvidence.flatMap((record) => record.ownerScope?.targets ?? []),
-  ]).filter((item) => !item.includes("*"));
+  ]).filter((item) => !item.includes("*") && !isDiagnosticSourceFactPath(item));
   const path = candidatePaths.find((item) => !hasSourceFactProbeEvidenceForPath(currentEvidence, item));
   const query = createSourceFactReadonlyQuery(input.text, path);
   const actions: NonNullable<FinalGateEvidenceGapActionPlan["evidenceAction"]>[] = path
@@ -3251,7 +3260,8 @@ function createSourceFactReadonlyQuery(text: string, path: string | undefined): 
   if (path) return path;
   const tokens = Array.from(new Set(
     text.match(/[\p{L}\p{N}_$./\\-]{3,}/gu)?.filter((item) =>
-      !/^(?:LinghunFinalAnswerClaims|claims|code_fact|source_read|source_search|local_read)$/iu.test(item)
+      !/^(?:LinghunFinalAnswerClaims|claims|code_fact|source_read|source_search|local_read)$/iu.test(item) &&
+      !isDiagnosticSourceFactPath(item)
     ) ?? [],
   ));
   return tokens.slice(0, 12).join(" ") || "source fact final answer evidence";
@@ -3260,7 +3270,8 @@ function createSourceFactReadonlyQuery(text: string, path: string | undefined): 
 function createSourceFactGrepPattern(text: string): string {
   const tokens = Array.from(new Set(
     text.match(/[\p{L}\p{N}_$.-]{4,}/gu)?.filter((item) =>
-      !/^(?:LinghunFinalAnswerClaims|claims|code_fact|source_read|source_search|local_read)$/iu.test(item)
+      !/^(?:LinghunFinalAnswerClaims|claims|code_fact|source_read|source_search|local_read)$/iu.test(item) &&
+      !isDiagnosticSourceFactPath(item)
     ) ?? [],
   ));
   return tokens.slice(0, 8).join("|") || "function|class|const|export|import|return";

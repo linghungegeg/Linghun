@@ -8719,6 +8719,40 @@ describe("TaskSuggestionBar executable state", () => {
     expect(view.blocks.some((block) => block.id === "assistant-progress")).toBe(true);
   });
 
+  it("hides stale tool failure after same-task final assistant text is visible", () => {
+    const failure: ProductBlockViewModel = {
+      id: "owned-tool-failure",
+      kind: "error",
+      status: "fail",
+      title: "Bash 失败",
+      summary: "退出码 1",
+      messageKind: "tool_result_error",
+      failureDomain: "tool",
+      failureRequestTurnId: "turn-current",
+    };
+    const view = createShellViewModel(
+      createContext({ currentRequestTurnId: "turn-current" } as Partial<TuiContext>),
+      {
+        outputBlocks: [
+          failure,
+          {
+            id: "assistant-final",
+            kind: "details",
+            status: "info",
+            title: "",
+            summary: "审计结论：主链已经按当前证据收口。",
+            fullText: "审计结论：主链已经按当前证据收口。",
+            messageKind: "assistant_text",
+          },
+        ],
+        viewMode: "task",
+      },
+    );
+
+    expect(view.blocks.some((block) => block.id === "owned-tool-failure")).toBe(false);
+    expect(view.blocks.some((block) => block.id === "assistant-final")).toBe(true);
+  });
+
   it("hides legacy tool_result_error without a failureDomain after same-task progress resumes", () => {
     const failure: ProductBlockViewModel = {
       id: "legacy-command-failure",

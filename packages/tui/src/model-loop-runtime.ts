@@ -1414,6 +1414,7 @@ export function evidenceSupportsLocalCodeFact(
   claim?: FinalAnswerClaimMatch,
 ): boolean {
   if (record.supportsClaims.includes("tool_failure")) return false;
+  if (isDiagnosticSourceFactEvidence(record)) return false;
   const negativeClaim = claim ? isNegativeCodeFactPhrase(claim.phrase) : false;
   if (record.kind === "index_query") {
     return !negativeClaim && evidenceSupportsIndexCodeFact(record);
@@ -2212,6 +2213,41 @@ function evidenceMatchesTarget(record: EvidenceRecord, target: string): boolean 
   }
   return candidates.some((candidate) =>
     evidencePathMatches(candidate, normalizedTarget, record.ownerScope?.cwd),
+  );
+}
+
+export function isDiagnosticSourceFactEvidence(record: EvidenceRecord): boolean {
+  const rawValues = [
+    record.source,
+    record.summary,
+    record.fullOutputPath,
+    record.outputPath,
+    record.logPath,
+    ...(record.ownerScope?.targets ?? []),
+    ...record.supportsClaims
+      .filter((item) => item.startsWith("file:") || item.startsWith("grep_scope:"))
+      .map((item) => item.replace(/^(?:file|grep_scope):/u, "")),
+  ].filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  return rawValues.some((value) =>
+    isDiagnosticSourceFactPath(value) ||
+    extractPathMentions(value).some(isDiagnosticSourceFactPath)
+  );
+}
+
+export function isDiagnosticSourceFactPath(path: string): boolean {
+  const normalized = normalizeEvidenceTarget(path);
+  return /(?:^|\/)docs\/audits?(?:\/|$)/u.test(normalized) ||
+    /(?:^|\/)\.linghun\/(?:data\/)?sessions?(?:\/|$)/u.test(normalized) ||
+    /(?:^|\/)\.claude\/worktrees(?:\/|$)/u.test(normalized) ||
+    /(?:^|\/)(?:transcripts?|terminal[-_]history|cache[-_]history)(?:\/|$)/u.test(normalized);
+}
+
+function extractPathMentions(text: string): string[] {
+  return Array.from(
+    text.matchAll(
+      /(?:[A-Za-z]:[\\/]|\.{0,2}[\\/])?[\w.@()-]+(?:[\\/][\w.@() -]+)*\.[A-Za-z0-9._-]+/giu,
+    ),
+    (match) => match[0],
   );
 }
 
