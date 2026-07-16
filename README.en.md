@@ -38,6 +38,12 @@ Linghun has completed and submitted runs for the four public TB2.1 tracks in the
         Thanks also to the geek2api community members for their ideas and thoughtful support. Community group: <code>1104150634</code>.
       </td>
     </tr>
+    <tr>
+      <td>
+        Thanks to <a href="https://core2api.com/">Core2API</a> for supporting Linghun during development. Core2API supports Claude/GPT/Grok/Gemini/DeepSeek, with global large-model access from the 0.001x price tier at core2api.com for paper revision, code programming, app development, reverse engineering, and more.<br /><br />
+        Thanks also to the Core2API community members for their ideas and thoughtful support. Community group: <code>684281579</code>.
+      </td>
+    </tr>
   </table>
 </div>
 
