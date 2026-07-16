@@ -1584,6 +1584,12 @@ const readonlyEvidenceCarryoverScopes = new WeakMap<
   { previousRequestTurnId: string; currentRequestTurnId: string }
 >();
 
+function shouldCaptureFinalGateContinuationBridge(
+  actionPlan: FinalGateEvidenceGapActionPlan,
+): boolean {
+  return actionPlan.action !== "blocked_explanation" && actionPlan.action !== "downgrade_only";
+}
+
 function captureFinalGateContinuationBridgeHint(input: {
   context: TuiContext;
   requestTurnId: string;
@@ -3821,6 +3827,7 @@ export async function sendMessage(
   let finalAnswerEvidenceActionRetries = 0;
   let finalAnswerClaimAlignmentRewrites = 0;
   let finalGapProgressState: FinalGapProgressState | undefined = finalGateContinuationHint?.progressState;
+  let runtimeBoundaryFinalized = false;
   let modelLoopCompleted = false;
   let staleRequestRecorded = false;
   const requestGenerationIsOwned = (): boolean =>
@@ -4253,6 +4260,7 @@ export async function sendMessage(
         discardAssistantBlock(output, assistantStreamBlockId);
         assistantText = committedIntermediateAssistantText;
         roundAssistantText = "";
+        runtimeBoundaryFinalized = false;
         pendingAssistantPreviewText = "";
         lastAssistantPreviewFlushAt = 0;
         textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
@@ -4309,6 +4317,7 @@ export async function sendMessage(
         }
         recordRequestFirstDelta(context, event.type);
         if (event.type === "assistant_text_delta") {
+          runtimeBoundaryFinalized = false;
           await clearActiveProviderFailureAfterRecovery(
             context,
             sessionId,
@@ -4338,6 +4347,7 @@ export async function sendMessage(
           continue;
         }
         if (event.type === "tool_use") {
+          runtimeBoundaryFinalized = false;
           await clearActiveProviderFailureAfterRecovery(
             context,
             sessionId,
@@ -4662,6 +4672,7 @@ export async function sendMessage(
           context,
           formatRawToolProtocolRetryFailure(context.language),
         );
+        runtimeBoundaryFinalized = true;
         break;
       }
 
@@ -4744,6 +4755,7 @@ export async function sendMessage(
               ? "the repeated tool failure did not recover; no unsupported completion is claimed"
               : "重复工具失败未能恢复，不声明未经证据支持的完成状态",
           );
+          runtimeBoundaryFinalized = true;
           roundAssistantText = assistantText;
           break;
         }
@@ -4869,14 +4881,18 @@ export async function sendMessage(
                 : "info",
             );
             if (await stopStaleRequest()) return;
-            captureFinalGateContinuationBridgeHint({
-              context,
-              requestTurnId,
-              userText: text,
-              result: gateResult,
-              actionPlan,
-              progressState: finalGapProgressState,
-            });
+            if (shouldCaptureFinalGateContinuationBridge(actionPlan)) {
+              captureFinalGateContinuationBridgeHint({
+                context,
+                requestTurnId,
+                userText: text,
+                result: gateResult,
+                actionPlan,
+                progressState: finalGapProgressState,
+              });
+            } else {
+              finalGateContinuationBridgeHints.delete(context);
+            }
             if (actionPlan.action === "blocked_explanation") {
               await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
               if (await stopStaleRequest()) return;
@@ -4892,6 +4908,7 @@ export async function sendMessage(
                     : undefined,
                 ),
               );
+              runtimeBoundaryFinalized = true;
               break;
             }
             if (actionPlan.action === "downgrade_only") {
@@ -4917,6 +4934,7 @@ export async function sendMessage(
                 committedIntermediateAssistantText,
                 downgradedAnswer,
               );
+              runtimeBoundaryFinalized = true;
               break;
             }
             const autoExecuteEvidenceAction = shouldAutoExecuteFinalGapAction(
@@ -4960,6 +4978,7 @@ export async function sendMessage(
                   context.language,
                   evidenceForCurrentVerificationScope(context),
                 );
+                runtimeBoundaryFinalized = true;
                 roundAssistantText = assistantText;
                 break;
               }
@@ -5063,6 +5082,7 @@ export async function sendMessage(
               ? "the same tool failure repeated across rounds and reached the retry breaker"
               : "相同工具失败跨轮重复，已到达重试断路边界",
           );
+          runtimeBoundaryFinalized = true;
           break;
         }
       } else if (roundNeedsRealToolFallback) {
@@ -5135,7 +5155,7 @@ export async function sendMessage(
     startRequestActivity(output, context, "verifying_final_answer", { requestTurnId });
     // D.13U — 最后一道关卡：所有 final answer（含预算耗尽后的 no-tool summary）
     // 入 transcript 前都必须 gate；没有 retry 机会时直接降级，原文不入 transcript。
-    {
+    if (!runtimeBoundaryFinalized) {
       const assistantTextBeforeFinalGate = currentFinalAssistantBlockText(
         assistantText,
         committedIntermediateAssistantText,
@@ -5299,6 +5319,7 @@ export async function sendMessage(
                   : undefined,
               ),
             );
+            runtimeBoundaryFinalized = true;
           }
         }
       }
@@ -6356,6 +6377,7 @@ async function streamFinalModelAnswerWithoutTools(
     : undefined;
   if (requestIsStale()) return "";
   let assistantText = "";
+  let runtimeBoundaryFinalized = false;
   let textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
   // 与 sendMessage 一致的 assistant streaming block：避免最后一轮 assistant 文本
   // 被 _write 的 ephemeral splice 淘汰，保证完整正文落到 keep:true block。
@@ -6433,6 +6455,7 @@ async function streamFinalModelAnswerWithoutTools(
   const resetFinalAssistantDraftForProviderRetry = () => {
     discardAssistantBlock(output, assistantStreamBlockId);
     assistantText = "";
+    runtimeBoundaryFinalized = false;
     pendingAssistantPreviewText = "";
     lastAssistantPreviewFlushAt = 0;
     textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
@@ -6473,6 +6496,7 @@ async function streamFinalModelAnswerWithoutTools(
     }
     recordRequestFirstDelta(context, event.type);
     if (event.type === "assistant_text_delta") {
+      runtimeBoundaryFinalized = false;
       await clearActiveProviderFailureAfterRecovery(
         context,
         sessionId,
@@ -6646,6 +6670,7 @@ async function streamFinalModelAnswerWithoutTools(
         context,
         formatRawToolProtocolRetryFailure(context.language),
       );
+      runtimeBoundaryFinalized = true;
       maybeExposeFinalNoToolsResult(assistantText);
     } else {
       const result = await recordProviderEmptyResponse(
@@ -6677,118 +6702,123 @@ async function streamFinalModelAnswerWithoutTools(
     startRequestActivity(output, context, "checking_final_evidence", {
       ...(requestTurnId ? { requestTurnId } : {}),
     });
-    const gateResult = evaluateAggregatedFinalAnswerGate(
-      context,
-      assistantText,
-      shouldRunExtendedFinalAnswerGate(context),
-      createMainChainFinalGateClaimOptions(context),
-    );
-    if (gateResult.status === "needs_disclaimer") {
-      if (
-        shouldRewriteFinalGateClaimAlignment(gateResult, context) &&
-        claimAlignmentRewriteCount < MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES
-      ) {
-        continuation.messages.push({
-          role: "assistant",
-          content: truncateRoundAssistantForProvider(assistantText, context),
-        });
-        continuation.messages.push({
-          role: "user",
-          content: createFinalGateClaimAlignmentRewritePrompt(context.language),
-        });
-        startRequestActivity(output, context, "rewriting_final_answer", {
-          ...(requestTurnId ? { requestTurnId } : {}),
-        });
-        discardAssistantBlock(output, assistantStreamBlockId);
-        return streamFinalModelAnswerWithoutTools(
-          continuation,
-          context,
-          gateway,
-          sessionId,
-          output,
-          signal,
-          assistantStreamBlockId,
-          false,
-          claimAlignmentRewriteCount + 1,
-          evidenceActionRetryCount,
-        );
-      }
-      const finalGapMadeProgress = finalGapHasProgress(
-        gateResult,
+    if (!runtimeBoundaryFinalized) {
+      const gateResult = evaluateAggregatedFinalAnswerGate(
         context,
-        continuation.finalGapProgressState,
-      );
-      const actionPlan = planFinalGateEvidenceGapAction({
-        result: gateResult,
-        context,
-        userText: continuation.originalUserText,
         assistantText,
-        evidenceActionRetryCount,
-        finalGapMadeProgress,
-        attemptedEvidenceActionFingerprints: unavailableFinalGapActionFingerprints(
-          continuation.finalGapProgressState,
-          finalGapMadeProgress,
-        ),
-        externalBlockReason: continuation.finalGapProgressState?.externalBlockReason,
-      });
-      await appendSystemEvent(
-        context,
-        sessionId,
-        `final_answer_gap_planner final_no_tools=yes action=${actionPlan.action} reason=${actionPlan.reason}`,
-        actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only"
-          ? "warning"
-          : "info",
+        shouldRunExtendedFinalAnswerGate(context),
+        createMainChainFinalGateClaimOptions(context),
       );
-      if (requestIsStale()) return "";
-      if (requestTurnId) {
-        captureFinalGateContinuationBridgeHint({
-          context,
-          requestTurnId,
-          userText: continuation.originalUserText,
-          result: gateResult,
-          actionPlan,
-          progressState: continuation.finalGapProgressState,
-        });
-      }
-      if (actionPlan.action === "claim_contract_request") {
-        continuation.messages.push({
-          role: "assistant",
-          content: truncateRoundAssistantForProvider(assistantText, context),
-        });
-        continuation.messages.push({ role: "user", content: actionPlan.directive });
-        continuation.finalAnswerEvidenceActionRetries = evidenceActionRetryCount + 1;
-        continuation.finalGapProgressState = captureFinalGapProgressState(
+      if (gateResult.status === "needs_disclaimer") {
+        if (
+          shouldRewriteFinalGateClaimAlignment(gateResult, context) &&
+          claimAlignmentRewriteCount < MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES
+        ) {
+          continuation.messages.push({
+            role: "assistant",
+            content: truncateRoundAssistantForProvider(assistantText, context),
+          });
+          continuation.messages.push({
+            role: "user",
+            content: createFinalGateClaimAlignmentRewritePrompt(context.language),
+          });
+          startRequestActivity(output, context, "rewriting_final_answer", {
+            ...(requestTurnId ? { requestTurnId } : {}),
+          });
+          discardAssistantBlock(output, assistantStreamBlockId);
+          return streamFinalModelAnswerWithoutTools(
+            continuation,
+            context,
+            gateway,
+            sessionId,
+            output,
+            signal,
+            assistantStreamBlockId,
+            false,
+            claimAlignmentRewriteCount + 1,
+            evidenceActionRetryCount,
+          );
+        }
+        const finalGapMadeProgress = finalGapHasProgress(
           gateResult,
           context,
-          actionPlan.evidenceAction,
           continuation.finalGapProgressState,
-          finalGapMadeProgress,
         );
-        discardAssistantBlock(output, assistantStreamBlockId);
-        return streamFinalModelAnswerWithoutTools(
-          continuation,
+        const actionPlan = planFinalGateEvidenceGapAction({
+          result: gateResult,
           context,
-          gateway,
+          userText: continuation.originalUserText,
+          assistantText,
+          evidenceActionRetryCount,
+          finalGapMadeProgress,
+          attemptedEvidenceActionFingerprints: unavailableFinalGapActionFingerprints(
+            continuation.finalGapProgressState,
+            finalGapMadeProgress,
+          ),
+          externalBlockReason: continuation.finalGapProgressState?.externalBlockReason,
+        });
+        await appendSystemEvent(
+          context,
           sessionId,
-          output,
-          signal,
-          assistantStreamBlockId,
-          false,
-          claimAlignmentRewriteCount,
-          evidenceActionRetryCount + 1,
+          `final_answer_gap_planner final_no_tools=yes action=${actionPlan.action} reason=${actionPlan.reason}`,
+          actionPlan.action === "blocked_explanation" || actionPlan.action === "downgrade_only"
+            ? "warning"
+            : "info",
         );
+        if (requestIsStale()) return "";
+        if (requestTurnId && shouldCaptureFinalGateContinuationBridge(actionPlan)) {
+          captureFinalGateContinuationBridgeHint({
+            context,
+            requestTurnId,
+            userText: continuation.originalUserText,
+            result: gateResult,
+            actionPlan,
+            progressState: continuation.finalGapProgressState,
+          });
+        } else {
+          finalGateContinuationBridgeHints.delete(context);
+        }
+        if (actionPlan.action === "claim_contract_request") {
+          continuation.messages.push({
+            role: "assistant",
+            content: truncateRoundAssistantForProvider(assistantText, context),
+          });
+          continuation.messages.push({ role: "user", content: actionPlan.directive });
+          continuation.finalAnswerEvidenceActionRetries = evidenceActionRetryCount + 1;
+          continuation.finalGapProgressState = captureFinalGapProgressState(
+            gateResult,
+            context,
+            actionPlan.evidenceAction,
+            continuation.finalGapProgressState,
+            finalGapMadeProgress,
+          );
+          discardAssistantBlock(output, assistantStreamBlockId);
+          return streamFinalModelAnswerWithoutTools(
+            continuation,
+            context,
+            gateway,
+            sessionId,
+            output,
+            signal,
+            assistantStreamBlockId,
+            false,
+            claimAlignmentRewriteCount,
+            evidenceActionRetryCount + 1,
+          );
+        }
+        await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
+        if (requestIsStale()) return "";
+        assistantText = buildEvidenceBackedFinalBoundaryAnswer(
+          gateResult,
+          context.language,
+          evidenceForCurrentVerificationScope(context),
+          actionPlan.reason === "permission_denied" || actionPlan.reason === "user_cancelled"
+            ? actionPlan.reason
+            : undefined,
+        );
+        runtimeBoundaryFinalized = true;
+        maybeExposeFinalNoToolsResult(assistantText);
       }
-      await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
-      if (requestIsStale()) return "";
-      assistantText = buildEvidenceBackedFinalBoundaryAnswer(
-        gateResult,
-        context.language,
-        evidenceForCurrentVerificationScope(context),
-        actionPlan.reason === "permission_denied" || actionPlan.reason === "user_cancelled"
-          ? actionPlan.reason
-          : undefined,
-      );
-      maybeExposeFinalNoToolsResult(assistantText);
     }
     const visibleAssistantText = prepareFinalAssistantVisibleText(assistantText, context);
     if (visibleAssistantText !== assistantText) {
@@ -7006,6 +7036,7 @@ export async function continueModelAfterToolResults(
   let finalAnswerEvidenceActionRetries = continuation.finalAnswerEvidenceActionRetries ?? 0;
   let finalAnswerClaimAlignmentRewrites = 0;
   let finalGapProgressState = continuation.finalGapProgressState;
+  let runtimeBoundaryFinalized = false;
   let continuationLoopCompleted = false;
   const assistantEventId = randomUUID();
   // 每轮 round 都会开新的 streaming block，避免不同轮的输出粘到同一行。
@@ -7192,6 +7223,7 @@ export async function continueModelAfterToolResults(
         discardAssistantBlock(output, assistantStreamBlockId);
         assistantText = committedIntermediateAssistantText;
         roundAssistantText = "";
+        runtimeBoundaryFinalized = false;
         pendingAssistantPreviewText = "";
         lastAssistantPreviewFlushAt = 0;
         textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
@@ -7261,6 +7293,7 @@ export async function continueModelAfterToolResults(
         }
         recordRequestFirstDelta(context, event.type);
         if (event.type === "assistant_text_delta") {
+          runtimeBoundaryFinalized = false;
           await clearActiveProviderFailureAfterRecovery(
             context,
             sessionId,
@@ -7290,6 +7323,7 @@ export async function continueModelAfterToolResults(
           continue;
         }
         if (event.type === "tool_use") {
+          runtimeBoundaryFinalized = false;
           await clearActiveProviderFailureAfterRecovery(
             context,
             sessionId,
@@ -7600,6 +7634,7 @@ export async function continueModelAfterToolResults(
           context,
           formatRawToolProtocolRetryFailure(context.language),
         );
+        runtimeBoundaryFinalized = true;
         break;
       }
       if (roundAssistantText || toolCalls.length > 0) {
@@ -7641,6 +7676,7 @@ export async function continueModelAfterToolResults(
               ? "the repeated tool failure did not recover; no unsupported completion is claimed"
               : "重复工具失败未能恢复，不声明未经证据支持的完成状态",
           );
+          runtimeBoundaryFinalized = true;
           roundAssistantText = assistantText;
           break;
         }
@@ -7804,7 +7840,10 @@ export async function continueModelAfterToolResults(
                 : "info",
             );
             if (await stopStaleContinuation()) return;
-            if (continuation.requestTurnId) {
+            if (
+              continuation.requestTurnId &&
+              shouldCaptureFinalGateContinuationBridge(actionPlan)
+            ) {
               captureFinalGateContinuationBridgeHint({
                 context,
                 requestTurnId: continuation.requestTurnId,
@@ -7813,6 +7852,8 @@ export async function continueModelAfterToolResults(
                 actionPlan,
                 progressState: finalGapProgressState,
               });
+            } else {
+              finalGateContinuationBridgeHints.delete(context);
             }
             if (actionPlan.action === "blocked_explanation") {
               await recordFinalAnswerGateDowngrade(context, sessionId, gateResult);
@@ -7829,6 +7870,7 @@ export async function continueModelAfterToolResults(
                     : undefined,
                 ),
               );
+              runtimeBoundaryFinalized = true;
               break;
             }
             if (actionPlan.action === "downgrade_only") {
@@ -7854,6 +7896,7 @@ export async function continueModelAfterToolResults(
                 committedIntermediateAssistantText,
                 downgradedAnswer,
               );
+              runtimeBoundaryFinalized = true;
               break;
             }
             const autoExecuteEvidenceAction = shouldAutoExecuteFinalGapAction(
@@ -7897,6 +7940,7 @@ export async function continueModelAfterToolResults(
                   context.language,
                   evidenceForCurrentVerificationScope(context),
                 );
+                runtimeBoundaryFinalized = true;
                 roundAssistantText = assistantText;
                 break;
               }
@@ -7984,6 +8028,7 @@ export async function continueModelAfterToolResults(
               ? "the same tool failure repeated across rounds and reached the retry breaker"
               : "相同工具失败跨轮重复，已到达重试断路边界",
           );
+          runtimeBoundaryFinalized = true;
           break;
         }
       } else if (roundNeedsRealToolFallback) {
@@ -8043,7 +8088,7 @@ export async function continueModelAfterToolResults(
       startRequestActivity(output, context, "verifying_final_answer", { requestTurnId });
       // D.13U — 最后一道关卡：所有 final answer（含预算耗尽后的 no-tool summary）
       // 入 transcript 前都必须 gate；没有 retry 机会时直接降级，原文不入 transcript。
-      {
+      if (!runtimeBoundaryFinalized) {
         const assistantTextBeforeFinalGate = currentFinalAssistantBlockText(
           assistantText,
           committedIntermediateAssistantText,
@@ -8126,7 +8171,10 @@ export async function continueModelAfterToolResults(
                 : "info",
             );
             if (await stopStaleContinuation()) return;
-            if (continuation.requestTurnId) {
+            if (
+              continuation.requestTurnId &&
+              shouldCaptureFinalGateContinuationBridge(actionPlan)
+            ) {
               captureFinalGateContinuationBridgeHint({
                 context,
                 requestTurnId: continuation.requestTurnId,
@@ -8135,6 +8183,8 @@ export async function continueModelAfterToolResults(
                 actionPlan,
                 progressState: finalGapProgressState,
               });
+            } else {
+              finalGateContinuationBridgeHints.delete(context);
             }
             if (actionPlan.action === "claim_contract_request") {
               continuation.messages.push({
@@ -8189,6 +8239,7 @@ export async function continueModelAfterToolResults(
                     : undefined,
                 ),
               );
+              runtimeBoundaryFinalized = true;
             }
             }
         }

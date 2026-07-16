@@ -6002,6 +6002,23 @@ describe("final answer gate aggregation", () => {
     Object.assign(context, {
       config: defaultConfig,
       providerBreaker: createProviderCircuitBreakerState(),
+      lastMetaSchedulerDecision: {
+        shouldRunFinalAnswerGate: true,
+        shouldCaptureFailureLearning: false,
+        shouldPreferVerifier: false,
+        shouldUseRetryGuard: false,
+        shouldCompactBeforeProvider: false,
+        shouldStopForBlockedRuntime: false,
+        indexStrategy: "ready",
+        directives: [],
+        internalEvents: [],
+        policyDecision: {
+          taskKind: "edit",
+          executionPlan: { requireVerification: true },
+          permissionSignal: { expectedMutating: true },
+          permissionPlan: { expectedMutating: true },
+        },
+      },
       cache: { history: [], deepCompact: undefined },
     });
     const blocks: Array<{ id: string; fullText?: string; summary?: string }> = [];
@@ -6037,8 +6054,11 @@ describe("final answer gate aggregation", () => {
     expect(finalText).toContain("执行失败");
     expect(finalText).not.toContain("部分完成");
     expect(finalText).toContain("没有执行任何非结构化工具请求");
+    expect(finalText).not.toContain("结构化声明契约");
     expect(finalText).not.toContain(rawProtocol);
     expect(JSON.stringify(blocks)).toContain("执行失败");
+    expect(JSON.stringify(events)).not.toContain("claim_contract_request");
+    expect(JSON.stringify(events)).not.toContain("final_answer_claim_contract");
     expect(JSON.stringify(events)).not.toContain('"type":"tool_result"');
   });
 
@@ -6984,12 +7004,65 @@ describe("final answer gate aggregation", () => {
       expect(beforeCommitTranscriptSource).not.toContain("已完成");
       expect(beforeCommitTranscriptSource).not.toContain("本请求未能证实");
       expect(JSON.stringify(blocks)).toContain("本请求未能证实");
+      expect(JSON.stringify(blocks)).not.toContain("结构化声明契约");
       expect(JSON.stringify(blocks)).not.toContain(rawDraft);
       expect(JSON.stringify(events)).toContain("本请求未能证实");
+      expect(JSON.stringify(events)).not.toContain("结构化声明契约");
+      expect(JSON.stringify(events)).not.toContain("final_answer_gap_planner final_safety=yes");
+      expect(JSON.stringify(events)).not.toContain("continuation_final_safety=yes");
       expect(JSON.stringify(events)).not.toContain(rawDraft);
       expect(context.lastFullOutput).toContain("本请求未能证实");
+      expect(context.lastFullOutput).not.toContain("结构化声明契约");
     },
   );
+
+  it("does not bridge a terminal final-gate boundary into the next request", async () => {
+    const { context } = await makeSendMessageContext();
+    context.permissionMode = "plan";
+    context.lastMetaSchedulerDecision = {
+      shouldRunFinalAnswerGate: true,
+      shouldCaptureFailureLearning: false,
+      shouldPreferVerifier: false,
+      shouldUseRetryGuard: false,
+      shouldCompactBeforeProvider: false,
+      shouldStopForBlockedRuntime: false,
+      indexStrategy: "ready",
+      directives: [],
+      internalEvents: [],
+      policyDecision: {
+        taskKind: "edit",
+        executionPlan: { requireVerification: true },
+        permissionSignal: { expectedMutating: true },
+        permissionPlan: { expectedMutating: true },
+      },
+    } as never;
+    const calls: { count: number; requests: Array<{ messages?: unknown }> } = {
+      count: 0,
+      requests: [],
+    };
+    const rawDraft = withClaims("已完成。", [
+      { kind: "completion_claim", phrase: "已完成" },
+    ]);
+    const gateway = gatewayByTurn([
+      [
+        { type: "assistant_text_delta", text: rawDraft },
+        { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+      ],
+      [
+        { type: "assistant_text_delta", text: "这是直接结论。" },
+        { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+      ],
+    ], calls);
+
+    await __testSendMessage("只读审计，不运行测试，给最终结论", context, gateway, new MemoryOutput());
+    await __testSendMessage("审计好了吗 给我答案", context, gateway, new MemoryOutput());
+
+    expect(calls.count).toBe(2);
+    expect(JSON.stringify(calls.requests[1]?.messages ?? [])).not.toContain(
+      "上一轮 final-gate 中断的连续性提示",
+    );
+    expect(JSON.stringify(calls.requests[1]?.messages ?? [])).not.toContain("Previous directive");
+  });
 
   it("closes a shrinking final gap identically in main and continuation loops", async () => {
     const runCase = async (entry: "main" | "continuation") => {
