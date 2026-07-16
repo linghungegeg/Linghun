@@ -77,7 +77,7 @@ jobs:
       - run: corepack pnpm install --frozen-lockfile
       - uses: dtolnay/rust-toolchain@stable
       - name: Test pre-engine
-        run: cargo test --manifest-path prototypes/pre-engine/Cargo.toml
+        run: cargo test --manifest-path prototypes/pre-engine/Cargo.toml -- --test-threads=1
       - name: Install Linux musl target
         if: matrix.platform_arch == 'linux-x64'
         shell: bash
