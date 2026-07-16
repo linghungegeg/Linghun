@@ -2562,6 +2562,29 @@ describe("runHeadlessTask", () => {
     expect(exitCode).toBe(1);
   });
 
+  it("allows external verifier mode without a local test or artifact", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-external-verifier-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stdout = new MemoryOutput();
+
+    const exitCode = await runHeadlessTask({
+      prompt: "bench with external verifier",
+      projectPath: project,
+      stdout,
+      stderr: new MemoryOutput(),
+      bench: { enabled: true, maxRepairAttempts: 0, externalVerifier: true },
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {},
+    });
+
+    expect(exitCode).toBe(0);
+    expect(stdout.text).toContain("deferring pass/fail to external verifier");
+  });
+
   it("runs workspace index before the first headless bench model request", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-index-first-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });

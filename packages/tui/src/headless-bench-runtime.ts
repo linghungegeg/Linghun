@@ -59,6 +59,7 @@ export type HeadlessBenchConfig = {
   requiredArtifacts: string[];
   preflight: boolean;
   environmentSetupRetries: number;
+  externalVerifier?: boolean;
 };
 
 export type HeadlessBenchValidationResult =
@@ -91,6 +92,7 @@ export type HeadlessBenchOptions = Partial<
     | "requiredArtifacts"
     | "preflight"
     | "environmentSetupRetries"
+    | "externalVerifier"
   >
 >;
 
@@ -150,6 +152,8 @@ export async function resolveHeadlessBenchConfig(input: {
     requiredArtifacts,
     preflight: input.options?.preflight ?? parseBoolean(env.LINGHUN_HEADLESS_PREFLIGHT) ?? true,
     environmentSetupRetries,
+    externalVerifier:
+      input.options?.externalVerifier ?? parseBoolean(env.LINGHUN_HEADLESS_EXTERNAL_VERIFIER) ?? false,
   };
 }
 

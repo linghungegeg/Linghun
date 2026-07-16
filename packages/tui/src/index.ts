@@ -2156,6 +2156,14 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
               requestTurnIds: headlessRequestTurnIds,
             });
           if (!hasRealValidation && benchConfig.requiredArtifacts.length === 0) {
+            if (benchConfig.externalVerifier) {
+              benchValidationPassed = true;
+              writeLine(
+                output,
+                "[headless] bench local validation unavailable; deferring pass/fail to external verifier.",
+              );
+              break;
+            }
             writeLine(
               errorOutput,
               "错误：没有真实 test 或 artifact verification，不能返回成功。",
