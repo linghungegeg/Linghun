@@ -1,6 +1,6 @@
 {
   "name": "@linghun/providers",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -20,7 +20,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@linghun/core": "workspace:*",
-    "@linghun/shared": "workspace:*"
+    "@linghun/core": "0.1.8",
+    "@linghun/shared": "0.1.11"
   }
 }

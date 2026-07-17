@@ -1,6 +1,6 @@
 {
   "name": "@linghun/tui",
-  "version": "0.1.32",
+  "version": "0.1.33",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -21,12 +21,12 @@
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "1.59.0",
-    "@linghun/config": "workspace:*",
-    "@linghun/core": "workspace:*",
-    "@linghun/ink-runtime": "workspace:*",
-    "@linghun/providers": "workspace:*",
-    "@linghun/shared": "workspace:*",
-    "@linghun/tools": "workspace:*",
+    "@linghun/config": "0.1.8",
+    "@linghun/core": "0.1.8",
+    "@linghun/ink-runtime": "0.1.1",
+    "@linghun/providers": "0.1.18",
+    "@linghun/shared": "0.1.11",
+    "@linghun/tools": "0.1.10",
     "cli-highlight": "^2.1.11",
     "marked": "^18.0.5",
     "react": "^19.2.6"
