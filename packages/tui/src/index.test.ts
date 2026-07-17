@@ -3923,7 +3923,7 @@ describe("runHeadlessTask", () => {
     expect(stderr.text).not.toContain("closure validation ran");
   });
 
-  it("does not start provider work inside the headless deadline closure window", async () => {
+  it("does not start provider work without the provider action budget", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-deadline-closure-provider-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -3936,7 +3936,7 @@ describe("runHeadlessTask", () => {
       projectPath: project,
       stdout: new MemoryOutput(),
       stderr,
-      deadlineMs: 59_000,
+      deadlineMs: 4_000,
       __testContext: context,
       __testStore: store,
       __testSkipHydration: true,
@@ -3959,6 +3959,39 @@ describe("runHeadlessTask", () => {
     ).toBe(true);
   });
 
+  it("starts provider work inside the legacy headless deadline closure window", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-deadline-provider-budget-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stderr = new MemoryOutput();
+    let providerStarted = false;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Create missing.txt",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      deadlineMs: 59_000,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 0,
+        requiredArtifacts: ["missing.txt"],
+      },
+      __testSendMessage: async () => {
+        providerStarted = true;
+      },
+    });
+
+    expect(exitCode).toBe(5);
+    expect(providerStarted).toBe(true);
+    expect(stderr.text).not.toContain("closing without starting provider work");
+  });
+
   it("records closure checklist before provider work in a real headless runtime", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-deadline-real-closure-"));
     const stdout = new MemoryOutput();
@@ -3970,7 +4003,7 @@ describe("runHeadlessTask", () => {
       projectPath: project,
       stdout,
       stderr,
-      deadlineAtMs: startedAt + 59_000,
+      deadlineAtMs: startedAt + 4_000,
       bench: {
         enabled: true,
         preflight: false,
@@ -3993,7 +4026,7 @@ describe("runHeadlessTask", () => {
     expect(stdout.text).not.toContain("provider should not start");
   }, 15_000);
 
-  it("does not start official validation inside the headless deadline closure window", async () => {
+  it("does not start official validation without the validation action budget", async () => {
     const startMs = Date.now();
     let nowMs = startMs;
     vi.spyOn(Date, "now").mockImplementation(() => nowMs);
@@ -4009,7 +4042,7 @@ describe("runHeadlessTask", () => {
       projectPath: project,
       stdout: new MemoryOutput(),
       stderr,
-      deadlineAtMs: startMs + 61_000,
+      deadlineAtMs: startMs + 11_000,
       __testContext: context,
       __testStore: store,
       __testSkipHydration: true,
@@ -4029,9 +4062,7 @@ describe("runHeadlessTask", () => {
         enabled: true,
         preflight: false,
         maxRepairAttempts: 0,
-        testCommand: `${JSON.stringify(process.execPath)} -e "require('node:fs').writeFileSync(${JSON.stringify(
-          sentinel,
-        )}, 'started')"`,
+        testCommand: `${JSON.stringify(process.execPath)} -e "require('node:fs').writeFileSync(process.argv[1], 'started')" ${JSON.stringify(sentinel)}`,
       },
     });
 
@@ -4039,6 +4070,127 @@ describe("runHeadlessTask", () => {
     expect(exitCode).toBe(6);
     expect(stderr.text).toContain("closing without starting validation");
   });
+
+  it("starts official validation inside the legacy headless deadline closure window", async () => {
+    const startMs = Date.now();
+    let nowMs = startMs;
+    vi.spyOn(Date, "now").mockImplementation(() => nowMs);
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-deadline-validation-budget-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const sentinel = join(project, "validation-started.txt");
+    const stderr = new MemoryOutput();
+
+    const exitCode = await runHeadlessTask({
+      prompt: "validate inside legacy closure",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      deadlineAtMs: startMs + 61_000,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        nowMs = startMs + 2_000;
+        const evidence = createEvidenceRecord("command_output", "wrote tentative solution", "Write", [
+          "file_written",
+        ]);
+        evidence.ownerScope = {
+          ownerSessionId: session.id,
+          requestTurnId: "headless-validation-budget",
+          cwd: project,
+        };
+        rememberEvidence(context, evidence);
+      },
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 0,
+        testCommand: `${JSON.stringify(process.execPath)} -e "require('node:fs').writeFileSync(process.argv[1], 'started')" ${JSON.stringify(sentinel)}`,
+      },
+    });
+
+    await expect(readFile(sentinel, "utf8")).resolves.toBe("started");
+    expect(exitCode).toBe(0);
+    expect(stderr.text).not.toContain("closing without starting validation");
+  });
+
+  it("starts repair provider work inside the legacy headless deadline closure window", async () => {
+    const startMs = Date.now();
+    let nowMs = startMs;
+    vi.spyOn(Date, "now").mockImplementation(() => nowMs);
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-deadline-repair-budget-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stderr = new MemoryOutput();
+    let sends = 0;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "repair inside legacy closure",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      deadlineAtMs: startMs + 61_000,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        sends += 1;
+        nowMs = startMs + 2_000;
+      },
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 1,
+        testCommand: `${JSON.stringify(process.execPath)} -e "process.exit(1)"`,
+      },
+    });
+
+    expect(exitCode).toBe(5);
+    expect(sends).toBe(2);
+    expect(stderr.text).not.toContain("closure validation ran, skipping repair loop");
+    expect(stderr.text).not.toContain("closing without starting repair provider work");
+  });
+
+  it("records checklist when repair provider lacks the repair action budget", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-deadline-repair-closure-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const slowScript = join(project, "slow-validation.js");
+    await writeFile(slowScript, "setTimeout(() => undefined, 30000);\n", "utf8");
+    const stderr = new MemoryOutput();
+    let sends = 0;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "repair closure records checklist",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      deadlineAtMs: Date.now() + 12_000,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        sends += 1;
+      },
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 1,
+        testCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(slowScript)}`,
+      },
+    });
+
+    expect(exitCode).toBe(6);
+    expect(sends).toBe(1);
+    expect(stderr.text).toContain("closure validation ran, skipping repair loop");
+    expect(
+      context.evidence.some((item) => item.supportsClaims.includes("headless_artifact_checklist")),
+    ).toBe(true);
+  }, 20_000);
 
   it("bench mode returns a clear failure when repair attempts are exhausted", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-limit-"));
@@ -4471,7 +4623,7 @@ describe("runHeadlessTask", () => {
 
     expect(recordedPids).toHaveLength(3);
     expect(alivePids.length).toBe(0);
-  });
+  }, 15_000);
 });
 
 describe("headless runtime failure classification", () => {

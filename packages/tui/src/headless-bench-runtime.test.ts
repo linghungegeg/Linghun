@@ -37,6 +37,102 @@ describe("headless-bench-runtime", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("adds bounded bench guardrails without changing disabled prompts", async () => {
+    const { createHeadlessBenchInitialPrompt } = await import("./headless-bench-runtime.js");
+
+    const prompt = createHeadlessBenchInitialPrompt({
+      originalPrompt: "Fix the project.",
+      config: {
+        enabled: true,
+        profile: "generic",
+        testTimeoutMs: 600_000,
+        maxRepairAttempts: 1,
+        requiredArtifacts: [],
+        preflight: false,
+        environmentSetupRetries: 0,
+      },
+    });
+    const disabledPrompt = createHeadlessBenchInitialPrompt({
+      originalPrompt: "Fix the project.",
+      config: {
+        enabled: false,
+        profile: "generic",
+        testTimeoutMs: 600_000,
+        maxRepairAttempts: 1,
+        requiredArtifacts: [],
+        preflight: false,
+        environmentSetupRetries: 0,
+      },
+    });
+
+    expect(prompt).toContain("Before long builds, training, or full suites");
+    expect(prompt).toContain("Run installs non-interactively");
+    expect(disabledPrompt).toBe("Fix the project.");
+  });
+
+  it("includes remaining deadline and verifier facts in repair prompts", async () => {
+    const { createHeadlessBenchRepairPrompt } = await import("./headless-bench-runtime.js");
+
+    const prompt = createHeadlessBenchRepairPrompt({
+      originalPrompt: "Fix the project.",
+      failure: {
+        category: "model_patch_failed",
+        summary: "structured verifier failed",
+        logPath: "/tmp/local.log",
+        officialResult: {
+          command: "bash /tests/run-tests.sh",
+          exitCode: 0,
+          outcome: "completed",
+          logPath: "/tmp/verifier.log",
+          durationMs: 123,
+          facts: {
+            source: "project_local",
+            reward: 0,
+            resultReward: 0,
+            cliExitCode: 6,
+            controlledDeadlineReached: true,
+            ctrfSummary: { tests: 2, passed: 1, failed: 1, skipped: 0 },
+            failedTests: ["test_outputs.py::test_missing", "test_outputs.py::test_bad"],
+          },
+        },
+      },
+      attempt: 1,
+      maxAttempts: 2,
+      profile: "generic",
+      remainingDeadline: "42s remaining",
+      preflight: {
+        checkedTools: ["rg"],
+        missingTools: ["rg"],
+        summary: "tools checked: 1; missing: rg",
+      },
+    });
+
+    expect(prompt).toContain("Remaining deadline before repair: 42s remaining");
+    expect(prompt).toContain("rg is missing");
+    expect(prompt).toContain("Official verifier facts: reward=0; resultReward=0");
+    expect(prompt).toContain("ctrfFailed=1/2");
+    expect(prompt).toContain("failedTests=test_outputs.py::test_missing, test_outputs.py::test_bad");
+    expect(prompt).toContain("cliExitCode=6");
+    expect(prompt).toContain("controlledDeadlineReached=true");
+    expect(prompt).toContain("Official verifier log: /tmp/verifier.log");
+  });
+
+  it("uses bench-only noninteractive child env while redacting secrets", async () => {
+    const { __testHeadlessRuntime } = await import("./headless-bench-runtime.js");
+
+    const env = __testHeadlessRuntime.createSanitizedChildEnv({
+      PATH: "bin",
+      CUSTOM_TOKEN: "secret",
+      DEBIAN_FRONTEND: "dialog",
+    });
+
+    expect(env.PATH).toBe("bin");
+    expect(env.CUSTOM_TOKEN).toBeUndefined();
+    expect(env.DEBIAN_FRONTEND).toBe("noninteractive");
+    expect(env.PIP_NO_INPUT).toBe("1");
+    expect(env.PIP_DISABLE_PIP_VERSION_CHECK).toBe("1");
+  });
+
   it("includes project-local structured official verifier artifacts in validation results", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-official-facts-"));
     const script = join(project, "failure.js");

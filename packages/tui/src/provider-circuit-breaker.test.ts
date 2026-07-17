@@ -1000,6 +1000,7 @@ describe("provider-circuit-breaker", () => {
       const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
       try {
         let calls = 0;
+        const controls: Array<Parameters<Provider["stream"]>[2]> = [];
         const retryEvents: Array<{ attempt: number; maxAttempts: number; code: string }> = [];
         const model: ModelInfo = {
           id: "gpt-4o",
@@ -1019,8 +1020,9 @@ describe("provider-circuit-breaker", () => {
           async listModels() {
             return [model];
           },
-          async *stream(_request, signal) {
+          async *stream(_request, signal, control) {
             calls += 1;
+            controls.push(control);
             await new Promise<void>((resolve) => {
               if (signal?.aborted) {
                 resolve();
@@ -1058,6 +1060,7 @@ describe("provider-circuit-breaker", () => {
         await run;
 
         expect(calls).toBe(2);
+        expect(controls.map((control) => control?.streamIdleTimeoutMs)).toEqual([10, 10]);
         expect(retryEvents.map((event) => `${event.attempt}/${event.maxAttempts}:${event.code}`)).toEqual([
           "1/1:PROVIDER_STREAM_TIMEOUT",
         ]);

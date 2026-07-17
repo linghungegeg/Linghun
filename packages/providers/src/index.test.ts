@@ -1334,7 +1334,7 @@ describe("OpenAI compatible provider", () => {
     expect(bodyCancelled).toBe(true);
   });
 
-  it("preserves provider stream timeout classification when the idle watchdog aborts", async () => {
+  it("uses provider stream control idle timeout for raw body watchdog aborts", async () => {
     vi.useFakeTimers();
     try {
       vi.stubGlobal(
@@ -1362,7 +1362,9 @@ describe("OpenAI compatible provider", () => {
         model: "test-model",
         endpointProfile: "chat_completions",
       });
-      const iterator = provider.stream({ messages: [{ role: "user", content: "hi" }] });
+      const iterator = provider.stream({ messages: [{ role: "user", content: "hi" }] }, undefined, {
+        streamIdleTimeoutMs: 25,
+      });
 
       await expect(iterator.next()).resolves.toMatchObject({
         done: false,
@@ -1372,7 +1374,7 @@ describe("OpenAI compatible provider", () => {
       const pendingAssertion = expect(pending).rejects.toMatchObject({
         code: "PROVIDER_STREAM_TIMEOUT",
       });
-      await vi.advanceTimersByTimeAsync(60_001);
+      await vi.advanceTimersByTimeAsync(26);
 
       await pendingAssertion;
     } finally {

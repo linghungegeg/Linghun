@@ -614,6 +614,7 @@ export async function* withProviderRetry(
       }
       const iterator = gateway
         .stream(provider, request, streamController.signal, {
+          streamIdleTimeoutMs: streamEventIdleMs,
           onAttemptReset: opts?.onAttemptReset,
         })
         [Symbol.asyncIterator]();

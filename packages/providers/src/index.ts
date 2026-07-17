@@ -224,6 +224,7 @@ export type Provider = {
 };
 
 export type ProviderStreamControl = {
+  streamIdleTimeoutMs?: number;
   onAttemptReset?: (info: {
     reason: "same_provider_retry" | "stream_incomplete" | "stream_http_error";
     replacement: "same_provider_stream" | "non_streaming_fallback";
@@ -831,6 +832,7 @@ export class OpenAiCompatibleProvider implements Provider {
     try {
       const requestSignal = requestController.signal;
       const contract = resolveProviderRuntimeContract(this.config, request);
+      const streamIdleTimeoutMs = control?.streamIdleTimeoutMs ?? PROVIDER_STREAM_IDLE_TIMEOUT_MS;
       const baseUrlDiagnostic = resolveProviderBaseUrlDiagnostic(
         this.config.baseUrl,
         contract.endpointProfile,
@@ -933,7 +935,7 @@ export class OpenAiCompatibleProvider implements Provider {
         for await (const event of parseAnthropicMessagesStream(
           withStreamIdleTimeout(
             response.body,
-            PROVIDER_STREAM_IDLE_TIMEOUT_MS,
+            streamIdleTimeoutMs,
             requestSignal,
             requestController,
           ),
@@ -1037,7 +1039,7 @@ export class OpenAiCompatibleProvider implements Provider {
       for await (const event of parseOpenAiStream(
         withStreamIdleTimeout(
           response.body,
-          PROVIDER_STREAM_IDLE_TIMEOUT_MS,
+          streamIdleTimeoutMs,
           requestSignal,
           requestController,
         ),

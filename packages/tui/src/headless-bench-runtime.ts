@@ -236,6 +236,8 @@ export function createHeadlessBenchInitialPrompt(input: {
     preflight,
     formatInitialProfileStrategy(input.config.profile),
     "If rg is unavailable, use grep/find/sed/awk fallbacks instead of failing the task.",
+    "Before long builds, training, or full suites, run a bounded probe/read of task-local tests, verifier facts, and likely failure surfaces.",
+    "Run installs non-interactively with bounded timeouts; do not wait on apt/pip prompts.",
     "Do not claim completion from a self-written smoke test when an official test entrypoint is available.",
   ]
     .filter(Boolean)
@@ -518,15 +520,22 @@ export function createHeadlessBenchRepairPrompt(input: {
   profile?: HeadlessBenchTaskProfile;
   preflight?: HeadlessEnvironmentPreflight;
   workspaceUnchanged?: boolean;
+  remainingDeadline?: string;
 }): string {
   const artifactLine = input.failure.missingArtifacts?.length
     ? `Missing artifacts: ${input.failure.missingArtifacts.join(", ")}`
     : "";
   const logLine = input.failure.logPath ? `Full failure log: ${input.failure.logPath}` : "";
+  const verifierFactsLine = formatRepairVerifierFacts(input.failure.officialResult);
+  const officialLogLine =
+    input.failure.officialResult?.logPath && input.failure.officialResult.logPath !== input.failure.logPath
+      ? `Official verifier log: ${input.failure.officialResult.logPath}`
+      : "";
   return [
     `Headless verification failed (${input.failure.category}) on repair attempt ${input.attempt}/${input.maxAttempts}.`,
     "Continue from the current workspace. Do not restart from scratch unless necessary.",
     "Use the official test failure and current files to make the smallest fix, then rerun the official test or artifact check.",
+    input.remainingDeadline ? `Remaining deadline before repair: ${input.remainingDeadline}.` : "",
     input.workspaceUnchanged
       ? "The previous repair did not change workspace content. Use the same failure evidence to choose a different minimal repair path."
       : "",
@@ -535,7 +544,9 @@ export function createHeadlessBenchRepairPrompt(input: {
       ? "rg is missing in this environment; use grep/find/sed/awk fallbacks."
       : "",
     artifactLine,
+    verifierFactsLine,
     logLine,
+    officialLogLine,
     "",
     "Failure summary:",
     input.failure.summary,
@@ -545,6 +556,25 @@ export function createHeadlessBenchRepairPrompt(input: {
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function formatRepairVerifierFacts(
+  officialResult: HeadlessOfficialValidationResult | undefined,
+): string {
+  const facts = officialResult?.facts;
+  if (!facts && !officialResult?.logPath) return "";
+  const parts = [
+    ...(facts?.reward !== undefined ? [`reward=${facts.reward}`] : []),
+    ...(facts?.resultReward !== undefined ? [`resultReward=${facts.resultReward}`] : []),
+    ...(facts?.ctrfSummary ? [`ctrfFailed=${facts.ctrfSummary.failed}/${facts.ctrfSummary.tests}`] : []),
+    ...(facts?.failedTests?.length ? [`failedTests=${facts.failedTests.slice(0, 5).join(", ")}`] : []),
+    ...(facts?.cliExitCode !== undefined ? [`cliExitCode=${facts.cliExitCode}`] : []),
+    ...(facts?.controlledDeadlineReached !== undefined
+      ? [`controlledDeadlineReached=${facts.controlledDeadlineReached}`]
+      : []),
+    ...(officialResult?.logPath ? [`logPath=${officialResult.logPath}`] : []),
+  ];
+  return parts.length ? `Official verifier facts: ${parts.join("; ")}` : "";
 }
 
 export async function detectHeadlessBenchTaskProfile(input: {
@@ -1061,6 +1091,9 @@ function createSanitizedChildEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     if (isSecretEnvKey(key)) continue;
     next[key] = value;
   }
+  next.DEBIAN_FRONTEND = "noninteractive";
+  next.PIP_NO_INPUT = "1";
+  next.PIP_DISABLE_PIP_VERSION_CHECK = "1";
   return next;
 }
 
@@ -1193,5 +1226,6 @@ function cmdQuote(value: string): string {
 }
 
 export const __testHeadlessRuntime = {
+  createSanitizedChildEnv,
   readHeadlessOfficialValidationFacts,
 };
