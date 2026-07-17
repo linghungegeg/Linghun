@@ -19,6 +19,7 @@ import {
   __testSetFinalGateContinuationBridgeHint,
   __testCurrentVerificationReportForRequest,
   __testPrepareMessagesForProviderPreflightWithActivity,
+  __testResolveProviderStreamEventIdleMs,
   __testScheduleApiTokenCountDiagnostics,
   __testSendMessage,
   __testStreamFinalModelAnswerWithoutTools,
@@ -1803,6 +1804,24 @@ describe("continuation abort ownership", () => {
       releaseTool?.();
       builtInTools.Bash.call = originalCall;
     }
+  });
+});
+
+describe("headless bench provider stream idle scope", () => {
+  it("keeps provider stream idle override scoped to headless bench", async () => {
+    const { context } = await makeSendMessageContext();
+
+    expect(__testResolveProviderStreamEventIdleMs(context)).toBeUndefined();
+
+    (context.tools as typeof context.tools & { headlessBench?: { enabled: boolean } }).headlessBench = {
+      enabled: false,
+    };
+    expect(__testResolveProviderStreamEventIdleMs(context)).toBeUndefined();
+
+    (context.tools as typeof context.tools & { headlessBench?: { enabled: boolean } }).headlessBench = {
+      enabled: true,
+    };
+    expect(__testResolveProviderStreamEventIdleMs(context)).toBe(180_000);
   });
 });
 

@@ -1907,15 +1907,26 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
     let continuations = 0;
     let requestAttempts = 0;
     let benchValidationPassed = !benchConfig.enabled;
+    let headlessExitCode = 0;
     let lastValidation: HeadlessBenchValidationResult | undefined;
     const initialEvidenceIds = new Set(context.evidence.map((record) => record.id));
     const headlessRequestTurnIds = new Set<string>();
     let latestHeadlessRequestTurnId: string | undefined;
+    const closeHeadlessBenchForDeadline = async (message: string): Promise<number> => {
+      writeLine(errorOutput, message);
+      if (benchConfig.enabled) {
+        const sessionId = await ensureSession(context);
+        await recordHeadlessArtifactChecklist(context, sessionId, benchConfig, lastValidation);
+      }
+      return 6;
+    };
     const runOneRequest = async (text: string): Promise<HeadlessTurnStatus> => {
       let nextText = text;
       while (true) {
+        const deadlinePhase = getHeadlessDeadlinePhase(deadlineAtMs);
+        if (deadlinePhase === "expired") return { exitCode: 6 };
+        if (deadlinePhase === "closure") return { deadlineClosure: true };
         const remainingMs = remainingHeadlessDeadlineMs(deadlineAtMs);
-        if (remainingMs !== undefined && remainingMs <= 0) return { exitCode: 6 };
         requestAttempts += 1;
         emitHeadlessPhase(output, "waiting_first_delta", `attempt=${requestAttempts}`, {
           suppress: suppressGenericHeadlessPhases,
@@ -2125,6 +2136,11 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
       });
       return status.exitCode;
     }
+    if (status.deadlineClosure) {
+      return await closeHeadlessBenchForDeadline(
+        `[headless] deadline approaching (${formatHeadlessRemainingTime(deadlineAtMs)}); closing without starting provider work.`,
+      );
+    }
     if (status.providerFailure) {
       emitHeadlessPhase(errorOutput, "failed", "provider stream failed", {
         suppress: suppressGenericHeadlessPhases,
@@ -2157,13 +2173,26 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
       let repairAttempt = 0;
       const maxAttempts = benchConfig.maxRepairAttempts + 1;
       while (repairAttempt < maxAttempts) {
+        const validationDeadlinePhase = getHeadlessDeadlinePhase(deadlineAtMs);
+        if (validationDeadlinePhase !== "open") {
+          return await closeHeadlessBenchForDeadline(
+            validationDeadlinePhase === "expired"
+              ? `[headless] deadline reached (${formatHeadlessRemainingTime(deadlineAtMs)}); validation not started.`
+              : `[headless] deadline approaching (${formatHeadlessRemainingTime(deadlineAtMs)}); closing without starting validation.`,
+          );
+        }
         emitHeadlessPhase(output, "validating", `bench attempt=${repairAttempt + 1}`, {
           suppress: suppressGenericHeadlessPhases,
+        });
+        const requestOwnedVerificationEvidence = hasHeadlessBenchVerificationEvidence(context, {
+          initialEvidenceIds,
+          requestTurnIds: headlessRequestTurnIds,
         });
         let validation = await validateHeadlessBenchCompletion({
           projectPath,
           config: benchConfig,
           ...(deadlineAtMs === undefined ? {} : { deadlineAtMs }),
+          requestOwnedVerificationEvidence,
         });
         lastValidation = validation;
         if (context.sessionId) {
@@ -2178,17 +2207,14 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
         if (validation.ok) {
           const hasRealValidation =
             validation.testRan ||
-            hasHeadlessBenchVerificationEvidence(context, {
-              initialEvidenceIds,
-              requestTurnIds: headlessRequestTurnIds,
-            });
+            requestOwnedVerificationEvidence;
           if (!hasRealValidation && benchConfig.requiredArtifacts.length === 0) {
             if (benchConfig.externalVerifier) {
-              benchValidationPassed = true;
               writeLine(
                 output,
-                "[headless] bench local validation unavailable; deferring pass/fail to external verifier.",
+                "[headless] bench local validation unavailable; pass/fail deferred to external verifier, not closed locally.",
               );
+              headlessExitCode = 1;
               break;
             }
             writeLine(
@@ -2260,13 +2286,18 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           });
           return repairStatus.exitCode;
         }
+        if (repairStatus.deadlineClosure) {
+          return await closeHeadlessBenchForDeadline(
+            `[headless] deadline approaching (${formatHeadlessRemainingTime(deadlineAtMs)}); closing without starting repair provider work.`,
+          );
+        }
         if (repairStatus.providerFailure) {
           writeLine(errorOutput, "错误：headless bench 修补期间 provider stream 失败。");
           return 1;
         }
       }
     }
-    if (context.sessionId) {
+    if (benchConfig.enabled && context.sessionId) {
       await recordHeadlessArtifactChecklist(context, context.sessionId, benchConfig, lastValidation);
     }
     const cleanup = await finishHeadlessRuntime(context);
@@ -2288,9 +2319,11 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
       await store.appendEvent(context.sessionId, createSessionEndEvent(context.sessionId));
       context.sessionEnded = true;
     }
-    emitHeadlessPhase(output, "done", "exitCode=0", { suppress: suppressGenericHeadlessPhases });
+    emitHeadlessPhase(output, "done", `exitCode=${headlessExitCode}`, {
+      suppress: suppressGenericHeadlessPhases,
+    });
     previousAttemptProcessGuard = undefined;
-    return 0;
+    return headlessExitCode;
   } catch (error) {
     const message = error instanceof Error ? error.message : "headless run 执行失败。";
     emitHeadlessPhase(errorOutput, "failed", message, { suppress: suppressGenericHeadlessPhases });
@@ -2317,6 +2350,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
 type HeadlessTurnStatus = {
   exitCode?: number;
   providerFailure?: boolean;
+  deadlineClosure?: boolean;
 };
 
 type HeadlessApprovalPumpResult = {
@@ -2585,8 +2619,15 @@ function resolveHeadlessDeadlineAtMs(options: RunHeadlessOptions): number | unde
   return Date.now() + 1_800_000;
 }
 
+function getHeadlessDeadlinePhase(deadlineAtMs: number | undefined): "open" | "closure" | "expired" {
+  const remainingMs = remainingHeadlessDeadlineMs(deadlineAtMs);
+  if (remainingMs === undefined) return "open";
+  if (remainingMs <= 0) return "expired";
+  return remainingMs <= HEADLESS_DEADLINE_CLOSURE_WINDOW_MS ? "closure" : "open";
+}
+
 function isHeadlessDeadlineApproaching(deadlineAtMs: number | undefined): boolean {
-  return deadlineAtMs !== undefined && deadlineAtMs - Date.now() <= HEADLESS_DEADLINE_CLOSURE_WINDOW_MS;
+  return getHeadlessDeadlinePhase(deadlineAtMs) === "closure";
 }
 
 function formatHeadlessRemainingTime(deadlineAtMs: number | undefined): string {
@@ -2639,6 +2680,7 @@ function hasHeadlessBenchVerificationEvidence(
   context: TuiContext,
   owner: HeadlessProgressOwner,
 ): boolean {
+  if (owner.requestTurnIds.size === 0) return false;
   const projectPath = normalizeHeadlessProgressPath(context.projectPath, context.projectPath);
   return context.evidence.some((record) => {
     if (owner.initialEvidenceIds.has(record.id)) return false;
@@ -2647,13 +2689,11 @@ function hasHeadlessBenchVerificationEvidence(
     if (record.ownerScope?.ownerAgentId || record.ownerScope?.workflowRunId) return false;
     if (/^(?:agent|workflow):/u.test(record.source)) return false;
     if (!context.sessionId || record.ownerScope?.ownerSessionId !== context.sessionId) return false;
-    if (owner.requestTurnIds.size > 0) {
-      if (
-        !record.ownerScope?.requestTurnId ||
-        !owner.requestTurnIds.has(record.ownerScope.requestTurnId)
-      ) {
-        return false;
-      }
+    if (
+      !record.ownerScope?.requestTurnId ||
+      !owner.requestTurnIds.has(record.ownerScope.requestTurnId)
+    ) {
+      return false;
     }
     if (!record.ownerScope?.cwd) return false;
     if (normalizeHeadlessProgressPath(context.projectPath, record.ownerScope.cwd) !== projectPath) {
@@ -2677,8 +2717,7 @@ function remainingHeadlessDeadlineMs(deadlineAtMs: number | undefined): number |
 }
 
 function isHeadlessDeadlineExpired(deadlineAtMs: number | undefined): boolean {
-  const remainingMs = remainingHeadlessDeadlineMs(deadlineAtMs);
-  return remainingMs !== undefined && remainingMs <= 0;
+  return getHeadlessDeadlinePhase(deadlineAtMs) === "expired";
 }
 
 async function recordHeadlessBenchValidationEvidence(

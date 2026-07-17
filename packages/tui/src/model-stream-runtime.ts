@@ -9005,6 +9005,7 @@ async function recordApiTokenCountIfAvailable({
 }
 
 export const __testScheduleApiTokenCountDiagnostics = scheduleApiTokenCountDiagnostics;
+export const __testResolveProviderStreamEventIdleMs = resolveProviderStreamEventIdleMs;
 
 function sanitizeGitPromptLine(value: string): string {
   return value.replace(/\s+/gu, " ").trim();

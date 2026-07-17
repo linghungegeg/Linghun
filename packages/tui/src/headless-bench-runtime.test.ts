@@ -173,6 +173,135 @@ describe("headless-bench-runtime", () => {
     }
   });
 
+  it("fails no-local-test validation when project-local verifier facts report failure", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-external-facts-fail-"));
+    await mkdir(join(project, "verifier"), { recursive: true });
+    await mkdir(join(project, "agent"), { recursive: true });
+    await writeFile(join(project, "verifier", "reward.txt"), "0\n", "utf8");
+    await writeFile(
+      join(project, "verifier", "ctrf.json"),
+      JSON.stringify({
+        results: {
+          summary: { tests: 1, passed: 0, failed: 1, skipped: 0 },
+          tests: [{ name: "test_outputs.py::test_external_failure", status: "failed" }],
+        },
+      }),
+      "utf8",
+    );
+    await writeFile(
+      join(project, "agent", "linghun-metadata.json"),
+      JSON.stringify({ cli_exit_code: 6, controlled_deadline_reached: true }),
+      "utf8",
+    );
+    const { validateHeadlessBenchCompletion } = await import("./headless-bench-runtime.js");
+
+    const result = await validateHeadlessBenchCompletion({
+      projectPath: project,
+      config: {
+        enabled: true,
+        profile: "generic",
+        testTimeoutMs: 5_000,
+        maxRepairAttempts: 1,
+        requiredArtifacts: [],
+        preflight: false,
+        environmentSetupRetries: 0,
+        externalVerifier: true,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.failure.category).toBe("model_patch_failed");
+      expect(result.failure.summary).toContain("reward=0");
+      expect(result.failure.summary).toContain("cliExitCode=6");
+      expect(result.failure.summary).toContain("controlledDeadlineReached=true");
+      expect(result.failure.officialResult?.facts).toMatchObject({
+        source: "project_local",
+        reward: 0,
+        cliExitCode: 6,
+        controlledDeadlineReached: true,
+        failedTests: ["test_outputs.py::test_external_failure"],
+      });
+    }
+  });
+
+  it("defers no-local-test validation when request-owned evidence supersedes stale failure facts", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-external-facts-owned-evidence-"));
+    await mkdir(join(project, "verifier"), { recursive: true });
+    await writeFile(join(project, "verifier", "reward.txt"), "0\n", "utf8");
+    await writeFile(
+      join(project, "verifier", "ctrf.json"),
+      JSON.stringify({
+        results: {
+          summary: { tests: 1, passed: 0, failed: 1, skipped: 0 },
+          tests: [{ name: "test_outputs.py::test_stale_failure", status: "failed" }],
+        },
+      }),
+      "utf8",
+    );
+    const { validateHeadlessBenchCompletion } = await import("./headless-bench-runtime.js");
+
+    const result = await validateHeadlessBenchCompletion({
+      projectPath: project,
+      requestOwnedVerificationEvidence: true,
+      config: {
+        enabled: true,
+        profile: "generic",
+        testTimeoutMs: 5_000,
+        maxRepairAttempts: 1,
+        requiredArtifacts: [],
+        preflight: false,
+        environmentSetupRetries: 0,
+        externalVerifier: true,
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      testRan: false,
+      deferredToExternalVerifier: true,
+    });
+    if (result.ok) expect(result.officialResult).toBeUndefined();
+  });
+
+  it("keeps no-local-test validation deferred when project-local verifier facts report pass", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-external-facts-pass-"));
+    await mkdir(join(project, "verifier"), { recursive: true });
+    await writeFile(join(project, "verifier", "reward.txt"), "1\n", "utf8");
+    await writeFile(
+      join(project, "verifier", "ctrf.json"),
+      JSON.stringify({
+        results: {
+          summary: { tests: 1, passed: 1, failed: 0, skipped: 0 },
+          tests: [{ name: "test_outputs.py::test_ok", status: "passed" }],
+        },
+      }),
+      "utf8",
+    );
+    const { validateHeadlessBenchCompletion } = await import("./headless-bench-runtime.js");
+
+    const result = await validateHeadlessBenchCompletion({
+      projectPath: project,
+      config: {
+        enabled: true,
+        profile: "generic",
+        testTimeoutMs: 5_000,
+        maxRepairAttempts: 1,
+        requiredArtifacts: [],
+        preflight: false,
+        environmentSetupRetries: 0,
+        externalVerifier: true,
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      testRan: false,
+      deferredToExternalVerifier: true,
+    });
+    if (result.ok) expect(result.officialResult).toBeUndefined();
+  });
+
   it("confirms a timed-out official process tree is gone before returning", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-timeout-tree-"));
     const childScript = join(project, "child.js");

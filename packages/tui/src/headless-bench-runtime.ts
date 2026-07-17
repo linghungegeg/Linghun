@@ -246,6 +246,7 @@ export async function validateHeadlessBenchCompletion(input: {
   projectPath: string;
   config: HeadlessBenchConfig;
   deadlineAtMs?: number;
+  requestOwnedVerificationEvidence?: boolean;
 }): Promise<HeadlessBenchValidationResult> {
   if ((remainingDeadlineMs(input.deadlineAtMs) ?? 1) <= 0) {
     return {
@@ -269,6 +270,18 @@ export async function validateHeadlessBenchCompletion(input: {
   }
   if (!input.config.testCommand) {
     const deferredToExternalVerifier = input.config.externalVerifier === true;
+    const facts = await readHeadlessOfficialValidationFacts(input.projectPath);
+    const structuredFailure = summarizeNonPassingOfficialFacts(facts);
+    if (structuredFailure && !input.requestOwnedVerificationEvidence) {
+      return {
+        ok: false,
+        failure: {
+          category: "model_patch_failed",
+          summary: structuredFailure,
+          officialResult: createProjectLocalOfficialResult(facts),
+        },
+      };
+    }
     return {
       ok: true,
       testRan: false,
@@ -389,10 +402,27 @@ function summarizeNonPassingOfficialFacts(
     ...(facts.failedTests?.length
       ? [`failedTests=${facts.failedTests.slice(0, 5).join(", ")}`]
       : []),
+    ...(facts.cliExitCode !== undefined && facts.cliExitCode !== 0
+      ? [`cliExitCode=${facts.cliExitCode}`]
+      : []),
+    ...(facts.controlledDeadlineReached ? ["controlledDeadlineReached=true"] : []),
   ];
   return reasons.length
     ? `structured project-local verifier facts report non-pass (${reasons.join("; ")})`
     : undefined;
+}
+
+function createProjectLocalOfficialResult(
+  facts: HeadlessOfficialValidationFacts | undefined,
+): HeadlessOfficialValidationResult {
+  return {
+    command: "project-local official verifier facts",
+    exitCode: facts?.cliExitCode ?? (summarizeNonPassingOfficialFacts(facts) ? 1 : 0),
+    outcome: "completed",
+    logPath: facts?.resultPath ?? facts?.ctrfPath ?? facts?.rewardPath ?? facts?.metadataPath ?? "",
+    durationMs: 0,
+    ...(facts ? { facts } : {}),
+  };
 }
 
 function remainingDeadlineMs(deadlineAtMs: number | undefined): number | undefined {
@@ -665,6 +695,12 @@ export function formatEngineeringFailureBoundaryHint(input: {
   if (input.failureCategory === "test_timeout") {
     return "final must state timeout or partial verification; do not present focused checks as full pass";
   }
+  if (input.failureCategory === "agent_timeout") {
+    return "final must state deadline/agent-timeout boundary; avoid claiming full completion after closure";
+  }
+  if (input.failureCategory === "model_patch_failed") {
+    return "final should name the concrete verifier/test facts that still fail, or state the exact official validation rerun that passed";
+  }
   if (input.failureCategory === "provider_error") {
     return "final must state provider interruption if completion relies on interrupted model output";
   }
@@ -688,13 +724,31 @@ function formatRepairProfileStrategy(
     return "Repair route: generate or write the required artifact now, then verify it exists, is readable, and is non-empty.";
   }
   if (category === "test_timeout") {
+    if (profile === "qemu_or_service" || profile === "security_or_network") {
+      return "Repair route: inspect service logs, ports, and health checks with bounded timeouts; do not relaunch long full-system checks until the focused failure is fixed.";
+    }
+    if (profile === "ml_or_data") {
+      return "Repair route: use bounded samples, smaller parameters, or cached intermediate outputs to isolate the timeout before any full data/training run.";
+    }
     return "Repair route: narrow validation to focused tests or logs first; avoid repeatedly launching full expensive runs.";
+  }
+  if (category === "agent_timeout") {
+    return "Repair route: stop broad exploration, preserve current facts, and make only a bounded minimal repair that can complete before the deadline.";
   }
   if (category === "provider_error") {
     return "Repair route: continue from existing files and evidence; do not redo unrelated exploration.";
   }
   if (category === "model_patch_failed" && profile === "polyglot_cpp") {
     return "Repair route: align header/test signatures, types, missing symbols, and CMake linkage before changing broader logic.";
+  }
+  if (category === "model_patch_failed" && profile === "qemu_or_service") {
+    return "Repair route: fix the concrete service, port, log, or health-check failure first; keep commands bounded and clean background processes.";
+  }
+  if (category === "model_patch_failed" && profile === "security_or_network") {
+    return "Repair route: fix the concrete verifier fact for crypto/network/security behavior; validate with the smallest real check, not a simulated pass.";
+  }
+  if (category === "model_patch_failed" && profile === "ml_or_data") {
+    return "Repair route: fix the concrete data/schema/model assertion using bounded sample validation before any expensive full run.";
   }
   if (category === "model_patch_failed") {
     return "Repair route: fix the concrete compile/assertion failure with the smallest patch, then rerun focused verification.";

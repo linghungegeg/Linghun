@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { summarizeJobDir } from "./harbor-job-diagnostics.mjs";
 
 const args = process.argv.slice(2);
 const root = args.find((arg) => !arg.startsWith("--")) || ".bench/terminal-bench-wsl";
@@ -10,43 +11,41 @@ const cleanup = args.includes("--cleanup");
 const lowDiskGb = Number(getArgValue("--low-disk-gb") || 50);
 const wslDistro = getArgValue("--wsl-distro");
 
-function classify(result) {
-  const mode = String(result.failure_mode || "").toLowerCase();
-  const text = JSON.stringify(result).toLowerCase();
+const FAILURE_MODE_CATEGORIES = new Map([
+  ["agent_timeout", "agent_timeout"],
+  ["test_timeout", "test_timeout"],
+  ["provider_error", "provider_error"],
+  ["unknown_agent_error", "unknown_agent_error"],
+  ["parse_or_harness_error", "parse_or_harness_error"],
+  ["missing_artifact", "missing_artifact"],
+  ["environment_missing_tool", "environment_missing_tool"],
+  ["resource_exhausted", "resource_exhausted"],
+  ["model_patch_failed", "model_patch_failed"],
+]);
+
+const EXCEPTION_CATEGORIES = new Map([
+  ["AgentTimeoutError", "agent_timeout"],
+  ["VerifierTimeoutError", "test_timeout"],
+  ["NonZeroAgentExitCodeError", "unknown_agent_error"],
+  ["CancelledError", "interrupted"],
+]);
+
+function classifyResultByFields(result) {
   if (result.is_resolved === true) return "resolved";
-  if (mode.includes("agent_timeout") || text.includes("agent timed out")) return "agent_timeout";
-  if (mode.includes("test_timeout") || text.includes("test command timed out")) return "test_timeout";
-  if (mode.includes("provider") || /rate limit|upstream|stream interrupted|fetch failed/.test(text)) {
-    return "provider_error";
-  }
-  if (mode.includes("unknown_agent_error")) return "unknown_agent_error";
-  if (mode.includes("parse") || /no short test summary|error parsing results|harness/.test(text)) {
-    if (/cmake|g\+\+|undefined reference|compile error|build failed/.test(text)) {
-      return "model_patch_failed";
-    }
-    return "parse_or_harness_error";
-  }
-  if (/missing|no such file|expected artifact|out\.txt|result\.txt|results\.json/.test(text)) {
-    return "missing_artifact";
-  }
-  if (/command not found|rg: not found|cmake: not found|g\+\+: not found/.test(text)) {
-    return "environment_missing_tool";
-  }
-  if (/no space left|out of memory|cannot allocate memory|oom/.test(text)) {
-    return "resource_exhausted";
-  }
-  return "model_patch_failed";
+  const mode = stringValue(result.failure_mode) ?? stringValue(result.failureMode);
+  const mappedMode = mode ? FAILURE_MODE_CATEGORIES.get(mode) : undefined;
+  if (mappedMode) return mappedMode;
+  const exceptionType = stringValue(result.exception_info?.exception_type) ?? stringValue(result.exceptionType);
+  const mappedException = exceptionType ? EXCEPTION_CATEGORIES.get(exceptionType) : undefined;
+  if (mappedException) return mappedException;
+  return "unclassified_failure";
 }
 
-function detectProfile(result, file) {
-  const text = `${file}\n${JSON.stringify(result)}`.toLowerCase();
-  if (/qemu|service|server|\bport\b|daemon|socket|healthcheck/.test(text)) return "qemu_or_service";
-  if (/ctf|crypto|security|network|pcap|exploit|vulnerab/.test(text)) return "security_or_network";
-  if (/dataset|model|train|numpy|pandas|torch|tensorflow|sklearn|ml/.test(text)) return "ml_or_data";
-  if (/out\.txt|artifact|binary|hexdump|strings|elf|ldd|\.bin/.test(text)) return "binary_or_artifact";
-  if (/polyglot_cpp|cmake|g\+\+|c\+\+|\.cpp|\.hpp/.test(text)) return "polyglot_cpp";
-  if (/polyglot|exercism/.test(text)) return "polyglot_simple";
-  if (/pytest|python|django|flask|fastapi|pyproject|requirements/.test(text)) return "swe_python";
+function detectProfileByFields(result) {
+  for (const key of ["profile", "task_profile", "taskProfile", "category", "task_type", "taskType"]) {
+    const value = stringValue(result[key]);
+    if (value) return value;
+  }
   return "generic";
 }
 
@@ -76,6 +75,46 @@ async function findResults(dir) {
   return found;
 }
 
+async function findHarborJobs(dir) {
+  const found = [];
+
+  async function walk(current) {
+    if (await hasTrialChildren(current)) {
+      found.push(current);
+      return;
+    }
+
+    let entries;
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name === ".git" || entry.name === "node_modules") continue;
+      await walk(join(current, entry.name));
+    }
+  }
+
+  await walk(dir);
+  return found;
+}
+
+async function hasTrialChildren(dir) {
+  if (!existsSync(join(dir, "config.json"))) return false;
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  return entries.some((entry) => {
+    if (!entry.isDirectory()) return false;
+    const trialDir = join(dir, entry.name);
+    return existsSync(join(trialDir, "result.json")) || existsSync(join(trialDir, "config.json"));
+  });
+}
+
 function diskFreeGb(drive) {
   if (process.platform !== "win32") return undefined;
   try {
@@ -92,6 +131,10 @@ function diskFreeGb(drive) {
 function getArgValue(name) {
   const prefix = `${name}=`;
   return args.find((arg) => arg.startsWith(prefix))?.slice(prefix.length);
+}
+
+function stringValue(value) {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function runDockerCommand(commandArgs) {
@@ -142,30 +185,56 @@ function runDockerCleanup() {
   }
 }
 
-const files = existsSync(root) ? await findResults(root) : [];
+const jobDirs = existsSync(root) ? await findHarborJobs(root) : [];
+const jobSummaries = [];
+for (const jobDir of jobDirs) {
+  const summary = await summarizeJobDir(jobDir);
+  if (summary.trialTasks.trialCount > 0) {
+    jobSummaries.push(summary);
+  }
+}
+const files = jobSummaries.length === 0 && existsSync(root) ? await findResults(root) : [];
 const counters = new Map();
 const profileCounters = new Map();
 let total = 0;
 let resolved = 0;
-for (const file of files) {
-  const data = JSON.parse(readFileSync(file, "utf8"));
-  for (const result of data.results || []) {
-    total += 1;
-    const category = classify(result);
-    const profile = detectProfile(result, file);
-    counters.set(category, (counters.get(category) || 0) + 1);
-    profileCounters.set(profile, (profileCounters.get(profile) || 0) + 1);
-    if (category === "resolved") resolved += 1;
+
+if (jobSummaries.length > 0) {
+  for (const summary of jobSummaries) {
+    total += summary.trialTasks.anyPass.total;
+    resolved += summary.trialTasks.anyPass.pass;
+    for (const [category, count] of Object.entries(summary.trialTasks.failureCategories)) {
+      counters.set(category, (counters.get(category) || 0) + count);
+    }
+  }
+} else {
+  for (const file of files) {
+    const data = JSON.parse(readFileSync(file, "utf8"));
+    for (const result of data.results || []) {
+      total += 1;
+      const category = classifyResultByFields(result);
+      const profile = detectProfileByFields(result);
+      counters.set(category, (counters.get(category) || 0) + 1);
+      profileCounters.set(profile, (profileCounters.get(profile) || 0) + 1);
+      if (category === "resolved") resolved += 1;
+    }
   }
 }
 
 console.log(`results: ${resolved}/${total}${total ? ` (${((resolved / total) * 100).toFixed(1)}%)` : ""}`);
+if (jobSummaries.length > 0) {
+  const firstPass = jobSummaries.reduce((sum, summary) => sum + summary.trialTasks.firstUnique.pass, 0);
+  const firstTotal = jobSummaries.reduce((sum, summary) => sum + summary.trialTasks.firstUnique.total, 0);
+  console.log(`first unique: ${firstPass}/${firstTotal}${firstTotal ? ` (${((firstPass / firstTotal) * 100).toFixed(1)}%)` : ""}`);
+}
 for (const [category, count] of [...counters.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
   console.log(`- ${category}: ${count}`);
 }
-console.log("profiles:");
-for (const [profile, count] of [...profileCounters.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-  console.log(`- ${profile}: ${count}`);
+if (jobSummaries.length === 0) {
+  console.log("profiles:");
+  for (const [profile, count] of [...profileCounters.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    console.log(`- ${profile}: ${count}`);
+  }
 }
 
 console.log("");

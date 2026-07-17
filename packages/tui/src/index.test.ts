@@ -2562,7 +2562,7 @@ describe("runHeadlessTask", () => {
     expect(exitCode).toBe(1);
   });
 
-  it("allows external verifier mode without a local test or artifact", async () => {
+  it("does not close external verifier mode without a local test or artifact", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-external-verifier-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -2581,8 +2581,8 @@ describe("runHeadlessTask", () => {
       __testSendMessage: async () => {},
     });
 
-    expect(exitCode).toBe(0);
-    expect(stdout.text).toContain("deferring pass/fail to external verifier");
+    expect(exitCode).toBe(1);
+    expect(stdout.text).toContain("pass/fail deferred to external verifier, not closed locally");
     expect(
       context.evidence.some(
         (item) =>
@@ -2601,6 +2601,227 @@ describe("runHeadlessTask", () => {
       ]),
     );
     expect(checklist?.summary).toContain("externalVerifier=deferred");
+  });
+
+  it("does not close external verifier mode from project-local pass facts alone", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-external-facts-pass-"));
+    await mkdir(join(project, "verifier"), { recursive: true });
+    await writeFile(join(project, "verifier", "reward.txt"), "1\n", "utf8");
+    await writeFile(
+      join(project, "verifier", "ctrf.json"),
+      JSON.stringify({
+        results: {
+          summary: { tests: 1, passed: 1, failed: 0, skipped: 0 },
+          tests: [{ name: "test_outputs.py::test_ok", status: "passed" }],
+        },
+      }),
+      "utf8",
+    );
+    await writeFile(
+      join(project, "result.json"),
+      JSON.stringify({ verifier_result: { rewards: { reward: 1 } } }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stdout = new MemoryOutput();
+
+    const exitCode = await runHeadlessTask({
+      prompt: "bench with external pass facts only",
+      projectPath: project,
+      stdout,
+      stderr: new MemoryOutput(),
+      bench: { enabled: true, maxRepairAttempts: 0, externalVerifier: true },
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {},
+    });
+
+    expect(exitCode).toBe(1);
+    expect(stdout.text).toContain("pass/fail deferred to external verifier, not closed locally");
+    expect(
+      context.evidence.some(
+        (item) =>
+          item.supportsClaims.includes("verification_passed") ||
+          item.supportsClaims.includes("test_passed"),
+      ),
+    ).toBe(false);
+    expect(
+      checkClaimSupport(
+        '已验证 LinghunFinalAnswerClaims: {"claims":[{"kind":"verification_claim","phrase":"已验证"}]}',
+        context,
+      ).status,
+    ).toBe("needs_disclaimer");
+  });
+
+  it("ignores project-local pass facts in ordinary non-bench runs", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-ordinary-facts-pass-"));
+    await mkdir(join(project, "verifier"), { recursive: true });
+    await writeFile(join(project, "verifier", "reward.txt"), "1\n", "utf8");
+    await writeFile(
+      join(project, "verifier", "ctrf.json"),
+      JSON.stringify({
+        results: {
+          summary: { tests: 1, passed: 1, failed: 0, skipped: 0 },
+          tests: [{ name: "test_outputs.py::test_ok", status: "passed" }],
+        },
+      }),
+      "utf8",
+    );
+    await writeFile(
+      join(project, "result.json"),
+      JSON.stringify({ verifier_result: { rewards: { reward: 1 } } }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+
+    const exitCode = await runHeadlessTask({
+      prompt: "ordinary interaction with project-local verifier outputs",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      bench: { enabled: false, externalVerifier: true },
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {},
+    });
+
+    expect(exitCode).toBe(0);
+    expect(
+      context.evidence.some(
+        (item) =>
+          item.supportsClaims.includes("headless_artifact_checklist") ||
+          item.supportsClaims.includes("external_verifier_deferred") ||
+          item.supportsClaims.includes("verification_passed") ||
+          item.supportsClaims.includes("test_passed"),
+      ),
+    ).toBe(false);
+    const gate = checkClaimSupport(
+      '已验证 LinghunFinalAnswerClaims: {"claims":[{"kind":"verification_claim","phrase":"已验证"}]}',
+      context,
+    );
+    expect(gate.status).toBe("needs_disclaimer");
+  });
+
+  it("allows artifact-only external verifier bench completion without test pass evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-external-artifact-"));
+    await writeFile(join(project, "answer.txt"), "artifact", "utf8");
+    await mkdir(join(project, "verifier"), { recursive: true });
+    await writeFile(join(project, "verifier", "reward.txt"), "1\n", "utf8");
+    await writeFile(
+      join(project, "result.json"),
+      JSON.stringify({ verifier_result: { rewards: { reward: 1 } } }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stdout = new MemoryOutput();
+
+    const exitCode = await runHeadlessTask({
+      prompt: "bench with artifact-only external verifier",
+      projectPath: project,
+      stdout,
+      stderr: new MemoryOutput(),
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 0,
+        externalVerifier: true,
+        requiredArtifacts: ["answer.txt"],
+      },
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {},
+    });
+
+    expect(exitCode).toBe(0);
+    expect(stdout.text).toContain("bench validation passed");
+    expect(stdout.text).not.toContain("not closed locally");
+    expect(
+      context.evidence.some(
+        (item) =>
+          item.supportsClaims.includes("verification_passed") ||
+          item.supportsClaims.includes("test_passed"),
+      ),
+    ).toBe(false);
+    const checklist = context.evidence.find((item) =>
+      item.supportsClaims.includes("headless_artifact_checklist"),
+    );
+    expect(checklist?.supportsClaims).toEqual(
+      expect.arrayContaining([
+        "headless_artifact_checklist",
+        "verification_not_run",
+        "external_verifier_deferred",
+      ]),
+    );
+    expect(checklist?.summary).toContain("externalVerifier=deferred");
+    expect(
+      checkClaimSupport(
+        '已验证 LinghunFinalAnswerClaims: {"claims":[{"kind":"verification_claim","phrase":"已验证"}]}',
+        context,
+      ).status,
+    ).toBe("needs_disclaimer");
+  });
+
+  it("allows artifact-only external verifier bench completion without project-local facts", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-external-artifact-clean-"));
+    await writeFile(join(project, "answer.txt"), "artifact", "utf8");
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stdout = new MemoryOutput();
+
+    const exitCode = await runHeadlessTask({
+      prompt: "bench with clean artifact-only external verifier",
+      projectPath: project,
+      stdout,
+      stderr: new MemoryOutput(),
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 0,
+        externalVerifier: true,
+        requiredArtifacts: ["answer.txt"],
+      },
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {},
+    });
+
+    expect(exitCode).toBe(0);
+    expect(stdout.text).toContain("bench validation passed");
+    expect(
+      context.evidence.some(
+        (item) =>
+          item.supportsClaims.includes("verification_passed") ||
+          item.supportsClaims.includes("test_passed"),
+      ),
+    ).toBe(false);
+    const checklist = context.evidence.find((item) =>
+      item.supportsClaims.includes("headless_artifact_checklist"),
+    );
+    expect(checklist?.supportsClaims).toEqual(
+      expect.arrayContaining([
+        "headless_artifact_checklist",
+        "verification_not_run",
+        "external_verifier_deferred",
+      ]),
+    );
+    expect(checklist?.summary).toContain("externalVerifier=deferred");
+    expect(
+      checkClaimSupport(
+        '已验证 LinghunFinalAnswerClaims: {"claims":[{"kind":"verification_claim","phrase":"已验证"}]}',
+        context,
+      ).status,
+    ).toBe("needs_disclaimer");
   });
 
   it("runs workspace index before the first headless bench model request", async () => {
@@ -2658,6 +2879,7 @@ describe("runHeadlessTask", () => {
       __testStore: store,
       __testSkipHydration: true,
       __testSendMessage: async () => {
+        context.currentRequestTurnId = "headless-tool-test";
         const evidence = createEvidenceRecord(
           "command_output",
           "Bash: python3 -m pytest tests -q; 1 passed",
@@ -2674,6 +2896,111 @@ describe("runHeadlessTask", () => {
     });
 
     expect(exitCode).toBe(0);
+  });
+
+  it("rejects headless bench test evidence without current request ownership", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-unowned-test-evidence-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+
+    const exitCode = await runHeadlessTask({
+      prompt: "bench with unowned tool verification",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      bench: { enabled: true, maxRepairAttempts: 0 },
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        const evidence = createEvidenceRecord(
+          "command_output",
+          "Bash: python3 -m pytest tests -q; 1 passed",
+          "Bash",
+          ["Bash", "command_ran", "bash_exit_0", "test_attempted", "test_passed"],
+        );
+        evidence.ownerScope = {
+          ownerSessionId: session.id,
+          cwd: project,
+        };
+        rememberEvidence(context, evidence);
+      },
+    });
+
+    expect(exitCode).toBe(1);
+  });
+
+  it("repairs from project-local verifier facts when no official test command is detected", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-facts-repair-"));
+    await mkdir(join(project, "verifier"), { recursive: true });
+    await writeFile(join(project, "verifier", "reward.txt"), "0\n", "utf8");
+    await writeFile(
+      join(project, "verifier", "ctrf.json"),
+      JSON.stringify({
+        results: {
+          summary: { tests: 1, passed: 0, failed: 1, skipped: 0 },
+          tests: [{ name: "test_outputs.py::test_hidden_contract", status: "failed" }],
+        },
+      }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const prompts: string[] = [];
+
+    const exitCode = await runHeadlessTask({
+      prompt: "bench with project-local verifier facts",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      bench: { enabled: true, maxRepairAttempts: 1, externalVerifier: true },
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async (prompt) => {
+        const requestTurnId =
+          prompts.length === 0 ? "headless-facts-initial" : "headless-facts-repair";
+        context.currentRequestTurnId = requestTurnId;
+        prompts.push(prompt);
+        if (prompts.length === 2) {
+          const evidence = createEvidenceRecord(
+            "command_output",
+            "Bash: python3 -m pytest tests -q; 1 passed",
+            "Bash",
+            ["Bash", "command_ran", "bash_exit_0", "test_attempted", "test_passed"],
+          );
+          evidence.ownerScope = {
+            ownerSessionId: session.id,
+            requestTurnId,
+            cwd: project,
+          };
+          rememberEvidence(context, evidence);
+        }
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("model_patch_failed");
+    expect(prompts[1]).toContain("test_outputs.py::test_hidden_contract");
+    const failureEvidence = context.evidence.find(
+      (item) =>
+        item.kind === "test_result" &&
+        "headlessBenchValidation" in ((item.data ?? {}) as Record<string, unknown>),
+    );
+    expect(failureEvidence?.data).toMatchObject({
+      headlessBenchValidation: {
+        category: "model_patch_failed",
+        officialResult: {
+          facts: {
+            reward: 0,
+            failedTests: ["test_outputs.py::test_hidden_contract"],
+          },
+        },
+      },
+    });
   });
 
   it("reuses remaining continuation budget for a repair provider interruption", async () => {
@@ -3180,7 +3507,7 @@ describe("runHeadlessTask", () => {
     expect(process.listenerCount("SIGINT")).toBe(listenerCountBefore);
   });
 
-  it("records a headless artifact checklist as evidence before cleanup", async () => {
+  it("does not record a headless artifact checklist for ordinary non-bench runs", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-checklist-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -3201,7 +3528,7 @@ describe("runHeadlessTask", () => {
     expect(exitCode).toBe(0);
     expect(
       context.evidence.some((item) => item.supportsClaims.includes("headless_artifact_checklist")),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("records official headless validation as scoped verification evidence", async () => {
@@ -3596,6 +3923,123 @@ describe("runHeadlessTask", () => {
     expect(stderr.text).not.toContain("closure validation ran");
   });
 
+  it("does not start provider work inside the headless deadline closure window", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-deadline-closure-provider-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stderr = new MemoryOutput();
+    let providerStarted = false;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Create missing.txt",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      deadlineMs: 59_000,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 1,
+        requiredArtifacts: ["missing.txt"],
+      },
+      __testSendMessage: async () => {
+        providerStarted = true;
+      },
+    });
+
+    expect(exitCode).toBe(6);
+    expect(providerStarted).toBe(false);
+    expect(stderr.text).toContain("closing without starting provider work");
+    expect(
+      context.evidence.some((item) => item.supportsClaims.includes("headless_artifact_checklist")),
+    ).toBe(true);
+  });
+
+  it("records closure checklist before provider work in a real headless runtime", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-deadline-real-closure-"));
+    const stdout = new MemoryOutput();
+    const stderr = new MemoryOutput();
+    const startedAt = Date.now();
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Create missing.txt",
+      projectPath: project,
+      stdout,
+      stderr,
+      deadlineAtMs: startedAt + 59_000,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 1,
+        requiredArtifacts: ["missing.txt"],
+      },
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        throw new Error("provider should not start");
+      },
+    });
+
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const sessions = await store.list();
+    expect(exitCode).toBe(6);
+    expect(sessions).toHaveLength(1);
+    const { transcript: events } = await store.resume(sessions[0]!.id);
+    expect(JSON.stringify(events)).toContain("headless_artifact_checklist");
+    expect(stderr.text).toContain("closing without starting provider work");
+    expect(stdout.text).not.toContain("provider should not start");
+  }, 15_000);
+
+  it("does not start official validation inside the headless deadline closure window", async () => {
+    const startMs = Date.now();
+    let nowMs = startMs;
+    vi.spyOn(Date, "now").mockImplementation(() => nowMs);
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-deadline-closure-validation-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const sentinel = join(project, "validation-started.txt");
+    const stderr = new MemoryOutput();
+
+    const exitCode = await runHeadlessTask({
+      prompt: "validate before closure",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      deadlineAtMs: startMs + 61_000,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        nowMs = startMs + 2_000;
+        const evidence = createEvidenceRecord("command_output", "wrote tentative solution", "Write", [
+          "file_written",
+        ]);
+        evidence.ownerScope = {
+          ownerSessionId: session.id,
+          requestTurnId: "headless-closure-validation",
+          cwd: project,
+        };
+        rememberEvidence(context, evidence);
+      },
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 0,
+        testCommand: `${JSON.stringify(process.execPath)} -e "require('node:fs').writeFileSync(${JSON.stringify(
+          sentinel,
+        )}, 'started')"`,
+      },
+    });
+
+    await expect(readFile(sentinel, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(exitCode).toBe(6);
+    expect(stderr.text).toContain("closing without starting validation");
+  });
+
   it("bench mode returns a clear failure when repair attempts are exhausted", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-limit-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -3892,12 +4336,53 @@ describe("runHeadlessTask", () => {
       profile: "large_python_project",
       workspaceUnchanged: true,
     });
+    const servicePrompt = createHeadlessBenchRepairPrompt({
+      originalPrompt: "Fix service",
+      failure: { category: "model_patch_failed", summary: "health check failed" },
+      attempt: 1,
+      maxAttempts: 1,
+      profile: "qemu_or_service",
+    });
+    const securityPrompt = createHeadlessBenchRepairPrompt({
+      originalPrompt: "Fix verifier",
+      failure: { category: "model_patch_failed", summary: "crypto contract failed" },
+      attempt: 1,
+      maxAttempts: 1,
+      profile: "security_or_network",
+    });
+    const dataPrompt = createHeadlessBenchRepairPrompt({
+      originalPrompt: "Fix data job",
+      failure: { category: "test_timeout", summary: "training timeout" },
+      attempt: 1,
+      maxAttempts: 1,
+      profile: "ml_or_data",
+    });
+    const dataFailurePrompt = createHeadlessBenchRepairPrompt({
+      originalPrompt: "Fix data assertion",
+      failure: { category: "model_patch_failed", summary: "schema assertion failed" },
+      attempt: 1,
+      maxAttempts: 1,
+      profile: "ml_or_data",
+    });
+    const deadlinePrompt = createHeadlessBenchRepairPrompt({
+      originalPrompt: "Finish bounded task",
+      failure: { category: "agent_timeout", summary: "deadline reached" },
+      attempt: 1,
+      maxAttempts: 1,
+      profile: "generic",
+    });
 
     expect(compilePrompt).toContain("align header/test signatures");
     expect(artifactPrompt).toContain("generate or write the required artifact");
     expect(timeoutPrompt).toContain("narrow validation to focused tests");
     expect(timeoutPrompt).toContain("avoid repeatedly launching full expensive runs");
     expect(timeoutPrompt).toContain("previous repair did not change workspace content");
+    expect(servicePrompt).toContain("service, port, log, or health-check failure");
+    expect(securityPrompt).toContain("crypto/network/security behavior");
+    expect(securityPrompt).toContain("not a simulated pass");
+    expect(dataPrompt).toContain("bounded samples");
+    expect(dataFailurePrompt).toContain("data/schema/model assertion");
+    expect(deadlinePrompt).toContain("stop broad exploration");
   });
 
   it("cleans up retained processes from previous repair attempts", async () => {

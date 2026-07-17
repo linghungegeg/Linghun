@@ -1294,6 +1294,23 @@ describe("Meta scheduler runtime", () => {
     });
     expect(timeout.policyDecision.engineeringSignal.failureCategory).toBe("test_timeout");
     expect(timeout.policyDecision.engineeringSignal.finalBoundaryHint).toContain("timeout");
+
+    const verifierFacts = evaluateMetaScheduler({
+      ...baseInput(),
+      engineeringProfile: "qemu_or_service",
+      engineeringFailureCategory: "model_patch_failed",
+    });
+    expect(verifierFacts.policyDecision.engineeringSignal.failureCategory).toBe("model_patch_failed");
+    expect(verifierFacts.policyDecision.engineeringSignal.finalBoundaryHint).toContain("verifier/test facts");
+
+    const agentTimeout = evaluateMetaScheduler({
+      ...baseInput(),
+      engineeringFailureCategory: "agent_timeout",
+    });
+    expect(agentTimeout.policyDecision.engineeringSignal.failureCategory).toBe("agent_timeout");
+    expect(agentTimeout.policyDecision.engineeringSignal.finalBoundaryHint).toContain(
+      "deadline/agent-timeout",
+    );
   });
 
   it("sanitizes engineering strategy labels from main-screen echoes", () => {
