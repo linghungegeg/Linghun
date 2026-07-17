@@ -102,12 +102,20 @@ export type HeadlessOfficialValidationResult = {
   facts?: HeadlessOfficialValidationFacts;
 };
 
+export type HeadlessBenchToolFailureFact = {
+  toolName: string;
+  summary: string;
+  evidenceId?: string;
+};
+
 export type HeadlessArtifactChecklist = {
   requiredArtifacts: Array<{ path: string; present: boolean }>;
   changedFiles: string[];
   workspaceChangeHash?: string;
   verificationRan: boolean;
   externalVerifierDeferred?: boolean;
+  lastValidationCategory?: HeadlessBenchFailureCategory;
+  lastVerificationOutcome?: HeadlessOfficialValidationResult["outcome"];
   lastVerificationExitCode?: number;
   gitAvailable: boolean | "unknown";
   summary: string;
@@ -449,6 +457,11 @@ export async function collectHeadlessArtifactChecklist(input: {
     (input.lastValidation?.ok === true && input.lastValidation.testRan) ||
     Boolean(failedValidation?.command);
   const externalVerifierDeferred = input.config.externalVerifier === true && !verificationRan;
+  const lastValidationCategory = failedValidation?.category;
+  const lastVerificationOutcome =
+    input.lastValidation?.ok === true
+      ? input.lastValidation.officialResult?.outcome
+      : failedValidation?.officialResult?.outcome;
   const lastVerificationExitCode = failedValidation?.exitCode;
   const workspaceChangeHash = await computeWorkspaceChangeHash(input.projectPath, input.changedFiles);
   const summary = [
@@ -458,6 +471,8 @@ export async function collectHeadlessArtifactChecklist(input: {
     `workspaceHash=${workspaceChangeHash.slice(0, 8)}`,
     `verificationRan=${verificationRan ? "yes" : "no"}`,
     ...(externalVerifierDeferred ? ["externalVerifier=deferred"] : []),
+    `lastValidation=${lastValidationCategory ?? "none"}`,
+    `lastVerificationOutcome=${lastVerificationOutcome ?? "none"}`,
     `lastVerificationExitCode=${lastVerificationExitCode ?? "none"}`,
     `git=${gitAvailable}`,
   ].join("; ");
@@ -467,6 +482,8 @@ export async function collectHeadlessArtifactChecklist(input: {
     workspaceChangeHash,
     verificationRan,
     ...(externalVerifierDeferred ? { externalVerifierDeferred: true } : {}),
+    ...(lastValidationCategory ? { lastValidationCategory } : {}),
+    ...(lastVerificationOutcome ? { lastVerificationOutcome } : {}),
     ...(lastVerificationExitCode === undefined ? {} : { lastVerificationExitCode }),
     gitAvailable,
     summary,
@@ -521,11 +538,15 @@ export function createHeadlessBenchRepairPrompt(input: {
   preflight?: HeadlessEnvironmentPreflight;
   workspaceUnchanged?: boolean;
   remainingDeadline?: string;
+  toolFailures?: HeadlessBenchToolFailureFact[];
+  checklist?: HeadlessArtifactChecklist;
 }): string {
   const artifactLine = input.failure.missingArtifacts?.length
     ? `Missing artifacts: ${input.failure.missingArtifacts.join(", ")}`
     : "";
   const logLine = input.failure.logPath ? `Full failure log: ${input.failure.logPath}` : "";
+  const toolFailureLine = formatRepairToolFailures(input.toolFailures);
+  const checklistLine = formatRepairChecklist(input.checklist);
   const verifierFactsLine = formatRepairVerifierFacts(input.failure.officialResult);
   const officialLogLine =
     input.failure.officialResult?.logPath && input.failure.officialResult.logPath !== input.failure.logPath
@@ -544,6 +565,8 @@ export function createHeadlessBenchRepairPrompt(input: {
       ? "rg is missing in this environment; use grep/find/sed/awk fallbacks."
       : "",
     artifactLine,
+    checklistLine,
+    toolFailureLine,
     verifierFactsLine,
     logLine,
     officialLogLine,
@@ -556,6 +579,39 @@ export function createHeadlessBenchRepairPrompt(input: {
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function formatRepairToolFailures(
+  failures: HeadlessBenchToolFailureFact[] | undefined,
+): string {
+  const items = (failures ?? [])
+    .map((failure) => {
+      const summary = failure.summary.replace(/\s+/gu, " ").trim();
+      if (!summary) return undefined;
+      const evidence = failure.evidenceId ? ` evidence=${failure.evidenceId}` : "";
+      return `${failure.toolName}: ${summary.slice(0, 220)}${evidence}`;
+    })
+    .filter((item): item is string => Boolean(item))
+    .slice(0, 3);
+  return items.length ? `Recent owner-scoped tool failure facts: ${items.join(" | ")}` : "";
+}
+
+function formatRepairChecklist(checklist: HeadlessArtifactChecklist | undefined): string {
+  if (!checklist) return "";
+  const missingArtifacts = checklist.requiredArtifacts
+    .filter((artifact) => !artifact.present)
+    .map((artifact) => artifact.path);
+  const parts = [
+    `artifactsPresent=${checklist.requiredArtifacts.filter((item) => item.present).length}/${checklist.requiredArtifacts.length}`,
+    ...(missingArtifacts.length ? [`missingArtifacts=${missingArtifacts.join(", ")}`] : []),
+    `changedFiles=${checklist.changedFiles.length}`,
+    `verificationRan=${checklist.verificationRan ? "yes" : "no"}`,
+    `lastValidation=${checklist.lastValidationCategory ?? "none"}`,
+    `lastVerificationOutcome=${checklist.lastVerificationOutcome ?? "none"}`,
+    `lastVerificationExitCode=${checklist.lastVerificationExitCode ?? "none"}`,
+    ...(checklist.externalVerifierDeferred ? ["externalVerifier=deferred"] : []),
+  ];
+  return `Artifact/install checklist facts: ${parts.join("; ")}. Close every missing artifact or failed official validation before final; do not treat a file or binary existing by itself as a complete install/runtime pass.`;
 }
 
 function formatRepairVerifierFacts(

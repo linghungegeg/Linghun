@@ -767,6 +767,7 @@ import {
 } from "./handoff-session-runtime.js";
 import {
   type HeadlessBenchOptions,
+  type HeadlessBenchToolFailureFact,
   type HeadlessOfficialValidationResult,
   type HeadlessBenchValidationResult,
   collectHeadlessArtifactChecklist,
@@ -2143,7 +2144,12 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
         }
         continuations += 1;
         const sessionId = await ensureSession(context);
-        nextText = createHeadlessProviderContinuationPrompt(context);
+        nextText = createHeadlessProviderContinuationPrompt(context, {
+          config: benchConfig,
+          remainingDeadline: formatHeadlessRemainingTime(deadlineAtMs),
+          attempt: continuations,
+          maxAttempts: maxContinuations,
+        });
         await appendSystemEvent(
           context,
           sessionId,
@@ -2324,6 +2330,11 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           profile: benchConfig.profile,
           workspaceUnchanged,
           remainingDeadline: formatHeadlessRemainingTime(deadlineAtMs),
+          checklist,
+          toolFailures: collectHeadlessToolFailureFacts(context, {
+            initialEvidenceIds,
+            requestTurnIds: headlessRequestTurnIds,
+          }),
           ...(benchPreflight ? { preflight: benchPreflight } : {}),
         });
         repairAttempt += 1;
@@ -2708,7 +2719,16 @@ function shouldRunHeadlessProviderContinuation(
     (failure?.recoverability === undefined &&
       Boolean(failure?.code) &&
       isRecoverableProviderFailure(failure?.code ?? ""));
-  return recoverable && hasHeadlessOwnerProgress(context, progressOwner);
+  return recoverable &&
+    (hasHeadlessOwnerProgress(context, progressOwner) ||
+      providerFailureBelongsToHeadlessRun(failure, progressOwner));
+}
+
+function providerFailureBelongsToHeadlessRun(
+  failure: TuiContext["lastProviderFailure"],
+  owner: HeadlessProgressOwner,
+): boolean {
+  return typeof failure?.requestTurnId === "string" && owner.requestTurnIds.has(failure.requestTurnId);
 }
 
 type HeadlessProgressOwner = {
@@ -2768,6 +2788,40 @@ function hasHeadlessBenchVerificationEvidence(
       claim === "verification_passed"
     );
   });
+}
+
+function collectHeadlessToolFailureFacts(
+  context: TuiContext,
+  owner: HeadlessProgressOwner,
+): HeadlessBenchToolFailureFact[] {
+  if (owner.requestTurnIds.size === 0) return [];
+  const projectPath = normalizeHeadlessProgressPath(context.projectPath, context.projectPath);
+  return context.evidence
+    .filter((record) => {
+      if (owner.initialEvidenceIds.has(record.id)) return false;
+      if (!record.supportsClaims.includes("tool_failure")) return false;
+      if (record.ownerScope?.ownerAgentId || record.ownerScope?.workflowRunId) return false;
+      if (/^(?:agent|workflow):/u.test(record.source)) return false;
+      if (!context.sessionId || record.ownerScope?.ownerSessionId !== context.sessionId) return false;
+      if (
+        !record.ownerScope?.requestTurnId ||
+        !owner.requestTurnIds.has(record.ownerScope.requestTurnId)
+      ) {
+        return false;
+      }
+      if (!record.ownerScope?.cwd) return false;
+      return normalizeHeadlessProgressPath(context.projectPath, record.ownerScope.cwd) === projectPath;
+    })
+    .slice(-3)
+    .map((record) => ({
+      toolName: headlessToolFailureName(record),
+      summary: record.summary,
+      evidenceId: record.id,
+    }));
+}
+
+function headlessToolFailureName(record: EvidenceRecord): string {
+  return record.supportsClaims.find((claim) => claim !== "tool_failure") ?? record.source;
 }
 
 function normalizeHeadlessProgressPath(projectPath: string, file: string): string {
@@ -2954,6 +3008,7 @@ async function recordHeadlessArtifactChecklist(
       checklist.changedFiles.length > 0 ? "file_written" : "no_file_changes",
     ],
   );
+  evidence.data = { headlessArtifactChecklist: checklist };
   rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
   await appendSystemEvent(context, sessionId, `headless artifact checklist: ${checklist.summary}`, "info");
@@ -2962,6 +3017,8 @@ async function recordHeadlessArtifactChecklist(
 export const __testHeadlessRuntime = {
   isDeadlineApproaching: isHeadlessDeadlineApproaching,
   formatRemainingTime: formatHeadlessRemainingTime,
+  createProviderContinuationPrompt: createHeadlessProviderContinuationPrompt,
+  shouldRunProviderContinuation: shouldRunHeadlessProviderContinuation,
 };
 
 function createHeadlessProviderFailureDiagnostic(
@@ -2987,10 +3044,54 @@ function createHeadlessProviderFailureDiagnostic(
     .join(" ");
 }
 
-function createHeadlessProviderContinuationPrompt(context: TuiContext): string {
-  return context.language === "en-US"
-    ? "The previous response stream was interrupted by a provider/transit failure. Continue the original task in the same context using the current workspace state, transcript, tool evidence, and any file changes already present. Do not restart from scratch unless needed; preserve remaining time, repair the concrete failure, and run the smallest relevant verification before final."
-    : "上一轮响应流因 provider/传输失败中断。请在同一上下文中基于当前工作区状态、已有 transcript、工具证据和已经存在的文件改动继续完成原任务；除非必要，不要从头重做。注意剩余时间，修复具体失败点，并在 final 前运行最小相关验证。";
+function createHeadlessProviderContinuationPrompt(
+  context: TuiContext,
+  input: {
+    config?: Awaited<ReturnType<typeof resolveHeadlessBenchConfig>>;
+    remainingDeadline?: string;
+    attempt?: number;
+    maxAttempts?: number;
+  } = {},
+): string {
+  const artifacts = input.config?.requiredArtifacts ?? [];
+  const facts = context.language === "en-US"
+    ? [
+        input.attempt !== undefined && input.maxAttempts !== undefined
+          ? `Continuation attempt: ${input.attempt}/${input.maxAttempts}.`
+          : "",
+        input.remainingDeadline ? `Remaining deadline: ${input.remainingDeadline}.` : "",
+        input.config?.testCommand
+          ? `Headless bench fact: official test command is ${input.config.testCommand}.`
+          : "Headless bench fact: no local official test command is configured; use the strongest task-local validation available.",
+        artifacts.length > 0
+          ? `Headless bench fact: required artifacts are ${artifacts.join(", ")}. Verify each exists and is readable before final.`
+          : "Headless bench fact: no explicit required artifacts are configured; verify observable task completion from current files and task-local checks.",
+        input.config?.externalVerifier
+          ? "External verifier is authoritative; do not claim external pass unless local official/project facts support it."
+          : "",
+      ]
+    : [
+        input.attempt !== undefined && input.maxAttempts !== undefined
+          ? `继续尝试：${input.attempt}/${input.maxAttempts}。`
+          : "",
+        input.remainingDeadline ? `剩余时间：${input.remainingDeadline}。` : "",
+        input.config?.testCommand
+          ? `Headless bench 事实：官方测试命令是 ${input.config.testCommand}。`
+          : "Headless bench 事实：当前没有本地官方测试命令；使用最强的任务本地验证。",
+        artifacts.length > 0
+          ? `Headless bench 事实：必需产物是 ${artifacts.join(", ")}。final 前逐一确认存在且可读。`
+          : "Headless bench 事实：当前没有显式必需产物；基于当前文件和任务本地检查验证可观察完成状态。",
+        input.config?.externalVerifier
+          ? "外部 verifier 是最终判定来源；没有本地官方/项目事实支持时，不要声称 external pass。"
+          : "",
+      ];
+  const prefix = context.language === "en-US"
+    ? "The previous response stream was interrupted by a provider/transit failure. Continue the original task in the same context using the current workspace state, transcript, tool evidence, and any file changes already present. Do not assume an interrupted tool call succeeded; inspect current files or rerun a bounded check before relying on it. Do not restart from scratch unless needed."
+    : "上一轮响应流因 provider/传输失败中断。请在同一上下文中基于当前工作区状态、已有 transcript、工具证据和已经存在的文件改动继续完成原任务；不要假设被中断的工具调用已经成功，依赖它之前先检查当前文件或重跑有边界的小检查；除非必要，不要从头重做。";
+  const suffix = context.language === "en-US"
+    ? "Repair the concrete failure and run the smallest relevant verification before final."
+    : "修复具体失败点，并在 final 前运行最小相关验证。";
+  return [prefix, ...facts, suffix].filter(Boolean).join("\n");
 }
 
 async function finishHeadlessRuntime(context: TuiContext): Promise<{ ok: boolean; reason?: string }> {

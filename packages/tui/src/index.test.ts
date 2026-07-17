@@ -74,6 +74,7 @@ import {
   __testClaimAndPersistAllowAlwaysApproval,
   __testFormatStartAgentDidNotStartMessage,
   __testGetCurrentWorkflowStepRequest,
+  __testHeadlessRuntime,
   __testParseRunWorkflowToolInput,
   __testRenderInteractiveChoiceLines,
   __testRunWorkflowStepsWithPlan,
@@ -2135,6 +2136,69 @@ describe("runHeadlessTask", () => {
     expect(context.lastProviderFailure).toBeUndefined();
   });
 
+  it("allows bounded headless provider continuation for the same failed request without owner progress", () => {
+    const context = {
+      language: "en-US",
+      projectPath: "/app",
+      sessionId: "session-1",
+      evidence: [],
+      lastProviderFailure: {
+        code: "PROVIDER_STREAM_ERROR",
+        kind: "transit",
+        recoverability: "resumable",
+        provider: "openai-compatible",
+        model: "gpt-test",
+        endpointProfile: "responses",
+        summary: "stream interrupted",
+        evidenceId: "provider-failure-1",
+        requestTurnId: "headless-request-1",
+        createdAt: new Date().toISOString(),
+      },
+    } as unknown as TuiContext;
+
+    expect(
+      __testHeadlessRuntime.shouldRunProviderContinuation(context, {
+        initialEvidenceIds: new Set(),
+        requestTurnIds: new Set(["headless-request-1"]),
+      }),
+    ).toBe(true);
+    expect(
+      __testHeadlessRuntime.shouldRunProviderContinuation(context, {
+        initialEvidenceIds: new Set(),
+        requestTurnIds: new Set(["other-request"]),
+      }),
+    ).toBe(false);
+  });
+
+  it("replays structured headless bench facts in provider continuation prompts", () => {
+    const prompt = __testHeadlessRuntime.createProviderContinuationPrompt(
+      { language: "en-US" } as TuiContext,
+      {
+        remainingDeadline: "42s remaining",
+        attempt: 1,
+        maxAttempts: 2,
+        config: {
+          enabled: true,
+          profile: "binary_or_artifact",
+          testCommand: "bash /tests/run-tests.sh",
+          testTimeoutMs: 60_000,
+          maxRepairAttempts: 1,
+          requiredArtifacts: ["/app/re.json"],
+          preflight: true,
+          environmentSetupRetries: 1,
+          externalVerifier: true,
+        },
+      },
+    );
+
+    expect(prompt).toContain("Continuation attempt: 1/2");
+    expect(prompt).toContain("Remaining deadline: 42s remaining");
+    expect(prompt).toContain("official test command is bash /tests/run-tests.sh");
+    expect(prompt).toContain("required artifacts are /app/re.json");
+    expect(prompt).toContain("External verifier is authoritative");
+    expect(prompt).toContain("Do not assume an interrupted tool call succeeded");
+  });
+
   it("bench mode runs verification before success after provider stream failures", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-continuation-diag-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -3596,6 +3660,15 @@ describe("runHeadlessTask", () => {
         },
       },
     });
+    const checklistEvidence = context.evidence.find((item) =>
+      item.supportsClaims.includes("headless_artifact_checklist")
+    );
+    expect(checklistEvidence?.data).toMatchObject({
+      headlessArtifactChecklist: {
+        verificationRan: true,
+        lastVerificationOutcome: "completed",
+      },
+    });
   });
 
   it("final gate reports recentDiagnostics risk only for headless bench", async () => {
@@ -4258,6 +4331,75 @@ describe("runHeadlessTask", () => {
     expect(exitCode).toBe(0);
     expect(prompts[1]).toContain("missing_artifact");
     expect(prompts[1]).toContain("Missing artifacts: out.txt");
+    expect(prompts[1]).toContain("Artifact/install checklist facts");
+    expect(prompts[1]).toContain("missingArtifacts=out.txt");
+    expect(prompts[1]).toContain("lastValidation=missing_artifact");
+  });
+
+  it("bench repair prompts include current-owner tool failure facts", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-tool-failure-facts-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const artifact = join(project, "out.txt");
+    const prompts: string[] = [];
+
+    const stale = createEvidenceRecord(
+      "command_output",
+      "Bash timed out: stale unrelated command",
+      "Bash",
+      ["Bash", "tool_failure"],
+    );
+    stale.ownerScope = {
+      ownerSessionId: session.id,
+      requestTurnId: "other-request",
+      cwd: project,
+    };
+    rememberEvidence(context, stale);
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Write the result to out.txt.",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 1,
+        requiredArtifacts: ["out.txt"],
+      },
+      __testSendMessage: async (text) => {
+        const requestTurnId =
+          prompts.length === 0 ? "headless-tool-failure-initial" : "headless-tool-failure-repair";
+        context.currentRequestTurnId = requestTurnId;
+        prompts.push(text);
+        if (prompts.length === 1) {
+          const failure = createEvidenceRecord(
+            "command_output",
+            "Bash timed out: apt install exceeded its bounded command timeout",
+            "Bash",
+            ["Bash", "tool_failure"],
+          );
+          failure.ownerScope = {
+            ownerSessionId: session.id,
+            requestTurnId,
+            cwd: project,
+          };
+          rememberEvidence(context, failure);
+        }
+        if (prompts.length === 2) {
+          await writeFile(artifact, "answer", "utf8");
+        }
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(prompts[1]).toContain("Recent owner-scoped tool failure facts");
+    expect(prompts[1]).toContain("Bash timed out: apt install exceeded its bounded command timeout");
+    expect(prompts[1]).not.toContain("stale unrelated command");
   });
 
   it("bench mode classifies official test timeouts without hanging", async () => {
