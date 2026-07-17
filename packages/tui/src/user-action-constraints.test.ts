@@ -119,10 +119,13 @@ describe("user-action-constraints", () => {
 
   it.each([
     "不要改旧文件，但创建 report.md",
+    "不要改数据库但要写 sol.sql",
+    "不要改数据库，只写 sol.sql",
     "只禁止修改 src/**",
     "禁止修改 UI 样式细节",
     "do not edit existing files, but create report.md",
     "do not edit package.json",
+    "Do not modify /app/oewn.sqlite, save the query to /app/sol.sql",
   ])("does not promote a target restriction or explicit exception to a global write deny: %s", (text) => {
     const constraints = parseUserActionConstraints(text);
 

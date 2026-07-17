@@ -109,11 +109,11 @@ function hasPhasedReadThenWriteIntent(text: string): boolean {
 
 function hasExplicitWriteException(text: string): boolean {
   const mentionsWrite = (segment: string): boolean =>
-    /(?:修复|处理|实现|落地|改|修改|写|写入|编辑|创建|新增|删除|fix|repair|implement|edit|write|modify|change|create|add|delete)/iu.test(
+    /(?:修复|处理|实现|落地|改|修改|写|写入|编辑|创建|新增|删除|fix|repair|implement|edit|write|save|modify|change|create|add|delete)/iu.test(
       segment,
     );
   const hasNegativePermission = (segment: string): boolean =>
-    /(?:不要|别|不准|禁止|不可以|不允许|不能|不可|不许|不\s*(?:修复|处理|实现|落地|改|修改|写|写入|编辑|创建|新增|删除)|(?:无需|无须|不用|不必|不需要)\s*(?:修复|处理|实现|落地|改|修改|写|写入|编辑|创建|新增|删除))|(?:cannot|can't|cant|do\s+not|don't|dont|not\s+allowed|may\s+not|must\s+not|need\s+not|no\s+need\s+to|not\s+(?:fix|repair|implement|edit|write|modify|change|create|add|delete))/iu.test(
+    /(?:不要|别|不准|禁止|不可以|不允许|不能|不可|不许|不\s*(?:修复|处理|实现|落地|改|修改|写|写入|编辑|创建|新增|删除)|(?:无需|无须|不用|不必|不需要)\s*(?:修复|处理|实现|落地|改|修改|写|写入|编辑|创建|新增|删除))|(?:cannot|can't|cant|do\s+not|don't|dont|not\s+allowed|may\s+not|must\s+not|need\s+not|no\s+need\s+to|not\s+(?:fix|repair|implement|edit|write|save|modify|change|create|add|delete))/iu.test(
       segment,
     );
   const clauses = splitConstraintClauses(text);
@@ -194,13 +194,13 @@ function isTargetScopedWriteBan(clause: string): boolean {
     /只允许\s*不\s*(?:改|修改|写|写入|编辑|创建|删除).{0,24}(?:旧|现有|已有|原有|指定|特定|这个|那个|UI|样式|文档|配置|测试|目录|文件夹)/iu.test(
       denySegment,
     ) ||
-    /(?:不要|别|不准|禁止|先别|不可以|不允许|不能|不可|不许).{0,12}(?:改|修改|写|写入|编辑|创建|删除).{0,24}(?:旧|现有|已有|原有|指定|特定|这个|那个|以下|上述|上面|下面|红框|UI|界面|样式|文档|配置|依赖|测试|目录|文件夹|分支|worktree)/iu.test(
+    /(?:不要|别|不准|禁止|先别|不可以|不允许|不能|不可|不许).{0,12}(?:改|修改|写|写入|编辑|创建|删除).{0,24}(?:旧|现有|已有|原有|指定|特定|这个|那个|以下|上述|上面|下面|红框|UI|界面|样式|文档|配置|依赖|测试|目录|文件夹|数据库|数据表|分支|worktree|\b(?:databases?|db|sqlite|sql(?:ite)?\s+files?)\b)/iu.test(
       denySegment,
     ) ||
     /(?:不要|别|不准|禁止|先别|不可以|不允许|不能|不可|不许).{0,12}(?:改|修改|写|写入|编辑|创建|删除).{0,32}(?:[A-Za-z0-9_.-]+[\\/][A-Za-z0-9_./\\*-]*|[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/u.test(
       denySegment,
     ) ||
-    /(?:do\s+not|don't|dont|no|cannot|can't|cant|not\s+allowed\s+to|may\s+not|must\s+not)\s+(?:edit|write|modify|change|create|delete).{0,32}(?:existing|current|old|specific|selected|UI|styles?|docs?|config|tests?|director(?:y|ies)|folders?|branches?|worktrees?|[A-Za-z0-9_.-]+[\\/]|[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/iu.test(
+    /(?:do\s+not|don't|dont|no|cannot|can't|cant|not\s+allowed\s+to|may\s+not|must\s+not)\s+(?:edit|write|modify|change|create|delete).{0,32}(?:existing|current|old|specific|selected|UI|styles?|docs?|config|tests?|director(?:y|ies)|folders?|branches?|worktrees?|\b(?:databases?|db|sqlite|sql(?:ite)?\s+files?)\b|[A-Za-z0-9_.-]+[\\/]|[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/iu.test(
       denySegment,
     );
 }
