@@ -1948,6 +1948,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
     let benchValidationPassed = !benchConfig.enabled;
     let headlessExitCode = 0;
     let lastValidation: HeadlessBenchValidationResult | undefined;
+    let deferExternalVerifierProviderFailure = false;
     const initialEvidenceIds = new Set(context.evidence.map((record) => record.id));
     const headlessRequestTurnIds = new Set<string>();
     let latestHeadlessRequestTurnId: string | undefined;
@@ -2189,6 +2190,15 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
       );
     }
     if (status.providerFailure) {
+      const providerFailureIsResumable = isResumableHeadlessProviderFailure(
+        context.lastProviderFailure,
+      );
+      const hasOwnerProgress =
+        benchConfig.enabled &&
+        hasHeadlessOwnerProgress(context, {
+          initialEvidenceIds,
+          requestTurnIds: headlessRequestTurnIds,
+        });
       emitHeadlessPhase(errorOutput, "failed", "provider stream failed", {
         suppress: suppressGenericHeadlessPhases,
       });
@@ -2200,22 +2210,26 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           maxContinuations,
         }),
       );
-      if (
-        benchConfig.enabled &&
-        hasHeadlessOwnerProgress(context, {
-          initialEvidenceIds,
-          requestTurnIds: headlessRequestTurnIds,
-        })
-      ) {
+      if (hasOwnerProgress && providerFailureIsResumable) {
         writeLine(
           output,
           "[headless] provider stream failed after continuations, but owner progress exists; running verification before deciding the exit status.",
+        );
+      } else if (
+        benchConfig.enabled &&
+        benchConfig.externalVerifier &&
+        providerFailureIsResumable
+      ) {
+        deferExternalVerifierProviderFailure = true;
+        writeLine(
+          output,
+          "[headless] provider stream failed after continuations; pass/fail deferred to external verifier, not closed locally.",
         );
       } else {
         return 1;
       }
     }
-    if (benchConfig.enabled) {
+    if (benchConfig.enabled && !deferExternalVerifierProviderFailure) {
       let previousWorkspaceHash: string | undefined;
       let repairAttempt = 0;
       const maxAttempts = benchConfig.maxRepairAttempts + 1;
@@ -2355,6 +2369,17 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
         }
         if (repairStatus.providerFailure) {
           writeLine(errorOutput, "错误：headless bench 修补期间 provider stream 失败。");
+          if (
+            benchConfig.externalVerifier &&
+            isResumableHeadlessProviderFailure(context.lastProviderFailure)
+          ) {
+            deferExternalVerifierProviderFailure = true;
+            writeLine(
+              output,
+              "[headless] repair provider stream failed; pass/fail deferred to external verifier, not closed locally.",
+            );
+            break;
+          }
           return 1;
         }
       }
@@ -2714,14 +2739,22 @@ function shouldRunHeadlessProviderContinuation(
   progressOwner: HeadlessProgressOwner,
 ): boolean {
   const failure = context.lastProviderFailure;
-  const recoverable =
-    failure?.recoverability === "resumable" ||
-    (failure?.recoverability === undefined &&
-      Boolean(failure?.code) &&
-      isRecoverableProviderFailure(failure?.code ?? ""));
-  return recoverable &&
+  return isResumableHeadlessProviderFailure(failure) &&
     (hasHeadlessOwnerProgress(context, progressOwner) ||
       providerFailureBelongsToHeadlessRun(failure, progressOwner));
+}
+
+function isResumableHeadlessProviderFailure(
+  failure: TuiContext["lastProviderFailure"],
+): boolean {
+  if (!failure) return false;
+  if (failure.recoverability === "resumable") return true;
+  if (failure.recoverability === "action_required") return false;
+
+  const code = failure.code ?? "";
+  return isRecoverableProviderFailure(code) ||
+    code === "PROVIDER_RESPONSE_FAILED" ||
+    code === "PROVIDER_RESPONSE_INCOMPLETE";
 }
 
 function providerFailureBelongsToHeadlessRun(

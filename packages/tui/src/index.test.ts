@@ -3125,6 +3125,75 @@ describe("runHeadlessTask", () => {
     expect(attempts).toBe(3);
   });
 
+  it("defers external verifier when repair provider failure is exhausted", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-repair-provider-deferred-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stdout = new MemoryOutput();
+    const stderr = new MemoryOutput();
+    let attempts = 0;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "Write the result to out.txt.",
+      projectPath: project,
+      stdout,
+      stderr,
+      maxContinuations: 0,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 1,
+        externalVerifier: true,
+        requiredArtifacts: ["out.txt"],
+      },
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        attempts += 1;
+        if (attempts !== 2) return;
+        context.currentRequestTurnId = "headless-repair-provider-failure";
+        context.lastProviderFailure = {
+          code: "PROVIDER_SERVER_ERROR",
+          kind: "gateway",
+          recoverability: "resumable",
+          provider: "openai-compatible",
+          model: "gpt-test",
+          endpointProfile: "responses",
+          summary: "repair provider returned HTTP 502",
+          evidenceId: "provider-repair-502",
+          requestTurnId: "headless-repair-provider-failure",
+          createdAt: new Date().toISOString(),
+        };
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(attempts).toBe(2);
+    expect(stderr.text).toContain("headless bench 修补期间 provider stream 失败");
+    expect(stdout.text).toContain("pass/fail deferred to external verifier");
+    expect(
+      context.evidence.some(
+        (item) =>
+          item.supportsClaims.includes("verification_passed") ||
+          item.supportsClaims.includes("test_passed"),
+      ),
+    ).toBe(false);
+    const checklist = context.evidence.find((item) =>
+      item.supportsClaims.includes("headless_artifact_checklist"),
+    );
+    expect(checklist?.supportsClaims).toEqual(
+      expect.arrayContaining([
+        "headless_artifact_checklist",
+        "verification_not_run",
+        "external_verifier_deferred",
+      ]),
+    );
+    expect(checklist?.summary).toContain("externalVerifier=deferred");
+    expect(checklist?.summary).toContain("lastValidation=missing_artifact");
+  });
+
   it("non-bench mode fails after provider stream failures even when files changed", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-continuation-nonbench-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
