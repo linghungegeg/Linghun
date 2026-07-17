@@ -2562,7 +2562,7 @@ describe("runHeadlessTask", () => {
     expect(exitCode).toBe(1);
   });
 
-  it("does not close external verifier mode without a local test or artifact", async () => {
+  it("defers external verifier mode without a local test or artifact using exit 0", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-external-verifier-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -2581,7 +2581,7 @@ describe("runHeadlessTask", () => {
       __testSendMessage: async () => {},
     });
 
-    expect(exitCode).toBe(1);
+    expect(exitCode).toBe(0);
     expect(stdout.text).toContain("pass/fail deferred to external verifier, not closed locally");
     expect(
       context.evidence.some(
@@ -2603,7 +2603,7 @@ describe("runHeadlessTask", () => {
     expect(checklist?.summary).toContain("externalVerifier=deferred");
   });
 
-  it("does not close external verifier mode from project-local pass facts alone", async () => {
+  it("defers external verifier mode from project-local pass facts alone using exit 0", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-external-facts-pass-"));
     await mkdir(join(project, "verifier"), { recursive: true });
     await writeFile(join(project, "verifier", "reward.txt"), "1\n", "utf8");
@@ -2639,7 +2639,7 @@ describe("runHeadlessTask", () => {
       __testSendMessage: async () => {},
     });
 
-    expect(exitCode).toBe(1);
+    expect(exitCode).toBe(0);
     expect(stdout.text).toContain("pass/fail deferred to external verifier, not closed locally");
     expect(
       context.evidence.some(

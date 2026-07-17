@@ -2214,7 +2214,6 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
                 output,
                 "[headless] bench local validation unavailable; pass/fail deferred to external verifier, not closed locally.",
               );
-              headlessExitCode = 1;
               break;
             }
             writeLine(
