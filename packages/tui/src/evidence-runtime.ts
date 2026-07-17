@@ -778,8 +778,11 @@ export async function recordVerificationEvidence(
     report.logPath ?? "Verification Runner",
     supportsClaims,
   );
+  if (report.evidenceData) {
+    evidence.data = { ...report.evidenceData };
+  }
   if (report.scope) {
-    evidence.data = { verificationScope: report.scope };
+    evidence.data = { ...(evidence.data ?? {}), verificationScope: report.scope };
     evidence.ownerScope = {
       ownerSessionId: report.scope.ownerSessionId,
       ...(report.scope.requestTurnId ? { requestTurnId: report.scope.requestTurnId } : {}),

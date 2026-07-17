@@ -13,7 +13,7 @@ import type {
   ModelToolCall,
   ModelUsage,
 } from "@linghun/providers";
-import type { Language } from "@linghun/shared";
+import { readPositiveIntEnv, type Language } from "@linghun/shared";
 import {
   collectUndeliveredAgentCompletionNotices,
   formatAgentCompletionMainChainContext,
@@ -217,6 +217,7 @@ import {
   REQUEST_SLOW_HINT_MS,
   MAX_TODO_ONLY_CODE_FACT,
 } from "./tui-context-runtime.js";
+
 import type {
   EvidenceRecord,
   RemoteInboundDecision,
@@ -239,6 +240,16 @@ import {
   writeErrorLine,
 } from "./tui-output-surface.js";
 import { ShellBlockOutput } from "./tui-output-surface.js";
+
+const HEADLESS_PROVIDER_STREAM_EVENT_IDLE_MS = readPositiveIntEnv(
+  "LINGHUN_HEADLESS_PROVIDER_STREAM_EVENT_IDLE_MS",
+  180_000,
+);
+
+function resolveProviderStreamEventIdleMs(context: TuiContext): number | undefined {
+  const headlessBench = (context.tools as { headlessBench?: { enabled?: boolean } }).headlessBench;
+  return headlessBench?.enabled ? HEADLESS_PROVIDER_STREAM_EVENT_IDLE_MS : undefined;
+}
 
 type ModelToolExecutionResult = {
   ok: boolean;
@@ -4723,6 +4734,7 @@ export async function sendMessage(
             return handleProviderRetryForMetaOrchestration(context, sessionId, info);
           },
           onAttemptReset: resetProviderAttempt,
+          streamEventIdleMs: resolveProviderStreamEventIdleMs(context),
         },
       )) {
         if (!requestOwnerIsCurrent()) {
@@ -6912,6 +6924,7 @@ async function streamFinalModelAnswerWithoutTools(
         return handleProviderRetryForMetaOrchestration(context, sessionId, info);
       },
       onAttemptReset: resetFinalProviderAttempt,
+      streamEventIdleMs: resolveProviderStreamEventIdleMs(context),
     },
   )) {
     if (requestIsStale()) {
@@ -7672,6 +7685,7 @@ export async function continueModelAfterToolResults(
             return handleProviderRetryForMetaOrchestration(context, sessionId, info);
           },
           onAttemptReset: resetProviderAttempt,
+          streamEventIdleMs: resolveProviderStreamEventIdleMs(context),
         },
       )) {
         // D.13O — abort 后必须早返回，迟到的 SSE delta 不再写主屏 / transcript /

@@ -767,6 +767,7 @@ import {
 } from "./handoff-session-runtime.js";
 import {
   type HeadlessBenchOptions,
+  type HeadlessOfficialValidationResult,
   type HeadlessBenchValidationResult,
   collectHeadlessArtifactChecklist,
   createHeadlessBenchInitialPrompt,
@@ -1112,7 +1113,14 @@ import {
   t,
   writeStatus,
 } from "./details-status-runtime.js";
-import { appendBackgroundTaskEvent, appendSystemEvent, createEvidenceRecord, rememberEvidence, scopeEvidenceToContext } from "./evidence-runtime.js";
+import {
+  appendBackgroundTaskEvent,
+  appendSystemEvent,
+  createEvidenceRecord,
+  recordVerificationEvidence,
+  rememberEvidence,
+  scopeEvidenceToContext,
+} from "./evidence-runtime.js";
 import { finishBackgroundTaskFromToolOutput } from "./background-control-runtime.js";
 import {
   __testSendMessage,
@@ -1902,6 +1910,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
     let lastValidation: HeadlessBenchValidationResult | undefined;
     const initialEvidenceIds = new Set(context.evidence.map((record) => record.id));
     const headlessRequestTurnIds = new Set<string>();
+    let latestHeadlessRequestTurnId: string | undefined;
     const runOneRequest = async (text: string): Promise<HeadlessTurnStatus> => {
       let nextText = text;
       while (true) {
@@ -1926,6 +1935,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
         context.processGuard = attemptProcessGuard;
         context.tools.trackChildProcess = attemptProcessGuard.track;
         const previousProviderFailureId = context.lastProviderFailure?.evidenceId;
+        const previousRuntimeContextId = context.runtimeContextId;
         const deferredApprovals: HeadlessDeferredApproval[] = [];
         const emitActivity = createHeadlessActivityEmitter(output, context, {
           suppress: suppressGenericHeadlessPhases,
@@ -2044,6 +2054,15 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           return { exitCode: 130 };
         }
         const messageResult = messageRace.result;
+        const requestTurnId = context.currentRequestTurnId ??
+          (typeof context.runtimeContextId === "string" &&
+          context.runtimeContextId !== previousRuntimeContextId
+            ? context.runtimeContextId
+            : undefined);
+        if (requestTurnId) {
+          headlessRequestTurnIds.add(requestTurnId);
+          latestHeadlessRequestTurnId = requestTurnId;
+        }
         if (deadlineExpired || isHeadlessDeadlineExpired(deadlineAtMs)) return { exitCode: 6 };
         if (messageResult.exitCode !== undefined) {
           return { exitCode: messageResult.exitCode };
@@ -2054,6 +2073,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
         if (!hasNewProviderFailure) return {};
         if (providerFailure?.requestTurnId) {
           headlessRequestTurnIds.add(providerFailure.requestTurnId);
+          latestHeadlessRequestTurnId = providerFailure.requestTurnId;
         }
         if (
           continuations >= maxContinuations ||
@@ -2145,9 +2165,16 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           config: benchConfig,
           ...(deadlineAtMs === undefined ? {} : { deadlineAtMs }),
         });
-        if (validation.ok) {
-        }
         lastValidation = validation;
+        if (context.sessionId) {
+          await recordHeadlessBenchValidationEvidence(
+            context,
+            context.sessionId,
+            benchConfig,
+            validation,
+            latestHeadlessRequestTurnId,
+          );
+        }
         if (validation.ok) {
           const hasRealValidation =
             validation.testRan ||
@@ -2654,6 +2681,154 @@ function isHeadlessDeadlineExpired(deadlineAtMs: number | undefined): boolean {
   return remainingMs !== undefined && remainingMs <= 0;
 }
 
+async function recordHeadlessBenchValidationEvidence(
+  context: TuiContext,
+  sessionId: string,
+  config: Awaited<ReturnType<typeof resolveHeadlessBenchConfig>>,
+  validation: HeadlessBenchValidationResult,
+  requestTurnId: string | undefined,
+): Promise<void> {
+  const report = createHeadlessBenchVerificationReport({
+    context,
+    sessionId,
+    config,
+    validation,
+    requestTurnId,
+  });
+  if (!report) return;
+  context.latestVerificationRunId = report.id;
+  context.latestVerificationRunIds ??= new Map();
+  context.latestVerificationRunIds.set(report.scope?.ownerKey ?? `session:${sessionId}`, report.id);
+  context.lastVerification = report;
+  await recordVerificationEvidence(context, sessionId, report);
+}
+
+function createHeadlessBenchVerificationReport(input: {
+  context: TuiContext;
+  sessionId: string;
+  config: Awaited<ReturnType<typeof resolveHeadlessBenchConfig>>;
+  validation: HeadlessBenchValidationResult;
+  requestTurnId: string | undefined;
+}): VerificationReport | undefined {
+  if (input.validation.ok && !input.validation.testRan) {
+    return undefined;
+  }
+  const officialResult = input.validation.ok
+    ? input.validation.officialResult
+    : input.validation.failure.officialResult;
+  const nowMs = Date.now();
+  const durationMs = officialResult?.durationMs ?? 0;
+  const startedAt = new Date(nowMs - durationMs).toISOString();
+  const endedAt = new Date(nowMs).toISOString();
+  const command = officialResult?.command ??
+    (!input.validation.ok ? input.validation.failure.command : undefined) ??
+    "headless artifact validation";
+  const status = headlessValidationReportStatus(input.validation, officialResult);
+  const summary = headlessValidationReportSummary(input.validation, officialResult);
+  const ownerKey = input.requestTurnId
+    ? `request:${input.sessionId}:${input.requestTurnId}`
+    : `session:${input.sessionId}`;
+  const scope = {
+    ownerKey,
+    cwd: input.context.projectPath,
+    changedFiles: [...input.context.tools.changedFiles],
+    ownerSessionId: input.sessionId,
+    ...(input.requestTurnId ? { requestTurnId: input.requestTurnId } : {}),
+    level: "headless-bench",
+  };
+  const commandStatus = status === "timeout" ? "timeout" : status === "pass" ? "pass" : "fail";
+  const facts = officialResult?.facts;
+  const failedTests = facts?.failedTests ?? [];
+  const unverified = input.validation.ok
+    ? []
+    : [
+        `headless validation failed: ${input.validation.failure.category}`,
+        ...failedTests.map((name) => `failed test: ${name}`),
+      ];
+  const risk = status === "pass"
+    ? []
+    : [
+        "Headless bench validation did not pass; do not claim verified completion.",
+        ...(facts?.controlledDeadlineReached ? ["Controlled deadline was reached."] : []),
+      ];
+  return {
+    id: randomUUID(),
+    status,
+    summary,
+    commands: [
+      {
+        kind: "test",
+        command,
+        reason: input.config.testCommand
+          ? "headless official test command"
+          : "headless artifact validation",
+        status: commandStatus,
+        ...(officialResult ? { exitCode: officialResult.exitCode } : {}),
+        durationMs,
+        ...(officialResult?.logPath ? { logPath: officialResult.logPath } : {}),
+        summary,
+      },
+    ],
+    unverified,
+    risk,
+    ...(officialResult?.logPath ? { logPath: officialResult.logPath } : {}),
+    startedAt,
+    endedAt,
+    durationMs,
+    nextAction: status === "pass"
+      ? "Official headless validation passed; continue to final delivery."
+      : "Use the headless validation facts to repair the task, then rerun the smallest official validation.",
+    scope,
+    evidenceData: {
+      headlessBenchValidation: {
+        ok: input.validation.ok,
+        testRan: input.validation.ok ? input.validation.testRan : false,
+        ...(input.validation.ok ? {} : { category: input.validation.failure.category }),
+        ...(officialResult
+          ? {
+              officialResult: {
+                command: officialResult.command,
+                exitCode: officialResult.exitCode,
+                outcome: officialResult.outcome,
+                logPath: officialResult.logPath,
+                durationMs: officialResult.durationMs,
+                ...(officialResult.facts ? { facts: officialResult.facts } : {}),
+              },
+            }
+          : {}),
+      },
+    },
+  };
+}
+
+function headlessValidationReportStatus(
+  validation: HeadlessBenchValidationResult,
+  officialResult: HeadlessOfficialValidationResult | undefined,
+): VerificationReport["status"] {
+  if (validation.ok) return "pass";
+  if (
+    validation.failure.category === "agent_timeout" ||
+    validation.failure.category === "test_timeout" ||
+    officialResult?.outcome === "timeout" ||
+    officialResult?.facts?.controlledDeadlineReached
+  ) {
+    return "timeout";
+  }
+  return "fail";
+}
+
+function headlessValidationReportSummary(
+  validation: HeadlessBenchValidationResult,
+  officialResult: HeadlessOfficialValidationResult | undefined,
+): string {
+  if (validation.ok) {
+    return `PASS：headless official validation passed (${officialResult?.command ?? "official validation"}).`;
+  }
+  const failedTests = officialResult?.facts?.failedTests?.slice(0, 5) ?? [];
+  const failedTestSummary = failedTests.length ? ` failedTests=${failedTests.join(", ")}` : "";
+  return `FAIL：headless validation ${validation.failure.category}; ${validation.failure.summary}${failedTestSummary}`;
+}
+
 async function recordHeadlessArtifactChecklist(
   context: TuiContext,
   sessionId: string,
@@ -2673,6 +2848,7 @@ async function recordHeadlessArtifactChecklist(
     [
       "headless_artifact_checklist",
       checklist.verificationRan ? "verification_ran" : "verification_not_run",
+      ...(checklist.externalVerifierDeferred ? ["external_verifier_deferred"] : []),
       checklist.changedFiles.length > 0 ? "file_written" : "no_file_changes",
     ],
   );

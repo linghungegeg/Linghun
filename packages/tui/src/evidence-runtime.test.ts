@@ -701,6 +701,83 @@ describe("evidence-runtime", () => {
     );
   });
 
+  it("preserves structured verification evidence data with scope", async () => {
+    const context = {
+      evidence: [],
+      projectPath: "/repo",
+      currentRequestTurnId: "turn-1",
+      sessionId: "session-1",
+      store: {
+        appendEvent: async () => undefined,
+      },
+      failureLearning: { records: [], maxRecords: 50 },
+    } as never;
+
+    await recordVerificationEvidence(context, "session-1", {
+      id: "vr-structured",
+      status: "fail",
+      summary: "official verifier failed",
+      commands: [
+        {
+          kind: "test",
+          command: "bash /tests/run-tests.sh",
+          reason: "headless official test command",
+          status: "fail",
+          exitCode: 1,
+          durationMs: 25,
+          summary: "failed",
+        },
+      ],
+      unverified: ["failed test: test_outputs.py::test_missing_artifact"],
+      risk: ["do not claim verified completion"],
+      startedAt: "2025-01-01T00:00:00.000Z",
+      endedAt: "2025-01-01T00:00:01.000Z",
+      durationMs: 1000,
+      nextAction: "repair",
+      scope: {
+        ownerKey: "request:session-1:turn-1",
+        cwd: "/repo",
+        changedFiles: ["solution.py"],
+        ownerSessionId: "session-1",
+        requestTurnId: "turn-1",
+        level: "headless-bench",
+      },
+      evidenceData: {
+        headlessBenchValidation: {
+          ok: false,
+          category: "missing_artifact",
+          officialResult: {
+            facts: {
+              reward: 0,
+              failedTests: ["test_outputs.py::test_missing_artifact"],
+            },
+          },
+        },
+      },
+    });
+
+    const evidence = (
+      context as { evidence: Array<{ data?: Record<string, unknown>; supportsClaims: string[] }> }
+    ).evidence[0];
+    expect(evidence.supportsClaims).toEqual(
+      expect.arrayContaining(["verification attempted", "verification:fail"]),
+    );
+    expect(evidence.supportsClaims).not.toContain("verification_passed");
+    expect(evidence.data).toMatchObject({
+      verificationScope: { requestTurnId: "turn-1", level: "headless-bench" },
+      headlessBenchValidation: {
+        ok: false,
+        category: "missing_artifact",
+        officialResult: {
+          facts: {
+            reward: 0,
+            failedTests: ["test_outputs.py::test_missing_artifact"],
+          },
+        },
+      },
+    });
+  });
+
   it("derives terminal workflow, agent, git, and action claim seeds but not failure seeds", () => {
     const workflow = createEvidenceRecord("command_output", "workflow completed", "workflow", [
       "workflow_execution",

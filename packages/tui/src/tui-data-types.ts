@@ -209,6 +209,7 @@ export type VerificationReport = {
   durationMs: number;
   nextAction: string;
   scope?: VerificationScope;
+  evidenceData?: Record<string, unknown>;
 };
 
 export type CacheHistoryConfig = {

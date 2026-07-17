@@ -2583,6 +2583,24 @@ describe("runHeadlessTask", () => {
 
     expect(exitCode).toBe(0);
     expect(stdout.text).toContain("deferring pass/fail to external verifier");
+    expect(
+      context.evidence.some(
+        (item) =>
+          item.supportsClaims.includes("verification_passed") ||
+          item.supportsClaims.includes("test_passed"),
+      ),
+    ).toBe(false);
+    const checklist = context.evidence.find((item) =>
+      item.supportsClaims.includes("headless_artifact_checklist"),
+    );
+    expect(checklist?.supportsClaims).toEqual(
+      expect.arrayContaining([
+        "headless_artifact_checklist",
+        "verification_not_run",
+        "external_verifier_deferred",
+      ]),
+    );
+    expect(checklist?.summary).toContain("externalVerifier=deferred");
   });
 
   it("runs workspace index before the first headless bench model request", async () => {
@@ -3184,6 +3202,73 @@ describe("runHeadlessTask", () => {
     expect(
       context.evidence.some((item) => item.supportsClaims.includes("headless_artifact_checklist")),
     ).toBe(true);
+  });
+
+  it("records official headless validation as scoped verification evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-official-evidence-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const script = join(project, "official-pass.js");
+    await mkdir(join(project, "verifier"), { recursive: true });
+    await writeFile(script, "process.exit(0);", "utf8");
+    await writeFile(join(project, "verifier", "reward.txt"), "1\n", "utf8");
+    await writeFile(
+      join(project, "verifier", "ctrf.json"),
+      JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0, skipped: 0 } } }),
+      "utf8",
+    );
+
+    const exitCode = await runHeadlessTask({
+      prompt: "test",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        context.runtimeContextId = "headless-official-turn";
+      },
+      bench: {
+        enabled: true,
+        testCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`,
+        requiredArtifacts: [],
+        preflight: false,
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    const evidence = context.evidence.find(
+      (item) => item.kind === "test_result" && item.supportsClaims.includes("test_passed"),
+    );
+    expect(evidence?.supportsClaims).toEqual(
+      expect.arrayContaining(["verification_passed", "test_passed"]),
+    );
+    expect(evidence?.ownerScope).toMatchObject({
+      ownerSessionId: session.id,
+      requestTurnId: "headless-official-turn",
+      cwd: project,
+    });
+    expect(evidence?.data).toMatchObject({
+      verificationScope: {
+        requestTurnId: "headless-official-turn",
+        level: "headless-bench",
+      },
+      headlessBenchValidation: {
+        ok: true,
+        testRan: true,
+        officialResult: {
+          exitCode: 0,
+          outcome: "completed",
+          facts: {
+            source: "project_local",
+            reward: 1,
+            ctrfSummary: { tests: 1, passed: 1, failed: 0, skipped: 0 },
+          },
+        },
+      },
+    });
   });
 
   it("final gate reports recentDiagnostics risk only for headless bench", async () => {

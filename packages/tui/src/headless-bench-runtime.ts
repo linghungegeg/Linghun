@@ -48,6 +48,7 @@ export type HeadlessBenchFailure = {
   exitCode?: number;
   logPath?: string;
   missingArtifacts?: string[];
+  officialResult?: HeadlessOfficialValidationResult;
 };
 
 export type HeadlessBenchConfig = {
@@ -63,14 +64,50 @@ export type HeadlessBenchConfig = {
 };
 
 export type HeadlessBenchValidationResult =
-  | { ok: true; testRan: boolean; summary: string; logPath?: string }
+  | {
+      ok: true;
+      testRan: boolean;
+      summary: string;
+      logPath?: string;
+      officialResult?: HeadlessOfficialValidationResult;
+      deferredToExternalVerifier?: boolean;
+    }
   | { ok: false; failure: HeadlessBenchFailure };
+
+export type HeadlessOfficialValidationFacts = {
+  source: "project_local";
+  reward?: number;
+  rewardPath?: string;
+  ctrfPath?: string;
+  ctrfSummary?: {
+    tests?: number;
+    passed?: number;
+    failed?: number;
+    skipped?: number;
+  };
+  failedTests?: string[];
+  resultPath?: string;
+  resultReward?: number;
+  metadataPath?: string;
+  cliExitCode?: number;
+  controlledDeadlineReached?: boolean;
+};
+
+export type HeadlessOfficialValidationResult = {
+  command: string;
+  exitCode: number;
+  outcome: "completed" | "timeout" | "cancelled";
+  logPath: string;
+  durationMs: number;
+  facts?: HeadlessOfficialValidationFacts;
+};
 
 export type HeadlessArtifactChecklist = {
   requiredArtifacts: Array<{ path: string; present: boolean }>;
   changedFiles: string[];
   workspaceChangeHash?: string;
   verificationRan: boolean;
+  externalVerifierDeferred?: boolean;
   lastVerificationExitCode?: number;
   gitAvailable: boolean | "unknown";
   summary: string;
@@ -231,12 +268,12 @@ export async function validateHeadlessBenchCompletion(input: {
     };
   }
   if (!input.config.testCommand) {
+    const deferredToExternalVerifier = input.config.externalVerifier === true;
     return {
       ok: true,
       testRan: false,
-      summary: input.config.requiredArtifacts.length
-        ? "required artifacts exist; no official test command detected"
-        : "no official test command or explicit artifact requirement detected",
+      summary: headlessNoLocalTestSummary(input.config, deferredToExternalVerifier),
+      ...(deferredToExternalVerifier ? { deferredToExternalVerifier: true } : {}),
     };
   }
   let result: Awaited<ReturnType<typeof runOfficialTestCommand>> | undefined;
@@ -286,19 +323,34 @@ export async function validateHeadlessBenchCompletion(input: {
   if (!result) {
     throw new Error("headless validation did not run");
   }
-  if (result.exitCode === 0 && result.outcome === "completed") {
+  const officialResult: HeadlessOfficialValidationResult = {
+    command: input.config.testCommand,
+    exitCode: result.exitCode,
+    outcome: result.outcome,
+    logPath: result.logPath,
+    durationMs: result.durationMs,
+    ...(result.facts ? { facts: result.facts } : {}),
+  };
+  const structuredFailure =
+    result.exitCode === 0 && result.outcome === "completed"
+      ? summarizeNonPassingOfficialFacts(result.facts)
+      : undefined;
+  if (result.exitCode === 0 && result.outcome === "completed" && !structuredFailure) {
     return {
       ok: true,
       testRan: true,
       summary: `official test passed: ${input.config.testCommand}`,
       logPath: result.logPath,
+      officialResult,
     };
   }
-  const category = classifyHeadlessFailure({
-    output: result.output,
-    outcome: result.outcome,
-    exitCode: result.exitCode,
-  });
+  const category = structuredFailure
+    ? "model_patch_failed"
+    : classifyHeadlessFailure({
+        output: result.output,
+        outcome: result.outcome,
+        exitCode: result.exitCode,
+      });
   return {
     ok: false,
     failure: {
@@ -306,9 +358,41 @@ export async function validateHeadlessBenchCompletion(input: {
       command: input.config.testCommand,
       exitCode: result.exitCode,
       logPath: result.logPath,
-      summary: summarizeFailureOutput(result.output, category),
+      summary: structuredFailure ?? summarizeFailureOutput(result.output, category),
+      officialResult,
     },
   };
+}
+
+function headlessNoLocalTestSummary(
+  config: HeadlessBenchConfig,
+  deferredToExternalVerifier: boolean,
+): string {
+  const localSummary = config.requiredArtifacts.length
+    ? "required artifacts exist; no local official test command detected"
+    : "no local official test command or explicit artifact requirement detected";
+  return deferredToExternalVerifier
+    ? `${localSummary}; pass/fail deferred to external verifier`
+    : localSummary;
+}
+
+function summarizeNonPassingOfficialFacts(
+  facts: HeadlessOfficialValidationFacts | undefined,
+): string | undefined {
+  if (!facts) return undefined;
+  const reasons = [
+    ...(facts.reward !== undefined && facts.reward < 1 ? [`reward=${facts.reward}`] : []),
+    ...(facts.resultReward !== undefined && facts.resultReward < 1
+      ? [`resultReward=${facts.resultReward}`]
+      : []),
+    ...((facts.ctrfSummary?.failed ?? 0) > 0 ? [`ctrfFailed=${facts.ctrfSummary?.failed}`] : []),
+    ...(facts.failedTests?.length
+      ? [`failedTests=${facts.failedTests.slice(0, 5).join(", ")}`]
+      : []),
+  ];
+  return reasons.length
+    ? `structured project-local verifier facts report non-pass (${reasons.join("; ")})`
+    : undefined;
 }
 
 function remainingDeadlineMs(deadlineAtMs: number | undefined): number | undefined {
@@ -332,6 +416,7 @@ export async function collectHeadlessArtifactChecklist(input: {
   const verificationRan =
     (input.lastValidation?.ok === true && input.lastValidation.testRan) ||
     Boolean(failedValidation?.command);
+  const externalVerifierDeferred = input.config.externalVerifier === true && !verificationRan;
   const lastVerificationExitCode = failedValidation?.exitCode;
   const workspaceChangeHash = await computeWorkspaceChangeHash(input.projectPath, input.changedFiles);
   const summary = [
@@ -340,6 +425,7 @@ export async function collectHeadlessArtifactChecklist(input: {
     `changedFiles=${input.changedFiles.length}`,
     `workspaceHash=${workspaceChangeHash.slice(0, 8)}`,
     `verificationRan=${verificationRan ? "yes" : "no"}`,
+    ...(externalVerifierDeferred ? ["externalVerifier=deferred"] : []),
     `lastVerificationExitCode=${lastVerificationExitCode ?? "none"}`,
     `git=${gitAvailable}`,
   ].join("; ");
@@ -348,6 +434,7 @@ export async function collectHeadlessArtifactChecklist(input: {
     changedFiles: [...input.changedFiles],
     workspaceChangeHash,
     verificationRan,
+    ...(externalVerifierDeferred ? { externalVerifierDeferred: true } : {}),
     ...(lastVerificationExitCode === undefined ? {} : { lastVerificationExitCode }),
     gitAvailable,
     summary,
@@ -715,12 +802,132 @@ async function runOfficialTestCommand(input: {
   output: string;
   outcome: "completed" | "timeout" | "cancelled";
   logPath: string;
+  durationMs: number;
+  facts?: HeadlessOfficialValidationFacts;
 }> {
+  const startedAt = Date.now();
   const result = await runShellCommand(input.command, input.projectPath, input.timeoutMs);
   const postTestLog = result.exitCode === 0 ? "" : await readPostTestFailureLog(input.projectPath);
   const output = postTestLog ? `${result.output}\n\n[post-test/tests.log]\n${postTestLog}` : result.output;
   const logPath = await writeHeadlessLog(input.projectPath, "official-test.log", output);
-  return { ...result, output, logPath };
+  const facts = await readHeadlessOfficialValidationFacts(input.projectPath);
+  return {
+    ...result,
+    output,
+    logPath,
+    durationMs: Date.now() - startedAt,
+    ...(facts ? { facts } : {}),
+  };
+}
+
+async function readHeadlessOfficialValidationFacts(
+  projectPath: string,
+): Promise<HeadlessOfficialValidationFacts | undefined> {
+  const facts: Partial<Omit<HeadlessOfficialValidationFacts, "source">> = {};
+  const rewardPath = join(projectPath, "verifier", "reward.txt");
+  const rewardText = await readOptionalText(rewardPath);
+  const reward = parseFiniteNumber(rewardText?.trim());
+  if (reward !== undefined) {
+    facts.reward = reward;
+    facts.rewardPath = rewardPath;
+  }
+
+  const ctrfPath = join(projectPath, "verifier", "ctrf.json");
+  const ctrf = await readJsonObject(ctrfPath);
+  const ctrfResults = readObject(ctrf?.results);
+  const ctrfSummary = readObject(ctrfResults?.summary);
+  if (ctrfSummary) {
+    facts.ctrfPath = ctrfPath;
+    facts.ctrfSummary = {
+      ...readOptionalNumberProperty(ctrfSummary, "tests"),
+      ...readOptionalNumberProperty(ctrfSummary, "passed"),
+      ...readOptionalNumberProperty(ctrfSummary, "failed"),
+      ...readOptionalNumberProperty(ctrfSummary, "skipped"),
+    };
+  }
+  const ctrfTests = Array.isArray(ctrfResults?.tests) ? ctrfResults.tests : [];
+  const failedTests = ctrfTests
+    .filter((item): item is Record<string, unknown> => readObject(item) !== undefined)
+    .filter((item) => item.status !== "passed")
+    .map((item) => (typeof item.name === "string" ? item.name : undefined))
+    .filter((item): item is string => Boolean(item));
+  if (failedTests.length > 0) {
+    facts.failedTests = failedTests.slice(0, 20);
+  }
+
+  const resultPath = join(projectPath, "result.json");
+  const result = await readJsonObject(resultPath);
+  const verifierResult = readObject(result?.verifier_result);
+  const rewards = readObject(verifierResult?.rewards);
+  const resultReward = parseFiniteNumber(rewards?.reward);
+  if (resultReward !== undefined) {
+    facts.resultPath = resultPath;
+    facts.resultReward = resultReward;
+  }
+  const agentResult = readObject(result?.agent_result);
+  const resultMetadata = readObject(agentResult?.metadata);
+  copyAgentMetadataFacts(facts, resultMetadata, resultPath);
+
+  const metadataPath = join(projectPath, "agent", "linghun-metadata.json");
+  const metadata = await readJsonObject(metadataPath);
+  copyAgentMetadataFacts(facts, metadata, metadataPath);
+
+  if (Object.keys(facts).length === 0) return undefined;
+  return { ...facts, source: "project_local" };
+}
+
+async function readOptionalText(path: string): Promise<string | undefined> {
+  try {
+    return await readFile(path, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+async function readJsonObject(path: string): Promise<Record<string, unknown> | undefined> {
+  const text = await readOptionalText(path);
+  if (!text) return undefined;
+  try {
+    return readObject(JSON.parse(text));
+  } catch {
+    return undefined;
+  }
+}
+
+function readObject(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function parseFiniteNumber(value: unknown): number | undefined {
+  const numberValue = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(numberValue) ? numberValue : undefined;
+}
+
+function readOptionalNumberProperty(
+  object: Record<string, unknown>,
+  key: string,
+): Record<string, number> {
+  const value = parseFiniteNumber(object[key]);
+  return value === undefined ? {} : { [key]: value };
+}
+
+function copyAgentMetadataFacts(
+  facts: Partial<Omit<HeadlessOfficialValidationFacts, "source">>,
+  metadata: Record<string, unknown> | undefined,
+  metadataPath: string,
+): void {
+  if (!metadata) return;
+  const cliExitCode = parseFiniteNumber(metadata.cli_exit_code);
+  if (cliExitCode !== undefined) {
+    facts.cliExitCode = cliExitCode;
+    facts.metadataPath = metadataPath;
+  }
+  if (typeof metadata.controlled_deadline_reached === "boolean") {
+    facts.controlledDeadlineReached = metadata.controlled_deadline_reached;
+    facts.metadataPath = metadataPath;
+  }
 }
 
 function runShellCommand(
@@ -930,3 +1137,7 @@ function shellQuote(value: string): string {
 function cmdQuote(value: string): string {
   return /^[A-Za-z0-9_.+-]+$/u.test(value) ? value : `"${value.replace(/"/gu, '\\"')}"`;
 }
+
+export const __testHeadlessRuntime = {
+  readHeadlessOfficialValidationFacts,
+};
