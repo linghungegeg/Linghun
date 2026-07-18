@@ -4213,6 +4213,121 @@ describe("runHeadlessTask", () => {
     expect(stderr.text).toContain("closing without starting validation");
   });
 
+  it("hands off in-flight bench provider work to validation before the deadline", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-deadline-validation-handoff-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const sentinel = join(project, "validation-started.txt");
+    const stdout = new MemoryOutput();
+    const stderr = new MemoryOutput();
+    let providerAborted = false;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "validate after provider handoff",
+      projectPath: project,
+      stdout,
+      stderr,
+      deadlineAtMs: Date.now() + 15_080,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async (_text, _context, _gateway, _output, controller) => {
+        if (!controller) throw new Error("missing request controller");
+        await new Promise<void>((resolveAbort) =>
+          controller.signal.addEventListener(
+            "abort",
+            () => {
+              providerAborted = true;
+              resolveAbort();
+            },
+            { once: true },
+          ),
+        );
+      },
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 0,
+        testCommand: `${JSON.stringify(process.execPath)} -e "require('node:fs').writeFileSync(process.argv[1], 'started')" ${JSON.stringify(sentinel)}`,
+      },
+    });
+
+    expect(providerAborted).toBe(true);
+    await expect(readFile(sentinel, "utf8")).resolves.toBe("started");
+    expect(exitCode).toBe(0);
+    expect(stdout.text).toContain("provider work stopped for validation/external verifier handoff");
+    expect(stderr.text).not.toContain("closing without starting validation");
+  });
+
+  it("hands off in-flight repair provider work to validation before the deadline", async () => {
+    const startMs = Date.now();
+    let nowMs = startMs;
+    vi.spyOn(Date, "now").mockImplementation(() => nowMs);
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-deadline-repair-handoff-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const state = join(project, "validation-count.txt");
+    const sentinel = join(project, "validation-started.txt");
+    const stdout = new MemoryOutput();
+    const stderr = new MemoryOutput();
+    const validationScript = [
+      "const fs = require('node:fs');",
+      "const state = process.argv[1];",
+      "const sentinel = process.argv[2];",
+      "const count = fs.existsSync(state) ? Number(fs.readFileSync(state, 'utf8')) : 0;",
+      "fs.writeFileSync(state, String(count + 1));",
+      "if (count === 0) process.exit(1);",
+      "fs.writeFileSync(sentinel, 'started');",
+    ].join("");
+    let sends = 0;
+    let repairProviderAborted = false;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "repair then validate after provider handoff",
+      projectPath: project,
+      stdout,
+      stderr,
+      deadlineAtMs: startMs + 15_580,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async (_text, _context, _gateway, _output, controller) => {
+        sends += 1;
+        if (sends === 1) {
+          nowMs = startMs + 400;
+          return;
+        }
+        if (!controller) throw new Error("missing repair request controller");
+        await new Promise<void>((resolveAbort) =>
+          controller.signal.addEventListener(
+            "abort",
+            () => {
+              repairProviderAborted = true;
+              nowMs = startMs + 650;
+              resolveAbort();
+            },
+            { once: true },
+          ),
+        );
+      },
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 1,
+        testCommand: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(validationScript)} ${JSON.stringify(state)} ${JSON.stringify(sentinel)}`,
+      },
+    });
+
+    expect(sends).toBe(2);
+    expect(repairProviderAborted).toBe(true);
+    await expect(readFile(sentinel, "utf8")).resolves.toBe("started");
+    expect(exitCode).toBe(0);
+    expect(stdout.text).toContain("repair provider work stopped for validation/external verifier handoff");
+    expect(stderr.text).not.toContain("closing without starting repair provider work");
+  });
+
   it("starts official validation inside the legacy headless deadline closure window", async () => {
     const startMs = Date.now();
     let nowMs = startMs;

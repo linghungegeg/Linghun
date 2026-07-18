@@ -846,6 +846,9 @@ const HEADLESS_BENCH_VALIDATION_CLEANUP_SAFETY_WINDOW_MS = 5_000;
 const HEADLESS_BENCH_VALIDATION_START_WINDOW_MS =
   HEADLESS_BENCH_VALIDATION_SHORT_RUN_WINDOW_MS +
   HEADLESS_BENCH_VALIDATION_CLEANUP_SAFETY_WINDOW_MS;
+const HEADLESS_BENCH_PROVIDER_HANDOFF_WINDOW_MS =
+  HEADLESS_BENCH_VALIDATION_START_WINDOW_MS +
+  HEADLESS_BENCH_VALIDATION_CLEANUP_SAFETY_WINDOW_MS;
 
 type HeadlessBenchIndexRunner = (input: {
   context: TuiContext;
@@ -1970,6 +1973,15 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
         if (deadlinePhase === "expired") return { exitCode: 6 };
         if (deadlinePhase === "closure") return { deadlineClosure: true };
         const remainingMs = remainingHeadlessDeadlineMs(deadlineAtMs);
+        const requestDeadlineMs =
+          remainingMs === undefined
+            ? undefined
+            : benchConfig.enabled
+              ? remainingMs - HEADLESS_BENCH_PROVIDER_HANDOFF_WINDOW_MS
+              : remainingMs;
+        if (requestDeadlineMs !== undefined && requestDeadlineMs <= 0) {
+          return { deadlineClosure: true };
+        }
         requestAttempts += 1;
         emitHeadlessPhase(output, "waiting_first_delta", `attempt=${requestAttempts}`, {
           suppress: suppressGenericHeadlessPhases,
@@ -1995,22 +2007,22 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           suppress: suppressGenericHeadlessPhases,
         });
         const requestController = new AbortController();
-        let deadlineExpired = false;
+        let requestDeadlineReached = false;
         let resolveDeadline: (() => void) | undefined;
         const deadlineReached = new Promise<void>((resolveDeadlinePromise) => {
           resolveDeadline = resolveDeadlinePromise;
         });
         const expireDeadline = () => {
-          if (deadlineExpired) return;
-          deadlineExpired = true;
+          if (requestDeadlineReached) return;
+          requestDeadlineReached = true;
           requestController.abort("headless_deadline");
           context.activeAbortController?.abort("headless_deadline");
           resolveDeadline?.();
         };
         const deadlineTimer =
-          remainingMs === undefined
+          requestDeadlineMs === undefined
             ? undefined
-            : setTimeout(expireDeadline, Math.min(remainingMs, 2_147_483_647));
+            : setTimeout(expireDeadline, Math.min(requestDeadlineMs, 2_147_483_647));
         context.activeAbortController = requestController;
         context.tools.abortSignal = requestController.signal;
         const messagePromise = sendHeadlessMessage(
@@ -2095,6 +2107,9 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
             messageOperation.catch(() => undefined),
             sleep(HEADLESS_CLEANUP_SETTLE_MS),
           ]);
+          if (benchConfig.enabled && !isHeadlessDeadlineExpired(deadlineAtMs)) {
+            return { deadlineClosure: true, deadlineHandoff: true };
+          }
           return { exitCode: 6 };
         }
         if (messageRace.kind === "runtime_abort") {
@@ -2117,7 +2132,13 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           headlessRequestTurnIds.add(requestTurnId);
           latestHeadlessRequestTurnId = requestTurnId;
         }
-        if (deadlineExpired || isHeadlessDeadlineExpired(deadlineAtMs)) return { exitCode: 6 };
+        if (requestDeadlineReached) {
+          if (benchConfig.enabled && !isHeadlessDeadlineExpired(deadlineAtMs)) {
+            return { deadlineClosure: true, deadlineHandoff: true };
+          }
+          return { exitCode: 6 };
+        }
+        if (isHeadlessDeadlineExpired(deadlineAtMs)) return { exitCode: 6 };
         if (messageResult.exitCode !== undefined) {
           return { exitCode: messageResult.exitCode };
         }
@@ -2185,9 +2206,16 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
       return status.exitCode;
     }
     if (status.deadlineClosure) {
-      return await closeHeadlessBenchForDeadline(
-        `[headless] deadline approaching (${formatHeadlessRemainingTime(deadlineAtMs)}); closing without starting provider work.`,
-      );
+      if (benchConfig.enabled && status.deadlineHandoff) {
+        writeLine(
+          output,
+          `[headless] deadline approaching (${formatHeadlessRemainingTime(deadlineAtMs)}); provider work stopped for validation/external verifier handoff.`,
+        );
+      } else {
+        return await closeHeadlessBenchForDeadline(
+          `[headless] deadline approaching (${formatHeadlessRemainingTime(deadlineAtMs)}); closing without starting provider work.`,
+        );
+      }
     }
     if (status.providerFailure) {
       const providerFailureIsResumable = isResumableHeadlessProviderFailure(
@@ -2363,6 +2391,13 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           return repairStatus.exitCode;
         }
         if (repairStatus.deadlineClosure) {
+          if (benchConfig.enabled && repairStatus.deadlineHandoff) {
+            writeLine(
+              output,
+              `[headless] deadline approaching (${formatHeadlessRemainingTime(deadlineAtMs)}); repair provider work stopped for validation/external verifier handoff.`,
+            );
+            continue;
+          }
           return await closeHeadlessBenchForDeadline(
             `[headless] deadline approaching (${formatHeadlessRemainingTime(deadlineAtMs)}); closing without starting repair provider work.`,
           );
@@ -2438,6 +2473,7 @@ type HeadlessTurnStatus = {
   exitCode?: number;
   providerFailure?: boolean;
   deadlineClosure?: boolean;
+  deadlineHandoff?: boolean;
 };
 
 type HeadlessApprovalPumpResult = {
