@@ -2367,7 +2367,7 @@ function evaluateEngineeringFinalBoundary(
       message: signal.finalBoundaryHint ?? "missing artifact is not verified",
     };
   }
-  if (signal.failureCategory === "test_timeout") {
+  if (signal.failureCategory === "test_timeout" || signal.failureCategory === "verifier_timeout") {
     return {
       status: "needs_disclaimer",
       unsupportedKinds: ["engineering_test_timeout"],

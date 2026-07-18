@@ -4434,6 +4434,7 @@ async function runBackgroundBash(opts: RunBackgroundBashOptions): Promise<void> 
 
     const onAbort = () => {
       if (settled) return;
+      if (abortSignal?.reason === "headless_finish") return;
       outcome = "cancelled";
       void appendFile(fullOutputPath, "\n[cancelled] 工具调用已取消，正在终止子进程。\n", "utf8");
       void requestStop(false);

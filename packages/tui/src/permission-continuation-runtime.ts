@@ -175,16 +175,204 @@ export function getHardDenyReason(
     if ((typeof command !== "string" || !command.trim()) && !hasExplicitBashNonCommandMode(input)) {
       return "Bash 命令不能为空。";
     }
-    if (
-      typeof command === "string" &&
-      /(rm\s+-rf|curl\s+[^|]+\|\s*(sh|bash)|wget\s+[^|]+\|\s*(sh|bash)|mkfs|shutdown|reboot)/i.test(
-        command,
-      )
-    ) {
+    if (typeof command === "string" && hasHighRiskBashCommand(command)) {
       return "安全保护：拒绝高风险删除、远程脚本执行或系统级命令。";
     }
   }
   return null;
+}
+
+type BashCommandToken = {
+  value: string;
+  operator: boolean;
+};
+
+function hasHighRiskBashCommand(command: string): boolean {
+  const tokens = tokenizeBashCommand(command);
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!token || token.operator || !isCommandPosition(tokens, index)) continue;
+    const name = commandTokenName(token.value);
+    if (!name) continue;
+    if (isCommandWrapper(name)) continue;
+    if (name === "rm" && rmHasRecursiveForce(tokens, index + 1)) return true;
+    if (name === "shutdown" || name === "reboot" || name === "mkfs" || name.startsWith("mkfs.")) {
+      return true;
+    }
+    if (name === "timeout" && timeoutWrappedCommandIsHighRisk(tokens, index + 1)) {
+      return true;
+    }
+    if ((name === "sh" || name === "bash") && shellExecStringIsHighRisk(tokens, index + 1)) {
+      return true;
+    }
+    if ((name === "curl" || name === "wget") && pipesToShell(tokens, index + 1)) return true;
+  }
+  return false;
+}
+
+function tokenizeBashCommand(command: string): BashCommandToken[] {
+  const tokens: BashCommandToken[] = [];
+  let current = "";
+  let quote: "'" | '"' | undefined;
+  const pushCurrent = () => {
+    if (!current) return;
+    tokens.push({ value: current, operator: false });
+    current = "";
+  };
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index] ?? "";
+    const next = command[index + 1] ?? "";
+    if (quote) {
+      if (char === quote) {
+        quote = undefined;
+      } else if (char === "\\" && quote === "\"" && next) {
+        current += next;
+        index += 1;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+    if (char === "'" || char === "\"") {
+      quote = char;
+      continue;
+    }
+    if (char === "\\" && next) {
+      current += next;
+      index += 1;
+      continue;
+    }
+    if (/\s/u.test(char)) {
+      pushCurrent();
+      continue;
+    }
+    if (char === "&" && next === "&") {
+      pushCurrent();
+      tokens.push({ value: "&&", operator: true });
+      index += 1;
+      continue;
+    }
+    if (char === "|" && next === "|") {
+      pushCurrent();
+      tokens.push({ value: "||", operator: true });
+      index += 1;
+      continue;
+    }
+    if (char === "|" || char === ";") {
+      pushCurrent();
+      tokens.push({ value: char, operator: true });
+      continue;
+    }
+    current += char;
+  }
+  pushCurrent();
+  return tokens;
+}
+
+function isCommandPosition(tokens: BashCommandToken[], index: number): boolean {
+  const token = tokens[index];
+  if (!token || token.operator || isEnvAssignment(token.value) || token.value.startsWith("-")) {
+    return false;
+  }
+  let previousWord: string | undefined;
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const previous = tokens[cursor];
+    if (!previous) break;
+    if (previous.operator) {
+      return previous.value === ";" || previous.value === "&&" || previous.value === "||" || previous.value === "|";
+    }
+    const previousName = commandTokenName(previous.value);
+    if (isEnvAssignment(previous.value) || previous.value.startsWith("-")) continue;
+    previousWord = previousName;
+    break;
+  }
+  return previousWord === undefined || isCommandWrapper(previousWord);
+}
+
+function isEnvAssignment(value: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*=/u.test(value);
+}
+
+function isCommandWrapper(name: string): boolean {
+  return name === "sudo" || name === "env" || name === "command" || name === "nohup";
+}
+
+function commandTokenName(value: string): string {
+  const normalized = value.replaceAll("\\", "/");
+  return (normalized.split("/").pop() ?? normalized).toLowerCase();
+}
+
+function rmHasRecursiveForce(tokens: BashCommandToken[], start: number): boolean {
+  let recursive = false;
+  let force = false;
+  for (let index = start; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!token || token.operator) break;
+    const value = token.value;
+    if (value === "--") continue;
+    if (value === "--recursive") recursive = true;
+    if (value === "--force") force = true;
+    if (/^-[A-Za-z]+$/u.test(value)) {
+      recursive ||= /[rR]/u.test(value);
+      force ||= /f/u.test(value);
+    }
+  }
+  return recursive && force;
+}
+
+function shellExecStringIsHighRisk(tokens: BashCommandToken[], start: number): boolean {
+  for (let index = start; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!token || token.operator) return false;
+    if (token.value !== "-c") continue;
+    const script = tokens[index + 1];
+    return Boolean(script && !script.operator && hasHighRiskBashCommand(script.value));
+  }
+  return false;
+}
+
+function timeoutWrappedCommandIsHighRisk(tokens: BashCommandToken[], start: number): boolean {
+  const commandIndex = firstTimeoutWrappedCommandIndex(tokens, start);
+  if (commandIndex === undefined) return false;
+  return hasHighRiskBashCommand(tokens.slice(commandIndex).map((token) => token.value).join(" "));
+}
+
+function firstTimeoutWrappedCommandIndex(
+  tokens: BashCommandToken[],
+  start: number,
+): number | undefined {
+  for (let index = start; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!token || token.operator) return undefined;
+    if (token.value.startsWith("-")) continue;
+    if (/^\d+(?:\.\d+)?[smhd]?$/iu.test(token.value)) continue;
+    return index;
+  }
+  return undefined;
+}
+
+function pipesToShell(tokens: BashCommandToken[], start: number): boolean {
+  for (let index = start; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!token) break;
+    if (token.operator && token.value !== "|") break;
+    if (!token.operator) continue;
+    const nextCommand = nextCommandName(tokens, index + 1);
+    return nextCommand === "sh" || nextCommand === "bash";
+  }
+  return false;
+}
+
+function nextCommandName(tokens: BashCommandToken[], start: number): string | undefined {
+  for (let index = start; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!token || token.operator) return undefined;
+    if (isEnvAssignment(token.value) || token.value.startsWith("-")) continue;
+    const name = commandTokenName(token.value);
+    if (isCommandWrapper(name)) continue;
+    return name;
+  }
+  return undefined;
 }
 
 function hasExplicitBashNonCommandMode(input: unknown): boolean {

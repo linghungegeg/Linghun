@@ -2184,6 +2184,15 @@ describe("runHeadlessTask", () => {
           testTimeoutMs: 60_000,
           maxRepairAttempts: 1,
           requiredArtifacts: ["/app/re.json"],
+          artifactContracts: [
+            {
+              path: "/app/re.json",
+              source: "prompt",
+              kind: "json",
+              checks: ["exists", "non_empty", "valid_json"],
+            },
+          ],
+          serviceContracts: [{ host: "127.0.0.1", port: 8080, source: "prompt" }],
           preflight: true,
           environmentSetupRetries: 1,
           externalVerifier: true,
@@ -2194,7 +2203,9 @@ describe("runHeadlessTask", () => {
     expect(prompt).toContain("Continuation attempt: 1/2");
     expect(prompt).toContain("Remaining deadline: 42s remaining");
     expect(prompt).toContain("official test command is bash /tests/run-tests.sh");
-    expect(prompt).toContain("required artifacts are /app/re.json");
+    expect(prompt).toContain("required artifact contract is /app/re.json kind=json");
+    expect(prompt).toContain("checks=exists+non_empty+valid_json");
+    expect(prompt).toContain("service endpoints are 127.0.0.1:8080");
     expect(prompt).toContain("External verifier is authoritative");
     expect(prompt).toContain("Do not assume an interrupted tool call succeeded");
   });
@@ -2772,7 +2783,7 @@ describe("runHeadlessTask", () => {
     expect(gate.status).toBe("needs_disclaimer");
   });
 
-  it("allows artifact-only external verifier bench completion without test pass evidence", async () => {
+  it("defers artifact-only external verifier bench completion without local test pass evidence", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-external-artifact-"));
     await writeFile(join(project, "answer.txt"), "artifact", "utf8");
     await mkdir(join(project, "verifier"), { recursive: true });
@@ -2806,8 +2817,8 @@ describe("runHeadlessTask", () => {
     });
 
     expect(exitCode).toBe(0);
-    expect(stdout.text).toContain("bench validation passed");
-    expect(stdout.text).not.toContain("not closed locally");
+    expect(stdout.text).toContain("pass/fail deferred to external verifier, not closed locally");
+    expect(stdout.text).not.toContain("bench validation passed");
     expect(
       context.evidence.some(
         (item) =>
@@ -2834,7 +2845,7 @@ describe("runHeadlessTask", () => {
     ).toBe("needs_disclaimer");
   });
 
-  it("allows artifact-only external verifier bench completion without project-local facts", async () => {
+  it("defers artifact-only external verifier bench completion without project-local facts", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-external-artifact-clean-"));
     await writeFile(join(project, "answer.txt"), "artifact", "utf8");
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -2861,7 +2872,8 @@ describe("runHeadlessTask", () => {
     });
 
     expect(exitCode).toBe(0);
-    expect(stdout.text).toContain("bench validation passed");
+    expect(stdout.text).toContain("pass/fail deferred to external verifier, not closed locally");
+    expect(stdout.text).not.toContain("bench validation passed");
     expect(
       context.evidence.some(
         (item) =>
@@ -2995,7 +3007,7 @@ describe("runHeadlessTask", () => {
     expect(exitCode).toBe(1);
   });
 
-  it("repairs from project-local verifier facts when no official test command is detected", async () => {
+  it("does not close over project-local verifier failure facts without refreshed official pass facts", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-facts-repair-"));
     await mkdir(join(project, "verifier"), { recursive: true });
     await writeFile(join(project, "verifier", "reward.txt"), "0\n", "utf8");
@@ -3045,7 +3057,7 @@ describe("runHeadlessTask", () => {
       },
     });
 
-    expect(exitCode).toBe(0);
+    expect(exitCode).toBe(5);
     expect(prompts).toHaveLength(2);
     expect(prompts[1]).toContain("model_patch_failed");
     expect(prompts[1]).toContain("test_outputs.py::test_hidden_contract");
@@ -3419,6 +3431,45 @@ describe("runHeadlessTask", () => {
     expect(stopResults).toEqual(
       expect.arrayContaining([expect.objectContaining({ force: true, attempted: 1 })]),
     );
+  }, 30_000);
+
+  it("stops without repair when external verifier facts report verifier timeout", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-verifier-timeout-exit-"));
+    await mkdir(join(project, "verifier"), { recursive: true });
+    await writeFile(
+      join(project, "verifier", "exception.txt"),
+      "VerifierTimeoutError: Verifier execution timed out after 360s\n",
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stderr = new MemoryOutput();
+    let attempts = 0;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "finish task and defer to verifier",
+      projectPath: project,
+      stdout: new MemoryOutput(),
+      stderr,
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 2,
+        externalVerifier: true,
+      },
+      __testSendMessage: async () => {
+        attempts += 1;
+      },
+    });
+
+    expect(exitCode).toBe(6);
+    expect(attempts).toBe(1);
+    expect(stderr.text).toContain("verifier_timeout");
+    expect(stderr.text).toContain("external verifier timed out");
   }, 30_000);
 
   it("keeps the successful attempt retained service alive after final cleanup", async () => {
@@ -4515,9 +4566,35 @@ describe("runHeadlessTask", () => {
     expect(exitCode).toBe(0);
     expect(prompts[1]).toContain("missing_artifact");
     expect(prompts[1]).toContain("Missing artifacts: out.txt");
+    expect(prompts[1]).toContain("Artifact contract: out.txt kind=text checks=exists+non_empty");
+    expect(prompts[1]).toContain("Artifact validation issues: out.txt exists");
     expect(prompts[1]).toContain("Artifact/install checklist facts");
     expect(prompts[1]).toContain("missingArtifacts=out.txt");
     expect(prompts[1]).toContain("lastValidation=missing_artifact");
+    const failureEvidence = context.evidence.find(
+      (item) =>
+        item.kind === "test_result" &&
+        "headlessBenchValidation" in ((item.data ?? {}) as Record<string, unknown>),
+    );
+    expect(failureEvidence?.data).toMatchObject({
+      headlessBenchValidation: {
+        category: "missing_artifact",
+        artifactContracts: [
+          {
+            path: "out.txt",
+            kind: "text",
+            checks: ["exists", "non_empty"],
+          },
+        ],
+        artifactIssues: [
+          {
+            path: "out.txt",
+            kind: "text",
+            check: "exists",
+          },
+        ],
+      },
+    });
   });
 
   it("bench repair prompts include current-owner tool failure facts", async () => {
@@ -4787,7 +4864,7 @@ describe("runHeadlessTask", () => {
 
     expect(profile).toBe("binary_or_artifact");
     expect(benchPrompt).toContain("file/strings/hexdump/ldd/run mode");
-    expect(benchPrompt).toContain("Verify they exist and are readable before final");
+    expect(benchPrompt).toContain("/app/out.txt kind=text checks=exists+non_empty");
     expect(normalPrompt).toBe("hello");
   });
 
@@ -5042,8 +5119,8 @@ describe("headless runtime failure classification", () => {
     });
 
     expect(checklist.requiredArtifacts).toEqual([
-      { path: "answer.txt", present: true },
-      { path: "missing.txt", present: false },
+      { path: "answer.txt", present: true, kind: "text" },
+      { path: "missing.txt", present: false, kind: "text" },
     ]);
     expect(checklist.summary).toContain("changedFiles=1");
     expect(["unknown", true, false]).toContain(checklist.gitAvailable);

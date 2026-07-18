@@ -70,6 +70,77 @@ describe("headless-bench-runtime", () => {
     expect(disabledPrompt).toBe("Fix the project.");
   });
 
+  it("promotes explicit output paths into structured artifact contracts", async () => {
+    const { resolveHeadlessBenchConfig } = await import("./headless-bench-runtime.js");
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-artifact-contract-"));
+
+    const config = await resolveHeadlessBenchConfig({
+      projectPath: project,
+      env: {},
+      prompt: [
+        "Terminal-Bench task container.",
+        'Fit the peaks and write the JSON result to "/app/results.json".',
+        "The file should have the following format: { \"G\": { \"x0\": 1 } }",
+      ].join("\n"),
+    });
+
+    expect(config.requiredArtifacts).toEqual(["/app/results.json"]);
+    expect(config.artifactContracts).toMatchObject([
+      {
+        path: "/app/results.json",
+        kind: "json",
+        checks: expect.arrayContaining([
+          "exists",
+          "non_empty",
+          "valid_json",
+          "json_shape_if_format_hint",
+        ]),
+      },
+    ]);
+    expect(config.maxRepairAttempts).toBe(2);
+  });
+
+  it("keeps shell deliverables as artifact contracts", async () => {
+    const { resolveHeadlessBenchConfig } = await import("./headless-bench-runtime.js");
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-shell-contract-"));
+
+    const config = await resolveHeadlessBenchConfig({
+      projectPath: project,
+      env: {},
+      prompt: "Create the startup script at /app/run.sh.",
+    });
+
+    expect(config.requiredArtifacts).toEqual(["/app/run.sh"]);
+    expect(config.artifactContracts).toMatchObject([
+      {
+        path: "/app/run.sh",
+        kind: "shell",
+        checks: expect.arrayContaining(["exists", "non_empty", "shell_syntax_if_available"]),
+      },
+    ]);
+  });
+
+  it("detects service contracts only from runtime service context", async () => {
+    const { resolveHeadlessBenchConfig } = await import("./headless-bench-runtime.js");
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-service-contract-"));
+
+    const serviceConfig = await resolveHeadlessBenchConfig({
+      projectPath: project,
+      env: {},
+      prompt: "Start an HTTP server listening on port 8080.",
+    });
+    const dataConfig = await resolveHeadlessBenchConfig({
+      projectPath: project,
+      env: {},
+      prompt: "Use port 9000 as an input value in the generated report.",
+    });
+
+    expect(serviceConfig.serviceContracts).toMatchObject([
+      { host: "127.0.0.1", port: 8080, source: "prompt" },
+    ]);
+    expect(dataConfig.serviceContracts).toEqual([]);
+  });
+
   it("includes remaining deadline and verifier facts in repair prompts", async () => {
     const { createHeadlessBenchRepairPrompt } = await import("./headless-bench-runtime.js");
 
@@ -269,6 +340,99 @@ describe("headless-bench-runtime", () => {
     }
   });
 
+  it("does not defer external verifier when an artifact contract is malformed", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-external-bad-json-"));
+    await writeFile(join(project, "results.json"), "{bad json", "utf8");
+    const { validateHeadlessBenchCompletion } = await import("./headless-bench-runtime.js");
+
+    const result = await validateHeadlessBenchCompletion({
+      projectPath: project,
+      config: {
+        enabled: true,
+        profile: "binary_or_artifact",
+        testTimeoutMs: 5_000,
+        maxRepairAttempts: 1,
+        requiredArtifacts: ["results.json"],
+        preflight: false,
+        environmentSetupRetries: 0,
+        externalVerifier: true,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.failure.category).toBe("missing_artifact");
+      expect(result.failure.summary).toContain("valid_json");
+      expect(result.failure.artifactIssues?.[0]).toMatchObject({
+        path: "results.json",
+        kind: "json",
+        check: "valid_json",
+      });
+    }
+  });
+
+  it("does not defer external verifier when an explicit JSON shape hint is not satisfied", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-external-json-shape-"));
+    await writeFile(join(project, "results.json"), JSON.stringify({ other: 1 }), "utf8");
+    const { resolveHeadlessBenchConfig, validateHeadlessBenchCompletion } = await import(
+      "./headless-bench-runtime.js"
+    );
+    const config = await resolveHeadlessBenchConfig({
+      projectPath: project,
+      env: {},
+      prompt: [
+        "Write the output to a file called results.json.",
+        "The file should have this JSON format: { \"answer\": 1 }",
+      ].join("\n"),
+      options: {
+        externalVerifier: true,
+        preflight: false,
+      },
+    });
+
+    const result = await validateHeadlessBenchCompletion({
+      projectPath: project,
+      config,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.failure.category).toBe("missing_artifact");
+      expect(result.failure.summary).toContain("json_shape_if_format_hint");
+      expect(result.failure.artifactIssues?.[0]).toMatchObject({
+        path: "results.json",
+        kind: "json",
+        check: "json_shape_if_format_hint",
+      });
+    }
+  });
+
+  it("does not defer external verifier when an explicit service contract is unreachable", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-external-service-"));
+    const { validateHeadlessBenchCompletion } = await import("./headless-bench-runtime.js");
+
+    const result = await validateHeadlessBenchCompletion({
+      projectPath: project,
+      config: {
+        enabled: true,
+        profile: "qemu_or_service",
+        testTimeoutMs: 5_000,
+        maxRepairAttempts: 1,
+        requiredArtifacts: [],
+        serviceContracts: [{ host: "127.0.0.1", port: 9, source: "prompt" }],
+        preflight: false,
+        environmentSetupRetries: 0,
+        externalVerifier: true,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.failure.category).toBe("model_patch_failed");
+      expect(result.failure.summary).toContain("127.0.0.1:9");
+    }
+  });
+
   it("fails no-local-test validation when project-local verifier facts report failure", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-external-facts-fail-"));
     await mkdir(join(project, "verifier"), { recursive: true });
@@ -321,7 +485,7 @@ describe("headless-bench-runtime", () => {
     }
   });
 
-  it("defers no-local-test validation when request-owned evidence supersedes stale failure facts", async () => {
+  it("fails no-local-test validation when verifier failure facts exist despite request-owned evidence", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-external-facts-owned-evidence-"));
     await mkdir(join(project, "verifier"), { recursive: true });
     await writeFile(join(project, "verifier", "reward.txt"), "0\n", "utf8");
@@ -352,12 +516,56 @@ describe("headless-bench-runtime", () => {
       },
     });
 
-    expect(result).toMatchObject({
-      ok: true,
-      testRan: false,
-      deferredToExternalVerifier: true,
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.failure.category).toBe("model_patch_failed");
+      expect(result.failure.summary).toContain("reward=0");
+      expect(result.failure.summary).toContain("test_outputs.py::test_stale_failure");
+    }
+  });
+
+  it("classifies explicit external verifier timeout facts separately from model failure", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-verifier-timeout-"));
+    await mkdir(join(project, "verifier"), { recursive: true });
+    await writeFile(
+      join(project, "verifier", "exception.txt"),
+      "VerifierTimeoutError: Verifier execution timed out after 360s\n",
+      "utf8",
+    );
+    const { classifyHeadlessFailure, validateHeadlessBenchCompletion } = await import(
+      "./headless-bench-runtime.js"
+    );
+
+    const result = await validateHeadlessBenchCompletion({
+      projectPath: project,
+      config: {
+        enabled: true,
+        profile: "generic",
+        testTimeoutMs: 5_000,
+        maxRepairAttempts: 1,
+        requiredArtifacts: [],
+        preflight: false,
+        environmentSetupRetries: 0,
+        externalVerifier: true,
+      },
     });
-    if (result.ok) expect(result.officialResult).toBeUndefined();
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.failure.category).toBe("verifier_timeout");
+      expect(result.failure.summary).toContain("verifierTimeout=true");
+      expect(result.failure.officialResult?.facts).toMatchObject({
+        verifierTimeout: true,
+        verifierTimeoutSummary: "VerifierTimeoutError: Verifier execution timed out after 360s",
+      });
+    }
+    expect(
+      classifyHeadlessFailure({
+        output: "VerifierTimeoutError: Verifier execution timed out after 360s",
+        outcome: "completed",
+        exitCode: 1,
+      }),
+    ).toBe("verifier_timeout");
   });
 
   it("keeps no-local-test validation deferred when project-local verifier facts report pass", async () => {

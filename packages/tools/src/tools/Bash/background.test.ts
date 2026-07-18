@@ -268,6 +268,55 @@ describe("Bash background execution (Stage 7+8)", () => {
     expect(completions[0]!.exitCode).not.toBe(0);
   });
 
+  it("headless retained service ignores normal runtime-finish abort", async () => {
+    const controller = new AbortController();
+    const context = createToolContext(project);
+    context.isHeadlessBench = true;
+    context.abortSignal = controller.signal;
+    const completions: BashBackgroundResult[] = [];
+    context.onBackgroundBashComplete = (result) => completions.push(result);
+    const port = 46_000 + Math.floor(Math.random() * 1_000);
+    const pidFile = join(project, "finish-service.pid");
+    const script = [
+      `require('fs').writeFileSync(${JSON.stringify(pidFile)},String(process.pid));`,
+      "const http=require('http');",
+      "const server=http.createServer((req,res)=>res.end('ok'));",
+      `server.listen(${port},'127.0.0.1');`,
+      "setInterval(()=>{},1000);",
+    ].join("");
+    let pid: number | undefined;
+
+    try {
+      await runTool(
+        "Bash",
+        { command: `node -e ${JSON.stringify(script)}`, run_in_background: true },
+        context,
+      );
+
+      await vi.waitFor(
+        async () => {
+          await expect(connectsToLocalPort(port)).resolves.toBe(true);
+        },
+        { timeout: 5_000, interval: 100 },
+      );
+      pid = Number(await readFile(pidFile, "utf8"));
+      controller.abort("headless_finish");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      expect(completions).toHaveLength(0);
+      await expect(connectsToLocalPort(port)).resolves.toBe(true);
+      expect(() => process.kill(pid!, 0)).not.toThrow();
+    } finally {
+      if (pid) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Already stopped by the platform.
+        }
+      }
+    }
+  });
+
   it("headless retained process reports completion only after a real zero exit", async () => {
     const context = createToolContext(project);
     context.isHeadlessBench = true;

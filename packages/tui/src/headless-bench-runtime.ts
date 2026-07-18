@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants, createReadStream } from "node:fs";
-import { access, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { access, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { extname, join, resolve } from "node:path";
+import { createConnection } from "node:net";
 import { createProcessGuard } from "./process-guard.js";
 
 const DEFAULT_TEST_TIMEOUT_MS = 600_000;
@@ -13,11 +14,14 @@ const MAX_ENVIRONMENT_SETUP_RETRIES = 3;
 const OUTPUT_LIMIT = 24_000;
 const SUMMARY_LIMIT = 4_000;
 const OFFICIAL_PROCESS_STOP_TIMEOUT_MS = 5_000;
+const ARTIFACT_SANITY_TIMEOUT_MS = 8_000;
+const SERVICE_SANITY_TIMEOUT_MS = 2_000;
 
 export type HeadlessBenchFailureCategory =
   | "model_patch_failed"
   | "agent_timeout"
   | "test_timeout"
+  | "verifier_timeout"
   | "provider_error"
   | "unknown_agent_error"
   | "parse_or_harness_error"
@@ -41,6 +45,38 @@ export type HeadlessBenchTaskProfile =
 export type EngineeringTaskProfile = HeadlessBenchTaskProfile;
 export type EngineeringFailureCategory = HeadlessBenchFailureCategory;
 
+export type HeadlessArtifactKind =
+  | "json"
+  | "python"
+  | "shell"
+  | "c_source"
+  | "cpp_source"
+  | "text"
+  | "binary"
+  | "unknown";
+
+export type HeadlessArtifactContract = {
+  path: string;
+  source: "option" | "env" | "prompt";
+  kind: HeadlessArtifactKind;
+  checks: string[];
+  formatHint?: string;
+};
+
+export type HeadlessServiceContract = {
+  host: string;
+  port: number;
+  source: "prompt";
+  label?: string;
+};
+
+export type HeadlessArtifactValidationIssue = {
+  path: string;
+  kind: HeadlessArtifactKind;
+  check: string;
+  message: string;
+};
+
 export type HeadlessBenchFailure = {
   category: HeadlessBenchFailureCategory;
   summary: string;
@@ -48,6 +84,7 @@ export type HeadlessBenchFailure = {
   exitCode?: number;
   logPath?: string;
   missingArtifacts?: string[];
+  artifactIssues?: HeadlessArtifactValidationIssue[];
   officialResult?: HeadlessOfficialValidationResult;
 };
 
@@ -58,6 +95,8 @@ export type HeadlessBenchConfig = {
   testTimeoutMs: number;
   maxRepairAttempts: number;
   requiredArtifacts: string[];
+  artifactContracts?: HeadlessArtifactContract[];
+  serviceContracts?: HeadlessServiceContract[];
   preflight: boolean;
   environmentSetupRetries: number;
   externalVerifier?: boolean;
@@ -91,6 +130,9 @@ export type HeadlessOfficialValidationFacts = {
   metadataPath?: string;
   cliExitCode?: number;
   controlledDeadlineReached?: boolean;
+  verifierTimeout?: boolean;
+  verifierTimeoutPath?: string;
+  verifierTimeoutSummary?: string;
 };
 
 export type HeadlessOfficialValidationResult = {
@@ -109,7 +151,8 @@ export type HeadlessBenchToolFailureFact = {
 };
 
 export type HeadlessArtifactChecklist = {
-  requiredArtifacts: Array<{ path: string; present: boolean }>;
+  requiredArtifacts: Array<{ path: string; present: boolean; kind?: HeadlessArtifactKind }>;
+  serviceContracts?: Array<{ target: string; configured: boolean }>;
   changedFiles: string[];
   workspaceChangeHash?: string;
   verificationRan: boolean;
@@ -135,6 +178,8 @@ export type HeadlessBenchOptions = Partial<
     | "testTimeoutMs"
     | "maxRepairAttempts"
     | "requiredArtifacts"
+    | "artifactContracts"
+    | "serviceContracts"
     | "preflight"
     | "environmentSetupRetries"
     | "externalVerifier"
@@ -162,12 +207,6 @@ export async function resolveHeadlessBenchConfig(input: {
     optionTestTimeoutMs === undefined ? 30_000 : 1,
     1_800_000,
   );
-  const maxRepairAttempts = clampPositiveInteger(
-    input.options?.maxRepairAttempts ?? parsePositiveInteger(env.LINGHUN_HEADLESS_MAX_REPAIRS),
-    DEFAULT_MAX_REPAIR_ATTEMPTS,
-    0,
-    MAX_REPAIR_ATTEMPTS,
-  );
   const environmentSetupRetries = clampPositiveInteger(
     input.options?.environmentSetupRetries ??
       parsePositiveInteger(env.LINGHUN_HEADLESS_ENV_SETUP_RETRIES),
@@ -175,12 +214,31 @@ export async function resolveHeadlessBenchConfig(input: {
     0,
     MAX_ENVIRONMENT_SETUP_RETRIES,
   );
-  const configuredArtifacts = splitList(env.LINGHUN_HEADLESS_REQUIRED_ARTIFACTS);
-  const requiredArtifacts = uniqueStrings([
-    ...(input.options?.requiredArtifacts ?? []),
-    ...configuredArtifacts,
-    ...detectRequiredArtifacts(input.prompt),
+  const artifactContracts = mergeArtifactContracts([
+    ...(input.options?.artifactContracts ?? []),
+    ...(input.options?.requiredArtifacts ?? []).map((path) =>
+      createArtifactContract(path, "option", input.prompt)
+    ),
+    ...splitList(env.LINGHUN_HEADLESS_REQUIRED_ARTIFACTS).map((path) =>
+      createArtifactContract(path, "env", input.prompt)
+    ),
+    ...detectRequiredArtifactContracts(input.prompt),
   ]);
+  const serviceContracts = mergeServiceContracts([
+    ...(input.options?.serviceContracts ?? []),
+    ...detectServiceContracts(input.prompt),
+  ]);
+  const requiredArtifacts = artifactContracts.map((contract) => contract.path);
+  const defaultRepairAttempts =
+    artifactContracts.length > 0 || serviceContracts.length > 0
+      ? MAX_REPAIR_ATTEMPTS
+      : DEFAULT_MAX_REPAIR_ATTEMPTS;
+  const maxRepairAttempts = clampPositiveInteger(
+    input.options?.maxRepairAttempts ?? parsePositiveInteger(env.LINGHUN_HEADLESS_MAX_REPAIRS),
+    defaultRepairAttempts,
+    0,
+    MAX_REPAIR_ATTEMPTS,
+  );
   const testCommand = input.options?.testCommand ?? env.LINGHUN_HEADLESS_TEST_COMMAND ?? defaultTestCommand;
   const profile = await detectHeadlessBenchTaskProfile({
     prompt: input.prompt,
@@ -195,6 +253,8 @@ export async function resolveHeadlessBenchConfig(input: {
     testTimeoutMs,
     maxRepairAttempts,
     requiredArtifacts,
+    artifactContracts,
+    serviceContracts,
     preflight: input.options?.preflight ?? parseBoolean(env.LINGHUN_HEADLESS_PREFLIGHT) ?? true,
     environmentSetupRetries,
     externalVerifier:
@@ -228,9 +288,14 @@ export function createHeadlessBenchInitialPrompt(input: {
   preflight?: HeadlessEnvironmentPreflight;
 }): string {
   if (!input.config.enabled) return input.originalPrompt;
-  const required = input.config.requiredArtifacts.length
-    ? `Required artifacts detected: ${input.config.requiredArtifacts.join(", ")}. Verify they exist and are readable before final.`
+  const artifactContracts = getArtifactContracts(input.config);
+  const serviceContracts = getServiceContracts(input.config);
+  const required = artifactContracts.length
+    ? `Required artifact contract: ${formatHeadlessArtifactContracts(artifactContracts)}. Satisfy every check before final.`
     : "No explicit output artifact path was detected; still verify observable task completion.";
+  const service = serviceContracts.length
+    ? `Service contract: ${formatHeadlessServiceContracts(serviceContracts)}. Verify each endpoint is reachable before final.`
+    : "";
   const test = input.config.testCommand
     ? `Official test command available: ${input.config.testCommand}. Prefer it over ad-hoc smoke tests before final.`
     : "No official test command was detected; use the strongest task-local verification available.";
@@ -241,6 +306,7 @@ export function createHeadlessBenchInitialPrompt(input: {
     "[Linghun headless bench guard]",
     test,
     required,
+    service,
     preflight,
     formatInitialProfileStrategy(input.config.profile),
     "If rg is unavailable, use grep/find/sed/awk fallbacks instead of failing the task.",
@@ -267,14 +333,17 @@ export async function validateHeadlessBenchCompletion(input: {
       },
     };
   }
-  const artifactResult = await validateRequiredArtifacts(input.projectPath, input.config.requiredArtifacts);
+  const artifactResult = await validateRequiredArtifacts(input.projectPath, input.config);
   if (!artifactResult.ok) {
     return {
       ok: false,
       failure: {
         category: "missing_artifact",
-        summary: `Missing required artifact(s): ${artifactResult.missing.join(", ")}`,
+        summary: `Required artifact contract failed: ${artifactResult.issues
+          .map((issue) => `${issue.path} ${issue.check}: ${issue.message}`)
+          .join("; ")}`,
         missingArtifacts: artifactResult.missing,
+        artifactIssues: artifactResult.issues,
       },
     };
   }
@@ -282,15 +351,27 @@ export async function validateHeadlessBenchCompletion(input: {
     const deferredToExternalVerifier = input.config.externalVerifier === true;
     const facts = await readHeadlessOfficialValidationFacts(input.projectPath);
     const structuredFailure = summarizeNonPassingOfficialFacts(facts);
-    if (structuredFailure && !input.requestOwnedVerificationEvidence) {
+    if (structuredFailure) {
       return {
         ok: false,
         failure: {
-          category: "model_patch_failed",
+          category: officialFactsFailureCategory(facts),
           summary: structuredFailure,
           officialResult: createProjectLocalOfficialResult(facts),
         },
       };
+    }
+    if (deferredToExternalVerifier) {
+      const sanity = await validateExternalVerifierSanity(input.projectPath, input.config);
+      if (!sanity.ok) {
+        return {
+          ok: false,
+          failure: {
+            category: sanity.category,
+            summary: sanity.summary,
+          },
+        };
+      }
     }
     return {
       ok: true,
@@ -368,7 +449,7 @@ export async function validateHeadlessBenchCompletion(input: {
     };
   }
   const category = structuredFailure
-    ? "model_patch_failed"
+    ? officialFactsFailureCategory(result.facts)
     : classifyHeadlessFailure({
         output: result.output,
         outcome: result.outcome,
@@ -404,6 +485,9 @@ function summarizeNonPassingOfficialFacts(
 ): string | undefined {
   if (!facts) return undefined;
   const reasons = [
+    ...(facts.verifierTimeout
+      ? [`verifierTimeout=true${facts.verifierTimeoutSummary ? ` (${facts.verifierTimeoutSummary})` : ""}`]
+      : []),
     ...(facts.reward !== undefined && facts.reward < 1 ? [`reward=${facts.reward}`] : []),
     ...(facts.resultReward !== undefined && facts.resultReward < 1
       ? [`resultReward=${facts.resultReward}`]
@@ -420,6 +504,12 @@ function summarizeNonPassingOfficialFacts(
   return reasons.length
     ? `structured project-local verifier facts report non-pass (${reasons.join("; ")})`
     : undefined;
+}
+
+function officialFactsFailureCategory(
+  facts: HeadlessOfficialValidationFacts | undefined,
+): HeadlessBenchFailureCategory {
+  return facts?.verifierTimeout ? "verifier_timeout" : "model_patch_failed";
 }
 
 function createProjectLocalOfficialResult(
@@ -445,11 +535,15 @@ export async function collectHeadlessArtifactChecklist(input: {
   changedFiles: string[];
   lastValidation?: HeadlessBenchValidationResult;
 }): Promise<HeadlessArtifactChecklist> {
-  const requiredArtifacts: Array<{ path: string; present: boolean }> = [];
-  for (const artifact of input.config.requiredArtifacts) {
-    const target = artifact.startsWith("/") ? artifact : resolve(input.projectPath, artifact);
-    requiredArtifacts.push({ path: artifact, present: await canRead(target) });
+  const requiredArtifacts: Array<{ path: string; present: boolean; kind?: HeadlessArtifactKind }> = [];
+  for (const contract of getArtifactContracts(input.config)) {
+    const target = resolveArtifactPath(input.projectPath, contract.path);
+    requiredArtifacts.push({ path: contract.path, present: await canRead(target), kind: contract.kind });
   }
+  const serviceContracts = getServiceContracts(input.config).map((contract) => ({
+    target: `${contract.host}:${contract.port}`,
+    configured: true,
+  }));
   const failedValidation =
     input.lastValidation && !input.lastValidation.ok ? input.lastValidation.failure : undefined;
   const gitAvailable = await isToolAvailable("git", input.projectPath).catch(() => "unknown" as const);
@@ -467,6 +561,7 @@ export async function collectHeadlessArtifactChecklist(input: {
   const summary = [
     `artifacts=${requiredArtifacts.length}`,
     `artifactsPresent=${requiredArtifacts.filter((item) => item.present).length}/${requiredArtifacts.length}`,
+    ...(serviceContracts.length ? [`services=${serviceContracts.length}`] : []),
     `changedFiles=${input.changedFiles.length}`,
     `workspaceHash=${workspaceChangeHash.slice(0, 8)}`,
     `verificationRan=${verificationRan ? "yes" : "no"}`,
@@ -478,6 +573,7 @@ export async function collectHeadlessArtifactChecklist(input: {
   ].join("; ");
   return {
     requiredArtifacts,
+    ...(serviceContracts.length ? { serviceContracts } : {}),
     changedFiles: [...input.changedFiles],
     workspaceChangeHash,
     verificationRan,
@@ -535,6 +631,8 @@ export function createHeadlessBenchRepairPrompt(input: {
   attempt: number;
   maxAttempts: number;
   profile?: HeadlessBenchTaskProfile;
+  artifactContracts?: HeadlessArtifactContract[];
+  serviceContracts?: HeadlessServiceContract[];
   preflight?: HeadlessEnvironmentPreflight;
   workspaceUnchanged?: boolean;
   remainingDeadline?: string;
@@ -543,6 +641,13 @@ export function createHeadlessBenchRepairPrompt(input: {
 }): string {
   const artifactLine = input.failure.missingArtifacts?.length
     ? `Missing artifacts: ${input.failure.missingArtifacts.join(", ")}`
+    : "";
+  const artifactContractLine = input.artifactContracts?.length
+    ? `Artifact contract: ${formatHeadlessArtifactContracts(input.artifactContracts)}`
+    : "";
+  const artifactIssueLine = formatArtifactValidationIssues(input.failure.artifactIssues);
+  const serviceContractLine = input.serviceContracts?.length
+    ? `Service contract: ${formatHeadlessServiceContracts(input.serviceContracts)}`
     : "";
   const logLine = input.failure.logPath ? `Full failure log: ${input.failure.logPath}` : "";
   const toolFailureLine = formatRepairToolFailures(input.toolFailures);
@@ -565,6 +670,9 @@ export function createHeadlessBenchRepairPrompt(input: {
       ? "rg is missing in this environment; use grep/find/sed/awk fallbacks."
       : "",
     artifactLine,
+    artifactContractLine,
+    artifactIssueLine,
+    serviceContractLine,
     checklistLine,
     toolFailureLine,
     verifierFactsLine,
@@ -604,6 +712,9 @@ function formatRepairChecklist(checklist: HeadlessArtifactChecklist | undefined)
   const parts = [
     `artifactsPresent=${checklist.requiredArtifacts.filter((item) => item.present).length}/${checklist.requiredArtifacts.length}`,
     ...(missingArtifacts.length ? [`missingArtifacts=${missingArtifacts.join(", ")}`] : []),
+    ...(checklist.serviceContracts?.length
+      ? [`serviceContracts=${checklist.serviceContracts.map((item) => item.target).join(", ")}`]
+      : []),
     `changedFiles=${checklist.changedFiles.length}`,
     `verificationRan=${checklist.verificationRan ? "yes" : "no"}`,
     `lastValidation=${checklist.lastValidationCategory ?? "none"}`,
@@ -631,6 +742,30 @@ function formatRepairVerifierFacts(
     ...(officialResult?.logPath ? [`logPath=${officialResult.logPath}`] : []),
   ];
   return parts.length ? `Official verifier facts: ${parts.join("; ")}` : "";
+}
+
+export function formatHeadlessArtifactContracts(contracts: HeadlessArtifactContract[]): string {
+  return contracts
+    .map((contract) => {
+      const checks = contract.checks.length ? ` checks=${contract.checks.join("+")}` : "";
+      const format = contract.formatHint ? ` format=${contract.formatHint}` : "";
+      return `${contract.path} kind=${contract.kind}${checks}${format}`;
+    })
+    .join("; ");
+}
+
+export function formatHeadlessServiceContracts(contracts: HeadlessServiceContract[]): string {
+  return contracts.map((contract) => `${contract.host}:${contract.port}`).join(", ");
+}
+
+function formatArtifactValidationIssues(
+  issues: HeadlessArtifactValidationIssue[] | undefined,
+): string {
+  if (!issues?.length) return "";
+  return `Artifact validation issues: ${issues
+    .slice(0, 8)
+    .map((issue) => `${issue.path} ${issue.check}: ${issue.message}`)
+    .join(" | ")}`;
 }
 
 export async function detectHeadlessBenchTaskProfile(input: {
@@ -694,6 +829,9 @@ export function classifyHeadlessFailure(input: {
   exitCode?: number;
 }): HeadlessBenchFailureCategory {
   const text = input.output.toLowerCase();
+  if (hasVerifierTimeoutSignal(input.output)) {
+    return "verifier_timeout";
+  }
   if (input.outcome === "timeout" || /timed out|timeout after|test command timed out/u.test(text)) {
     return "test_timeout";
   }
@@ -781,6 +919,9 @@ export function formatEngineeringFailureBoundaryHint(input: {
   if (input.failureCategory === "test_timeout") {
     return "final must state timeout or partial verification; do not present focused checks as full pass";
   }
+  if (input.failureCategory === "verifier_timeout") {
+    return "final must state external verifier timeout; do not present it as a model/task failure or pass";
+  }
   if (input.failureCategory === "agent_timeout") {
     return "final must state deadline/agent-timeout boundary; avoid claiming full completion after closure";
   }
@@ -817,6 +958,9 @@ function formatRepairProfileStrategy(
       return "Repair route: use bounded samples, smaller parameters, or cached intermediate outputs to isolate the timeout before any full data/training run.";
     }
     return "Repair route: narrow validation to focused tests or logs first; avoid repeatedly launching full expensive runs.";
+  }
+  if (category === "verifier_timeout") {
+    return "Repair route: external verifier timed out; preserve produced artifacts/services and retry verifier instead of changing task code blindly.";
   }
   if (category === "agent_timeout") {
     return "Repair route: stop broad exploration, preserve current facts, and make only a bounded minimal repair that can complete before the deadline.";
@@ -887,50 +1031,396 @@ async function listProjectFiles(projectPath: string, limit: number): Promise<str
 }
 
 export function detectEngineeringArtifactTargets(prompt: string): string[] {
-  const artifacts: string[] = [];
+  return detectRequiredArtifactContracts(prompt).map((contract) => contract.path);
+}
+
+function detectRequiredArtifactContracts(prompt: string): HeadlessArtifactContract[] {
+  const artifacts: Array<{ path: string; context: string }> = [];
   const absolutePathPattern =
     /(?:\b(?:write|save|print|output|store|create|generate|return|place|put)\b|写入|保存|输出|生成|创建|放到|放入|返回)[\s\S]{0,120}?[`"']?(\/[A-Za-z0-9._/-]+\.[A-Za-z0-9._-]+)[`"']?/giu;
   for (const match of prompt.matchAll(absolutePathPattern)) {
-    artifacts.push(match[1]);
+    artifacts.push({ path: match[1], context: promptContext(prompt, match.index ?? 0, 260) });
   }
   const namedFilePattern =
     /(?:\b(?:file called|file named|called|named|to a file|write .*? to)\b|文件名为|文件叫|写到文件|输出到文件)\s+[`"']?([A-Za-z0-9._/-]+\.[A-Za-z0-9._-]+)[`"']?/giu;
   for (const match of prompt.matchAll(namedFilePattern)) {
-    artifacts.push(match[1]);
+    artifacts.push({ path: match[1], context: promptContext(prompt, match.index ?? 0, 260) });
   }
-  return uniqueStrings(
+  return mergeArtifactContracts(
     artifacts
-      .map(normalizeArtifactPath)
-      .filter((artifact) => !artifact.includes("*") && !artifact.endsWith(".sh")),
+      .map((artifact) => ({
+        ...artifact,
+        path: normalizeArtifactPath(artifact.path),
+      }))
+      .filter((artifact) => !artifact.path.includes("*"))
+      .map((artifact) => createArtifactContract(artifact.path, "prompt", artifact.context)),
   );
 }
 
 function detectRequiredArtifacts(prompt: string): string[] {
-  return detectEngineeringArtifactTargets(prompt);
+  return detectRequiredArtifactContracts(prompt).map((contract) => contract.path);
 }
 
 function normalizeArtifactPath(value: string): string {
   return value.replace(/[),.;:!?]+$/u, "");
 }
 
-async function validateRequiredArtifacts(
-  projectPath: string,
-  artifacts: string[],
-): Promise<{ ok: true } | { ok: false; missing: string[] }> {
-  const missing: string[] = [];
-  for (const artifact of artifacts) {
-    const target = artifact.startsWith("/") ? artifact : resolve(projectPath, artifact);
-    try {
-      await access(target, constants.R_OK);
-      const content = await readFile(target, "utf8").catch(() => "");
-      if (content.length === 0) {
-        missing.push(`${artifact} (empty or unreadable text)`);
-      }
-    } catch {
-      missing.push(artifact);
+function promptContext(prompt: string, index: number, radius: number): string {
+  return prompt.slice(Math.max(0, index - radius), Math.min(prompt.length, index + radius));
+}
+
+function createArtifactContract(
+  path: string,
+  source: HeadlessArtifactContract["source"],
+  context = "",
+): HeadlessArtifactContract {
+  const normalized = normalizeArtifactPath(path);
+  const kind = inferArtifactKind(normalized, context);
+  const formatHint = inferArtifactFormatHint(kind, context);
+  const checks = artifactChecksForKind(kind);
+  if (kind === "json" && formatHint.formatHint) {
+    checks.push("json_shape_if_format_hint");
+  }
+  return {
+    path: normalized,
+    source,
+    kind,
+    checks,
+    ...formatHint,
+  };
+}
+
+function inferArtifactKind(path: string, context: string): HeadlessArtifactKind {
+  const extension = extname(path).toLowerCase();
+  if (extension === ".json") return "json";
+  if (extension === ".py") return "python";
+  if (extension === ".sh" || extension === ".bash") return "shell";
+  if (extension === ".c") return "c_source";
+  if ([".cc", ".cpp", ".cxx", ".hpp", ".hxx"].includes(extension)) return "cpp_source";
+  if ([".txt", ".csv", ".tsv", ".md", ".vim", ".sql", ".conf", ".log"].includes(extension)) {
+    return "text";
+  }
+  if (/\b(?:json format|valid json|schema)\b/iu.test(context)) return "json";
+  if (/\bpython script\b/iu.test(context)) return "python";
+  if (/\b(?:c program|c source)\b/iu.test(context)) return "c_source";
+  return "unknown";
+}
+
+function artifactChecksForKind(kind: HeadlessArtifactKind): string[] {
+  switch (kind) {
+    case "json":
+      return ["exists", "non_empty", "valid_json"];
+    case "python":
+      return ["exists", "non_empty", "python_syntax_if_available"];
+    case "shell":
+      return ["exists", "non_empty", "shell_syntax_if_available"];
+    case "c_source":
+      return ["exists", "non_empty", "c_syntax_if_available"];
+    case "cpp_source":
+      return ["exists", "non_empty", "cpp_syntax_if_available"];
+    case "text":
+    case "binary":
+    case "unknown":
+      return ["exists", "non_empty"];
+  }
+}
+
+function inferArtifactFormatHint(
+  kind: HeadlessArtifactKind,
+  context: string,
+): Pick<HeadlessArtifactContract, "formatHint"> {
+  if (kind !== "json") return {};
+  const braceStart = context.indexOf("{");
+  const braceEnd = context.lastIndexOf("}");
+  if (braceStart < 0 || braceEnd <= braceStart) return {};
+  const hint = context.slice(braceStart, braceEnd + 1).replace(/\s+/gu, " ").trim();
+  return hint.length > 0 ? { formatHint: hint.slice(0, 280) } : {};
+}
+
+function mergeArtifactContracts(contracts: HeadlessArtifactContract[]): HeadlessArtifactContract[] {
+  const byPath = new Map<string, HeadlessArtifactContract>();
+  for (const contract of contracts) {
+    if (!contract.path || contract.path.includes("*")) continue;
+    const previous = byPath.get(contract.path);
+    if (!previous) {
+      byPath.set(contract.path, { ...contract, checks: uniqueStrings(contract.checks) });
+      continue;
+    }
+    byPath.set(contract.path, {
+      ...previous,
+      kind: previous.kind === "unknown" ? contract.kind : previous.kind,
+      checks: uniqueStrings([...previous.checks, ...contract.checks]),
+      formatHint: previous.formatHint ?? contract.formatHint,
+    });
+  }
+  return [...byPath.values()];
+}
+
+function getArtifactContracts(config: HeadlessBenchConfig): HeadlessArtifactContract[] {
+  return config.artifactContracts?.length
+    ? config.artifactContracts
+    : config.requiredArtifacts.map((path) => createArtifactContract(path, "option"));
+}
+
+function detectServiceContracts(prompt: string): HeadlessServiceContract[] {
+  const contracts: HeadlessServiceContract[] = [];
+  const localEndpointPattern =
+    /\b(?:https?:\/\/)?(localhost|127\.0\.0\.1|0\.0\.0\.0):(\d{2,5})\b/giu;
+  for (const match of prompt.matchAll(localEndpointPattern)) {
+    addServiceContract(contracts, match[1], match[2]);
+  }
+  const servicePortPattern =
+    /\b(?:listen(?:ing)?(?:\s+on)?|serve(?:r)?(?:\s+on)?|run(?:ning)?(?:\s+on)?|bind(?:ing)?(?:\s+to)?|expose|available(?:\s+at)?|endpoint|port)\s+(?:at|on|to)?\s*(?:port\s*)?(\d{2,5})\b/giu;
+  for (const match of prompt.matchAll(servicePortPattern)) {
+    if (hasServiceRuntimeContext(promptContext(prompt, match.index ?? 0, 180))) {
+      addServiceContract(contracts, "127.0.0.1", match[1]);
     }
   }
-  return missing.length ? { ok: false, missing } : { ok: true };
+  return mergeServiceContracts(contracts);
+}
+
+function addServiceContract(
+  contracts: HeadlessServiceContract[],
+  hostValue: string | undefined,
+  portValue: string | undefined,
+): void {
+  const port = Number.parseInt(portValue ?? "", 10);
+  if (!Number.isInteger(port) || port <= 0 || port > 65_535) return;
+  const host = hostValue === "localhost" || hostValue === "0.0.0.0" || !hostValue
+    ? "127.0.0.1"
+    : hostValue;
+  contracts.push({ host, port, source: "prompt" });
+}
+
+function hasServiceRuntimeContext(context: string): boolean {
+  return /\b(?:server|service|daemon|endpoint|localhost|127\.0\.0\.1|0\.0\.0\.0|http|web|api|curl|listen|serve|bind|uvicorn|fastapi|flask|express)\b/iu.test(
+    context,
+  );
+}
+
+function mergeServiceContracts(contracts: HeadlessServiceContract[]): HeadlessServiceContract[] {
+  const byTarget = new Map<string, HeadlessServiceContract>();
+  for (const contract of contracts) {
+    if (!Number.isInteger(contract.port) || contract.port <= 0 || contract.port > 65_535) {
+      continue;
+    }
+    const host = contract.host || "127.0.0.1";
+    byTarget.set(`${host}:${contract.port}`, { ...contract, host });
+  }
+  return [...byTarget.values()];
+}
+
+function getServiceContracts(config: HeadlessBenchConfig): HeadlessServiceContract[] {
+  return config.serviceContracts ?? [];
+}
+
+function resolveArtifactPath(projectPath: string, artifact: string): string {
+  return artifact.startsWith("/") ? artifact : resolve(projectPath, artifact);
+}
+
+async function validateArtifactContract(
+  projectPath: string,
+  target: string,
+  contract: HeadlessArtifactContract,
+): Promise<HeadlessArtifactValidationIssue[]> {
+  const issues: HeadlessArtifactValidationIssue[] = [];
+  let fileStat: Awaited<ReturnType<typeof stat>>;
+  try {
+    await access(target, constants.R_OK);
+    fileStat = await stat(target);
+  } catch {
+    return [artifactIssue(contract, "exists", "artifact is missing or unreadable")];
+  }
+  if (!fileStat.isFile()) {
+    return [artifactIssue(contract, "exists", "artifact path is not a regular file")];
+  }
+  if (fileStat.size === 0) {
+    return [artifactIssue(contract, "non_empty", "artifact is empty")];
+  }
+
+  if (contract.kind === "json") {
+    const text = await readFile(target, "utf8").catch(() => "");
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch (error) {
+      issues.push(
+        artifactIssue(
+          contract,
+          "valid_json",
+          `invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      );
+    }
+    if (parsed !== undefined) {
+      issues.push(...validateJsonArtifactShape(contract, parsed));
+    }
+  }
+
+  const syntaxIssue = await validateArtifactSyntax(projectPath, target, contract);
+  if (syntaxIssue) issues.push(syntaxIssue);
+  return issues;
+}
+
+async function validateArtifactSyntax(
+  projectPath: string,
+  target: string,
+  contract: HeadlessArtifactContract,
+): Promise<HeadlessArtifactValidationIssue | undefined> {
+  const command = await syntaxCheckCommand(projectPath, target, contract);
+  if (!command) return undefined;
+  const result = await runShellCommand(command, projectPath, ARTIFACT_SANITY_TIMEOUT_MS);
+  if (result.exitCode === 0 && result.outcome === "completed") return undefined;
+  return artifactIssue(
+    contract,
+    contract.checks.find((check) => check.endsWith("_syntax_if_available")) ?? "syntax",
+    summarizeFailureOutput(result.output, "model_patch_failed").replace(/\s+/gu, " ").slice(0, 500),
+  );
+}
+
+async function syntaxCheckCommand(
+  projectPath: string,
+  target: string,
+  contract: HeadlessArtifactContract,
+): Promise<string | undefined> {
+  switch (contract.kind) {
+    case "python": {
+      const python = await firstAvailableTool(projectPath, ["python3", "python"]);
+      return python ? `${python} -m py_compile ${shellQuote(target)}` : undefined;
+    }
+    case "shell":
+      return (await isToolAvailable("bash", projectPath)) ? `bash -n ${shellQuote(target)}` : undefined;
+    case "c_source": {
+      const compiler = await firstAvailableTool(projectPath, ["cc", "gcc", "clang"]);
+      return compiler ? `${compiler} -fsyntax-only ${shellQuote(target)}` : undefined;
+    }
+    case "cpp_source": {
+      const compiler = await firstAvailableTool(projectPath, ["c++", "g++", "clang++"]);
+      return compiler ? `${compiler} -fsyntax-only ${shellQuote(target)}` : undefined;
+    }
+    case "json":
+    case "text":
+    case "binary":
+    case "unknown":
+      return undefined;
+  }
+}
+
+function validateJsonArtifactShape(
+  contract: HeadlessArtifactContract,
+  actual: unknown,
+): HeadlessArtifactValidationIssue[] {
+  if (!contract.formatHint) return [];
+  let expected: unknown;
+  try {
+    expected = JSON.parse(contract.formatHint);
+  } catch {
+    return [];
+  }
+  const expectedObject = readObject(expected);
+  if (!expectedObject) return [];
+  const actualObject = readObject(actual);
+  if (!actualObject) {
+    return [artifactIssue(contract, "json_shape_if_format_hint", "expected a JSON object")];
+  }
+  const issues: HeadlessArtifactValidationIssue[] = [];
+  for (const [key, expectedValue] of Object.entries(expectedObject)) {
+    if (!(key in actualObject)) {
+      issues.push(
+        artifactIssue(contract, "json_shape_if_format_hint", `missing top-level key "${key}"`),
+      );
+      continue;
+    }
+    const expectedKind = jsonShapeKind(expectedValue);
+    const actualKind = jsonShapeKind(actualObject[key]);
+    if (expectedKind !== "null" && expectedKind !== actualKind) {
+      issues.push(
+        artifactIssue(
+          contract,
+          "json_shape_if_format_hint",
+          `top-level key "${key}" expected ${expectedKind}, got ${actualKind}`,
+        ),
+      );
+    }
+  }
+  return issues.slice(0, 8);
+}
+
+function jsonShapeKind(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+async function firstAvailableTool(projectPath: string, tools: string[]): Promise<string | undefined> {
+  for (const tool of tools) {
+    if (await isToolAvailable(tool, projectPath)) return tool;
+  }
+  return undefined;
+}
+
+function artifactIssue(
+  contract: HeadlessArtifactContract,
+  check: string,
+  message: string,
+): HeadlessArtifactValidationIssue {
+  return {
+    path: contract.path,
+    kind: contract.kind,
+    check,
+    message,
+  };
+}
+
+async function validateRequiredArtifacts(
+  projectPath: string,
+  config: HeadlessBenchConfig,
+): Promise<{ ok: true } | { ok: false; missing: string[]; issues: HeadlessArtifactValidationIssue[] }> {
+  const issues: HeadlessArtifactValidationIssue[] = [];
+  for (const contract of getArtifactContracts(config)) {
+    const target = resolveArtifactPath(projectPath, contract.path);
+    issues.push(...(await validateArtifactContract(projectPath, target, contract)));
+  }
+  if (issues.length === 0) return { ok: true };
+  return {
+    ok: false,
+    missing: uniqueStrings(issues.map((issue) => issue.path)),
+    issues,
+  };
+}
+
+async function validateExternalVerifierSanity(
+  projectPath: string,
+  config: HeadlessBenchConfig,
+): Promise<{ ok: true } | { ok: false; category: HeadlessBenchFailureCategory; summary: string }> {
+  const serviceContracts = getServiceContracts(config);
+  const failures: string[] = [];
+  for (const contract of serviceContracts) {
+    const ready = await probeTcpPort(contract.host, contract.port, SERVICE_SANITY_TIMEOUT_MS);
+    if (!ready) failures.push(`service ${contract.host}:${contract.port} is not reachable`);
+  }
+  if (failures.length === 0) return { ok: true };
+  return {
+    ok: false,
+    category: "model_patch_failed",
+    summary: `External verifier sanity failed: ${failures.join("; ")}`,
+  };
+}
+
+function probeTcpPort(host: string, port: number, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolveProbe) => {
+    const socket = createConnection({ host, port });
+    let settled = false;
+    const finish = (ready: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolveProbe(ready);
+    };
+    socket.setTimeout(timeoutMs, () => finish(false));
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
 }
 
 async function runOfficialTestCommand(input: {
@@ -1012,8 +1502,75 @@ async function readHeadlessOfficialValidationFacts(
   const metadata = await readJsonObject(metadataPath);
   copyAgentMetadataFacts(facts, metadata, metadataPath);
 
+  const verifierTimeout = await readVerifierTimeoutFact(projectPath, result, resultPath);
+  if (verifierTimeout) {
+    facts.verifierTimeout = true;
+    facts.verifierTimeoutPath = verifierTimeout.path;
+    facts.verifierTimeoutSummary = verifierTimeout.summary;
+  }
+
   if (Object.keys(facts).length === 0) return undefined;
   return { ...facts, source: "project_local" };
+}
+
+async function readVerifierTimeoutFact(
+  projectPath: string,
+  result: Record<string, unknown> | undefined,
+  resultPath: string,
+): Promise<{ path: string; summary: string } | undefined> {
+  const resultSummary = summarizeVerifierTimeoutFromResult(result);
+  if (resultSummary) return { path: resultPath, summary: resultSummary };
+  const candidates = [
+    join(projectPath, "verifier", "exception.txt"),
+    join(projectPath, "verifier", "stderr.txt"),
+    join(projectPath, "verifier", "output.txt"),
+    join(projectPath, "exception.txt"),
+  ];
+  for (const path of candidates) {
+    const text = await readOptionalText(path);
+    if (!text || !hasVerifierTimeoutSignal(text)) continue;
+    return { path, summary: firstVerifierTimeoutLine(text) };
+  }
+  return undefined;
+}
+
+function summarizeVerifierTimeoutFromResult(
+  result: Record<string, unknown> | undefined,
+): string | undefined {
+  if (!result) return undefined;
+  const verifierResult = readObject(result.verifier_result);
+  const candidates = [
+    verifierResult?.error_type,
+    verifierResult?.error,
+    verifierResult?.exception,
+    verifierResult?.message,
+    verifierResult?.stderr,
+    verifierResult?.stdout,
+    verifierResult?.traceback,
+    result.error_type,
+    result.error,
+    result.exception,
+  ]
+    .filter((value): value is string => typeof value === "string")
+    .join("\n");
+  if (hasVerifierTimeoutSignal(candidates)) return firstVerifierTimeoutLine(candidates);
+  const verifierText = verifierResult ? JSON.stringify(verifierResult).slice(0, 12_000) : "";
+  return hasVerifierTimeoutSignal(verifierText) ? firstVerifierTimeoutLine(verifierText) : undefined;
+}
+
+function hasVerifierTimeoutSignal(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return normalized.includes("verifiertimeouterror") ||
+    (normalized.includes("verifier") && /timed?\s*out|timeout/u.test(normalized));
+}
+
+function firstVerifierTimeoutLine(text: string): string {
+  return (
+    text
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .find((line) => hasVerifierTimeoutSignal(line)) ?? "verifier timeout"
+  ).slice(0, 300);
 }
 
 async function readOptionalText(path: string): Promise<string | undefined> {

@@ -773,6 +773,8 @@ import {
   collectHeadlessArtifactChecklist,
   createHeadlessBenchInitialPrompt,
   createHeadlessBenchRepairPrompt,
+  formatHeadlessArtifactContracts,
+  formatHeadlessServiceContracts,
   resolveHeadlessBenchConfig,
   runHeadlessEnvironmentPreflight,
   validateHeadlessBenchCompletion,
@@ -2306,6 +2308,13 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           );
         }
         if (validation.ok) {
+          if (validation.deferredToExternalVerifier && !validation.testRan) {
+            writeLine(
+              output,
+              "[headless] bench local validation unavailable; pass/fail deferred to external verifier, not closed locally.",
+            );
+            break;
+          }
           const hasRealValidation =
             validation.testRan ||
             requestOwnedVerificationEvidence;
@@ -2332,10 +2341,17 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           errorOutput,
           `[headless] bench validation failed: ${failure.category}; ${failure.summary.split(/\r?\n/u)[0]}`,
         );
-        if (failure.category === "agent_timeout" || isHeadlessDeadlineExpired(deadlineAtMs)) {
+        if (
+          failure.category === "agent_timeout" ||
+          failure.category === "verifier_timeout" ||
+          isHeadlessDeadlineExpired(deadlineAtMs)
+        ) {
+          const timeoutMessage = failure.category === "verifier_timeout"
+            ? "[headless] external verifier timed out; verification stopped."
+            : `[headless] deadline reached (${formatHeadlessRemainingTime(deadlineAtMs)}); verification stopped.`;
           writeLine(
             errorOutput,
-            `[headless] deadline reached (${formatHeadlessRemainingTime(deadlineAtMs)}); verification stopped.`,
+            timeoutMessage,
           );
           return 6;
         }
@@ -2379,6 +2395,8 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           attempt: repairAttempt + 1,
           maxAttempts: benchConfig.maxRepairAttempts,
           profile: benchConfig.profile,
+          artifactContracts: benchConfig.artifactContracts,
+          serviceContracts: benchConfig.serviceContracts,
           workspaceUnchanged,
           remainingDeadline: formatHeadlessRemainingTime(deadlineAtMs),
           checklist,
@@ -2961,6 +2979,11 @@ function createHeadlessBenchVerificationReport(input: {
   const officialResult = input.validation.ok
     ? input.validation.officialResult
     : input.validation.failure.officialResult;
+  const failedArtifactIssues = input.validation.ok
+    ? undefined
+    : input.validation.failure.artifactIssues;
+  const artifactContracts = input.config.artifactContracts ?? [];
+  const serviceContracts = input.config.serviceContracts ?? [];
   const nowMs = Date.now();
   const durationMs = officialResult?.durationMs ?? 0;
   const startedAt = new Date(nowMs - durationMs).toISOString();
@@ -3029,6 +3052,9 @@ function createHeadlessBenchVerificationReport(input: {
         ok: input.validation.ok,
         testRan: input.validation.ok ? input.validation.testRan : false,
         ...(input.validation.ok ? {} : { category: input.validation.failure.category }),
+        ...(artifactContracts.length ? { artifactContracts } : {}),
+        ...(serviceContracts.length ? { serviceContracts } : {}),
+        ...(failedArtifactIssues?.length ? { artifactIssues: failedArtifactIssues } : {}),
         ...(officialResult
           ? {
               officialResult: {
@@ -3054,6 +3080,7 @@ function headlessValidationReportStatus(
   if (
     validation.failure.category === "agent_timeout" ||
     validation.failure.category === "test_timeout" ||
+    validation.failure.category === "verifier_timeout" ||
     officialResult?.outcome === "timeout" ||
     officialResult?.facts?.controlledDeadlineReached
   ) {
@@ -3142,7 +3169,13 @@ function createHeadlessProviderContinuationPrompt(
     maxAttempts?: number;
   } = {},
 ): string {
+  const artifactContracts = input.config?.artifactContracts ?? [];
   const artifacts = input.config?.requiredArtifacts ?? [];
+  const artifactFact = artifactContracts.length
+    ? formatHeadlessArtifactContracts(artifactContracts)
+    : artifacts.join(", ");
+  const services = input.config?.serviceContracts ?? [];
+  const serviceFact = services.length ? formatHeadlessServiceContracts(services) : "";
   const facts = context.language === "en-US"
     ? [
         input.attempt !== undefined && input.maxAttempts !== undefined
@@ -3152,9 +3185,14 @@ function createHeadlessProviderContinuationPrompt(
         input.config?.testCommand
           ? `Headless bench fact: official test command is ${input.config.testCommand}.`
           : "Headless bench fact: no local official test command is configured; use the strongest task-local validation available.",
-        artifacts.length > 0
-          ? `Headless bench fact: required artifacts are ${artifacts.join(", ")}. Verify each exists and is readable before final.`
+        artifactFact
+          ? artifactContracts.length
+            ? `Headless bench fact: required artifact contract is ${artifactFact}. Satisfy every check before final.`
+            : `Headless bench fact: required artifacts are ${artifactFact}. Verify each exists and is readable before final.`
           : "Headless bench fact: no explicit required artifacts are configured; verify observable task completion from current files and task-local checks.",
+        serviceFact
+          ? `Headless bench fact: service endpoints are ${serviceFact}. Verify each is reachable before final.`
+          : "",
         input.config?.externalVerifier
           ? "External verifier is authoritative; do not claim external pass unless local official/project facts support it."
           : "",
@@ -3167,9 +3205,14 @@ function createHeadlessProviderContinuationPrompt(
         input.config?.testCommand
           ? `Headless bench 事实：官方测试命令是 ${input.config.testCommand}。`
           : "Headless bench 事实：当前没有本地官方测试命令；使用最强的任务本地验证。",
-        artifacts.length > 0
-          ? `Headless bench 事实：必需产物是 ${artifacts.join(", ")}。final 前逐一确认存在且可读。`
+        artifactFact
+          ? artifactContracts.length
+            ? `Headless bench 事实：必需产物契约是 ${artifactFact}。final 前满足每个检查。`
+            : `Headless bench 事实：必需产物是 ${artifactFact}。final 前逐一确认存在且可读。`
           : "Headless bench 事实：当前没有显式必需产物；基于当前文件和任务本地检查验证可观察完成状态。",
+        serviceFact
+          ? `Headless bench 事实：服务端点是 ${serviceFact}。final 前逐一确认可连接。`
+          : "",
         input.config?.externalVerifier
           ? "外部 verifier 是最终判定来源；没有本地官方/项目事实支持时，不要声称 external pass。"
           : "",
@@ -3188,7 +3231,7 @@ async function finishHeadlessRuntime(context: TuiContext): Promise<{ ok: boolean
     return { ok: false, reason: `仍有权限确认未处理：${context.pendingLocalApproval.kind}` };
   }
   if (context.activeAbortController) {
-    context.activeAbortController.abort();
+    context.activeAbortController.abort("headless_finish");
   }
   context.tools.abortSignal = undefined;
   context.interrupt = { type: "idle" };
