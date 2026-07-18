@@ -43,8 +43,8 @@ importers:
         specifier: 0.1.11
         version: 0.1.11
       '@linghun/tui':
-        specifier: 0.1.38
-        version: 0.1.38
+        specifier: 0.1.39
+        version: 0.1.39
     optionalDependencies:
       '@linghun/codebase-memory-darwin-arm64':
         specifier: 0.1.0
@@ -183,8 +183,8 @@ importers:
         specifier: 0.1.11
         version: 0.1.11
       '@linghun/tools':
-        specifier: 0.1.10
-        version: 0.1.10
+        specifier: 0.1.11
+        version: 0.1.11
       cli-highlight:
         specifier: ^2.1.11
         version: 2.1.11
@@ -661,11 +661,11 @@ packages:
   '@linghun/shared@0.1.11':
     resolution: {integrity: sha512-OXwt3R6Iig82tML9F4wDQBlb47Tfqbh0YTlXcGurwtawkVrcB0L/mrZr0JZh3nsUy1LZeST7RPKQjt0zM24qJQ==}
 
-  '@linghun/tools@0.1.10':
-    resolution: {integrity: sha512-pRzp46HeDg6HP/2O6+Uu9vgsRpvYOK4REnsr2vlZTV+/HAwUdhncSlm0Nav6S/oBcrqqan+TFhbQzNuFpC+9rg==}
+  '@linghun/tools@0.1.11':
+    resolution: {integrity: sha512-axcR5Ly1ElxxRF0KGZy8j04FbTOETbzEsPhr7uJSzg9GNNHNClBGCd2aepit8/QP83YC/XNCFpJ+k4fP8Qay1Q==}
 
-  '@linghun/tui@0.1.38':
-    resolution: {integrity: sha512-+FkIVJf77YBxCkEWRoeoaMHcf5NEk4RwiKp6A5xug7b2ma6tJoZTTcc05CyP4tcCH7iKhAYG4GZcwfBzU0IeQA==}
+  '@linghun/tui@0.1.39':
+    resolution: {integrity: sha512-Dw1lKeRnMi/FMdUD4AuOpr8CxcYHPIXC0QFNo5qeUgm4+a6VkZDyunX5T5EX83tTI+exz8HfT2D6a1LLU48LsQ==}
 
   '@protobufjs/aspromise@1.1.2':
     resolution: {integrity: sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ==}
@@ -1978,11 +1978,11 @@ snapshots:
 
   '@linghun/shared@0.1.11': {}
 
-  '@linghun/tools@0.1.10':
+  '@linghun/tools@0.1.11':
     dependencies:
       parse5: 8.0.1
 
-  '@linghun/tui@0.1.38':
+  '@linghun/tui@0.1.39':
     dependencies:
       '@larksuiteoapi/node-sdk': 1.59.0
       '@linghun/config': 0.1.8
@@ -1990,7 +1990,7 @@ snapshots:
       '@linghun/ink-runtime': 0.1.1(@types/react@19.2.15)(react@19.2.7)
       '@linghun/providers': 0.1.18
       '@linghun/shared': 0.1.11
-      '@linghun/tools': 0.1.10
+      '@linghun/tools': 0.1.11
       cli-highlight: 2.1.11
       marked: 18.0.5
       react: 19.2.7
