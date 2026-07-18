@@ -846,9 +846,13 @@ const HEADLESS_BENCH_VALIDATION_CLEANUP_SAFETY_WINDOW_MS = 5_000;
 const HEADLESS_BENCH_VALIDATION_START_WINDOW_MS =
   HEADLESS_BENCH_VALIDATION_SHORT_RUN_WINDOW_MS +
   HEADLESS_BENCH_VALIDATION_CLEANUP_SAFETY_WINDOW_MS;
+const HEADLESS_BENCH_REPAIR_PROVIDER_RUN_WINDOW_MS = 60_000;
+const HEADLESS_BENCH_REPAIR_PROVIDER_HANDOFF_WINDOW_MS =
+  HEADLESS_BENCH_VALIDATION_START_WINDOW_MS + 2_000;
 const HEADLESS_BENCH_PROVIDER_HANDOFF_WINDOW_MS =
   HEADLESS_BENCH_VALIDATION_START_WINDOW_MS +
-  HEADLESS_BENCH_VALIDATION_CLEANUP_SAFETY_WINDOW_MS;
+  HEADLESS_BENCH_REPAIR_PROVIDER_RUN_WINDOW_MS +
+  HEADLESS_BENCH_REPAIR_PROVIDER_HANDOFF_WINDOW_MS;
 
 type HeadlessBenchIndexRunner = (input: {
   context: TuiContext;
@@ -1966,6 +1970,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
     const runOneRequest = async (
       text: string,
       startSafetyWindowMs = providerStartSafetyWindowMs,
+      handoffWindowMs = HEADLESS_BENCH_PROVIDER_HANDOFF_WINDOW_MS,
     ): Promise<HeadlessTurnStatus> => {
       let nextText = text;
       while (true) {
@@ -1977,7 +1982,11 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           remainingMs === undefined
             ? undefined
             : benchConfig.enabled
-              ? remainingMs - HEADLESS_BENCH_PROVIDER_HANDOFF_WINDOW_MS
+              ? headlessBenchRequestDeadlineMs(
+                  remainingMs,
+                  startSafetyWindowMs,
+                  handoffWindowMs,
+                )
               : remainingMs;
         if (requestDeadlineMs !== undefined && requestDeadlineMs <= 0) {
           return { deadlineClosure: true };
@@ -2383,6 +2392,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
         const repairStatus = await runOneRequest(
           repairPrompt,
           HEADLESS_BENCH_REPAIR_PROVIDER_START_SAFETY_WINDOW_MS,
+          HEADLESS_BENCH_REPAIR_PROVIDER_HANDOFF_WINDOW_MS,
         );
         if (repairStatus.exitCode !== undefined) {
           emitHeadlessPhase(errorOutput, "failed", `exitCode=${repairStatus.exitCode}`, {
@@ -2763,6 +2773,16 @@ function resolveHeadlessBenchValidationDeadline(
   return {
     deadlineAtMs: deadlineAtMs - HEADLESS_BENCH_VALIDATION_CLEANUP_SAFETY_WINDOW_MS,
   };
+}
+
+function headlessBenchRequestDeadlineMs(
+  remainingMs: number,
+  startSafetyWindowMs: number,
+  handoffWindowMs: number,
+): number {
+  const minimumRequestWindowMs = Math.max(0, startSafetyWindowMs);
+  const reserveMs = Math.min(handoffWindowMs, Math.max(0, remainingMs - minimumRequestWindowMs));
+  return remainingMs - reserveMs;
 }
 
 function formatHeadlessRemainingTime(deadlineAtMs: number | undefined): string {

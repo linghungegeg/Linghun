@@ -1,6 +1,6 @@
 {
   "name": "@linghun/cli",
-  "version": "0.1.44",
+  "version": "0.1.45",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
@@ -33,6 +33,6 @@
     "@linghun/core": "0.1.8",
     "@linghun/providers": "0.1.18",
     "@linghun/shared": "0.1.11",
-    "@linghun/tui": "0.1.37"
+    "@linghun/tui": "0.1.38"
   }
 }

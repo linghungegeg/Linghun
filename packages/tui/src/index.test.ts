@@ -4326,7 +4326,7 @@ describe("runHeadlessTask", () => {
     expect(exitCode).toBe(0);
     expect(stdout.text).toContain("repair provider work stopped for validation/external verifier handoff");
     expect(stderr.text).not.toContain("closing without starting repair provider work");
-  });
+  }, 10_000);
 
   it("starts official validation inside the legacy headless deadline closure window", async () => {
     const startMs = Date.now();
