@@ -43,8 +43,8 @@ importers:
         specifier: 0.1.11
         version: 0.1.11
       '@linghun/tui':
-        specifier: 0.1.40
-        version: 0.1.40
+        specifier: 0.1.41
+        version: 0.1.41
     optionalDependencies:
       '@linghun/codebase-memory-darwin-arm64':
         specifier: 0.1.0
@@ -664,8 +664,8 @@ packages:
   '@linghun/tools@0.1.11':
     resolution: {integrity: sha512-axcR5Ly1ElxxRF0KGZy8j04FbTOETbzEsPhr7uJSzg9GNNHNClBGCd2aepit8/QP83YC/XNCFpJ+k4fP8Qay1Q==}
 
-  '@linghun/tui@0.1.40':
-    resolution: {integrity: sha512-HJtu8qZd2Zg/4CX2Hzl+27nGoU5JWXrtXHsB3DEMIaa42jpEOsyXKRxw18bWm3HqmwJSODXIV/EciDt2cEfRRQ==}
+  '@linghun/tui@0.1.41':
+    resolution: {integrity: sha512-5wmlpY0OueI4wMjKaQ6XwnalHyZJe56wtstEkHrAbulaIAJqQmLy8pSxi1QVx/K46GcRaB0FjiT7Oo6wnTevXQ==}
 
   '@protobufjs/aspromise@1.1.2':
     resolution: {integrity: sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ==}
@@ -1982,7 +1982,7 @@ snapshots:
     dependencies:
       parse5: 8.0.1
 
-  '@linghun/tui@0.1.40':
+  '@linghun/tui@0.1.41':
     dependencies:
       '@larksuiteoapi/node-sdk': 1.59.0
       '@linghun/config': 0.1.8
