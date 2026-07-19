@@ -100,6 +100,8 @@ export type HeadlessBenchConfig = {
   preflight: boolean;
   environmentSetupRetries: number;
   externalVerifier?: boolean;
+  externalOfficialFacts?: HeadlessOfficialValidationFacts;
+  externalOfficialFactsPath?: string;
 };
 
 export type HeadlessBenchValidationResult =
@@ -114,7 +116,7 @@ export type HeadlessBenchValidationResult =
   | { ok: false; failure: HeadlessBenchFailure };
 
 export type HeadlessOfficialValidationFacts = {
-  source: "project_local";
+  source: "project_local" | "external_file";
   reward?: number;
   rewardPath?: string;
   ctrfPath?: string;
@@ -125,6 +127,9 @@ export type HeadlessOfficialValidationFacts = {
     skipped?: number;
   };
   failedTests?: string[];
+  failureDetails?: string[];
+  testStdoutPath?: string;
+  testStdoutSummary?: string;
   resultPath?: string;
   resultReward?: number;
   metadataPath?: string;
@@ -183,6 +188,8 @@ export type HeadlessBenchOptions = Partial<
     | "preflight"
     | "environmentSetupRetries"
     | "externalVerifier"
+    | "externalOfficialFacts"
+    | "externalOfficialFactsPath"
   >
 >;
 
@@ -240,6 +247,11 @@ export async function resolveHeadlessBenchConfig(input: {
     MAX_REPAIR_ATTEMPTS,
   );
   const testCommand = input.options?.testCommand ?? env.LINGHUN_HEADLESS_TEST_COMMAND ?? defaultTestCommand;
+  const externalOfficialFactsPath =
+    input.options?.externalOfficialFactsPath ?? env.LINGHUN_HEADLESS_OFFICIAL_FACTS_FILE;
+  const externalOfficialFacts =
+    input.options?.externalOfficialFacts ??
+    (await readExternalHeadlessOfficialValidationFacts(externalOfficialFactsPath));
   const profile = await detectHeadlessBenchTaskProfile({
     prompt: input.prompt,
     projectPath: input.projectPath,
@@ -259,6 +271,8 @@ export async function resolveHeadlessBenchConfig(input: {
     environmentSetupRetries,
     externalVerifier:
       input.options?.externalVerifier ?? parseBoolean(env.LINGHUN_HEADLESS_EXTERNAL_VERIFIER) ?? false,
+    ...(externalOfficialFacts ? { externalOfficialFacts } : {}),
+    ...(externalOfficialFactsPath ? { externalOfficialFactsPath } : {}),
   };
 }
 
@@ -300,6 +314,10 @@ export function createHeadlessBenchInitialPrompt(input: {
     ? `Official test command available: ${input.config.testCommand}. Prefer it over ad-hoc smoke tests before final.`
     : "No official test command was detected; use the strongest task-local verification available.";
   const preflight = input.preflight ? `Environment preflight: ${input.preflight.summary}` : "";
+  const externalFacts = formatInitialExternalVerifierFacts(
+    input.config.externalOfficialFacts,
+    input.config.externalOfficialFactsPath,
+  );
   return [
     input.originalPrompt,
     "",
@@ -307,6 +325,7 @@ export function createHeadlessBenchInitialPrompt(input: {
     test,
     required,
     service,
+    externalFacts,
     preflight,
     formatInitialProfileStrategy(input.config.profile),
     "If rg is unavailable, use grep/find/sed/awk fallbacks instead of failing the task.",
@@ -335,15 +354,29 @@ export async function validateHeadlessBenchCompletion(input: {
   }
   const artifactResult = await validateRequiredArtifacts(input.projectPath, input.config);
   if (!artifactResult.ok) {
+    const facts = await readHeadlessOfficialValidationFacts(input.projectPath);
+    const officialFacts = facts ?? input.config.externalOfficialFacts;
+    const structuredFailure = summarizeNonPassingOfficialFacts(officialFacts);
+    const artifactSummary = `Required artifact contract failed: ${artifactResult.issues
+      .map((issue) => `${issue.path} ${issue.check}: ${issue.message}`)
+      .join("; ")}`;
     return {
       ok: false,
       failure: {
         category: "missing_artifact",
-        summary: `Required artifact contract failed: ${artifactResult.issues
-          .map((issue) => `${issue.path} ${issue.check}: ${issue.message}`)
-          .join("; ")}`,
+        summary: structuredFailure ? `${artifactSummary}\n${structuredFailure}` : artifactSummary,
         missingArtifacts: artifactResult.missing,
         artifactIssues: artifactResult.issues,
+        ...(structuredFailure
+          ? {
+              officialResult: facts
+                ? createProjectLocalOfficialResult(facts)
+                : createExternalOfficialResult(
+                    input.config.externalOfficialFacts,
+                    input.config.externalOfficialFactsPath,
+                  ),
+            }
+          : {}),
       },
     };
   }
@@ -496,14 +529,18 @@ function summarizeNonPassingOfficialFacts(
     ...(facts.failedTests?.length
       ? [`failedTests=${facts.failedTests.slice(0, 5).join(", ")}`]
       : []),
+    ...(facts.failureDetails?.length
+      ? [`failureDetails=${facts.failureDetails.slice(0, 3).join(" | ")}`]
+      : []),
     ...(facts.cliExitCode !== undefined && facts.cliExitCode !== 0
       ? [`cliExitCode=${facts.cliExitCode}`]
       : []),
     ...(facts.controlledDeadlineReached ? ["controlledDeadlineReached=true"] : []),
   ];
-  return reasons.length
-    ? `structured project-local verifier facts report non-pass (${reasons.join("; ")})`
-    : undefined;
+  if (reasons.length === 0) return undefined;
+  const supportingFacts = facts.testStdoutSummary ? [`testStdout=${facts.testStdoutSummary}`] : [];
+  const source = facts.source === "external_file" ? "external verifier" : "project-local verifier";
+  return `structured ${source} facts report non-pass (${[...reasons, ...supportingFacts].join("; ")})`;
 }
 
 function officialFactsFailureCategory(
@@ -523,6 +560,39 @@ function createProjectLocalOfficialResult(
     durationMs: 0,
     ...(facts ? { facts } : {}),
   };
+}
+
+function createExternalOfficialResult(
+  facts: HeadlessOfficialValidationFacts | undefined,
+  factsPath: string | undefined,
+): HeadlessOfficialValidationResult {
+  return {
+    command: "external official verifier facts from previous run",
+    exitCode: facts?.cliExitCode ?? (summarizeNonPassingOfficialFacts(facts) ? 1 : 0),
+    outcome: "completed",
+    logPath:
+      factsPath ??
+      facts?.resultPath ??
+      facts?.ctrfPath ??
+      facts?.rewardPath ??
+      facts?.metadataPath ??
+      "",
+    durationMs: 0,
+    ...(facts ? { facts } : {}),
+  };
+}
+
+function formatInitialExternalVerifierFacts(
+  facts: HeadlessOfficialValidationFacts | undefined,
+  factsPath: string | undefined,
+): string {
+  if (!facts) return "";
+  const formatted = formatRepairVerifierFacts(createExternalOfficialResult(facts, factsPath));
+  if (!formatted) return "";
+  return [
+    "Previous official verifier facts from an earlier external run. Use them as repair context, not as current pass/fail evidence:",
+    formatted,
+  ].join("\n");
 }
 
 function remainingDeadlineMs(deadlineAtMs: number | undefined): number | undefined {
@@ -741,7 +811,17 @@ function formatRepairVerifierFacts(
       : []),
     ...(officialResult?.logPath ? [`logPath=${officialResult.logPath}`] : []),
   ];
-  return parts.length ? `Official verifier facts: ${parts.join("; ")}` : "";
+  const detailLines = facts?.failureDetails?.length
+    ? [
+        "Official verifier failure details:",
+        ...facts.failureDetails.slice(0, 5).map((detail) => `- ${detail}`),
+      ]
+    : [];
+  const stdoutLines = facts?.testStdoutSummary
+    ? ["Official verifier stdout tail:", facts.testStdoutSummary]
+    : [];
+  const header = parts.length ? `Official verifier facts: ${parts.join("; ")}` : "";
+  return [header, ...detailLines, ...stdoutLines].filter(Boolean).join("\n");
 }
 
 export function formatHeadlessArtifactContracts(contracts: HeadlessArtifactContract[]): string {
@@ -1484,6 +1564,18 @@ async function readHeadlessOfficialValidationFacts(
   if (failedTests.length > 0) {
     facts.failedTests = failedTests.slice(0, 20);
   }
+  const failureDetails = summarizeCtrfFailureDetails(ctrfTests);
+  if (failureDetails.length > 0) {
+    facts.failureDetails = failureDetails;
+  }
+
+  const testStdoutPath = join(projectPath, "verifier", "test-stdout.txt");
+  const testStdout = await readOptionalText(testStdoutPath);
+  const testStdoutSummary = summarizeVerifierTextTail(testStdout);
+  if (testStdoutSummary) {
+    facts.testStdoutPath = testStdoutPath;
+    facts.testStdoutSummary = testStdoutSummary;
+  }
 
   const resultPath = join(projectPath, "result.json");
   const result = await readJsonObject(resultPath);
@@ -1511,6 +1603,128 @@ async function readHeadlessOfficialValidationFacts(
 
   if (Object.keys(facts).length === 0) return undefined;
   return { ...facts, source: "project_local" };
+}
+
+async function readExternalHeadlessOfficialValidationFacts(
+  factsPath: string | undefined,
+): Promise<HeadlessOfficialValidationFacts | undefined> {
+  if (!factsPath) return undefined;
+  const payload = await readJsonObject(factsPath);
+  if (!payload) return undefined;
+  if (payload.facts_status === "unavailable") return undefined;
+
+  const rawFacts = readObject(payload.facts) ?? payload;
+  const facts: Partial<Omit<HeadlessOfficialValidationFacts, "source">> = {};
+  copyNumberFact(rawFacts, facts, "reward", "reward");
+  copyNumberFact(rawFacts, facts, "resultReward", "result_reward", "resultReward");
+  copyNumberFact(rawFacts, facts, "cliExitCode", "cli_exit_code", "cliExitCode");
+  copyBooleanFact(
+    rawFacts,
+    facts,
+    "controlledDeadlineReached",
+    "controlled_deadline_reached",
+    "controlledDeadlineReached",
+  );
+  copyBooleanFact(rawFacts, facts, "verifierTimeout", "verifier_timeout", "verifierTimeout");
+
+  const ctrfSummary = readObject(rawFacts.ctrf_summary) ?? readObject(rawFacts.ctrfSummary);
+  if (ctrfSummary) {
+    facts.ctrfSummary = {
+      ...readOptionalNumberProperty(ctrfSummary, "tests"),
+      ...readOptionalNumberProperty(ctrfSummary, "passed"),
+      ...readOptionalNumberProperty(ctrfSummary, "failed"),
+      ...readOptionalNumberProperty(ctrfSummary, "skipped"),
+    };
+  }
+  const failedTests = readStringArrayFact(rawFacts, "failed_tests", "failedTests");
+  if (failedTests.length > 0) facts.failedTests = failedTests.slice(0, 20);
+  const failureDetails = readStringArrayFact(rawFacts, "failure_details", "failureDetails");
+  if (failureDetails.length > 0) facts.failureDetails = failureDetails.slice(0, 12);
+
+  const testStdoutSummary = readStringFact(rawFacts, "test_stdout_summary", "testStdoutSummary");
+  if (testStdoutSummary) facts.testStdoutSummary = normalizeVerifierFactText(testStdoutSummary).slice(0, 1800);
+  const verifierTimeoutSummary = readStringFact(
+    rawFacts,
+    "verifier_timeout_summary",
+    "verifierTimeoutSummary",
+  );
+  if (verifierTimeoutSummary) facts.verifierTimeoutSummary = verifierTimeoutSummary.slice(0, 300);
+
+  copyExternalPathFacts(payload, rawFacts, facts);
+  if (Object.keys(facts).length === 0) return undefined;
+  return { ...facts, source: "external_file" };
+}
+
+function copyNumberFact(
+  rawFacts: Record<string, unknown>,
+  facts: Partial<Omit<HeadlessOfficialValidationFacts, "source">>,
+  target: keyof Omit<HeadlessOfficialValidationFacts, "source">,
+  ...keys: string[]
+): void {
+  for (const key of keys) {
+    const value = parseFiniteNumber(rawFacts[key]);
+    if (value === undefined) continue;
+    (facts as Record<string, unknown>)[target] = value;
+    return;
+  }
+}
+
+function copyBooleanFact(
+  rawFacts: Record<string, unknown>,
+  facts: Partial<Omit<HeadlessOfficialValidationFacts, "source">>,
+  target: keyof Omit<HeadlessOfficialValidationFacts, "source">,
+  ...keys: string[]
+): void {
+  for (const key of keys) {
+    const value = rawFacts[key];
+    if (typeof value !== "boolean") continue;
+    (facts as Record<string, unknown>)[target] = value;
+    return;
+  }
+}
+
+function readStringArrayFact(rawFacts: Record<string, unknown>, ...keys: string[]): string[] {
+  for (const key of keys) {
+    const value = rawFacts[key];
+    if (!Array.isArray(value)) continue;
+    return value
+      .map((item) => (typeof item === "string" ? normalizeVerifierFactText(item) : ""))
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function readStringFact(rawFacts: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = rawFacts[key];
+    if (typeof value !== "string") continue;
+    const normalized = normalizeVerifierFactText(value);
+    if (normalized) return normalized;
+  }
+  return undefined;
+}
+
+function copyExternalPathFacts(
+  payload: Record<string, unknown>,
+  rawFacts: Record<string, unknown>,
+  facts: Partial<Omit<HeadlessOfficialValidationFacts, "source">>,
+): void {
+  const paths = readObject(payload.paths);
+  const readPath = (name: string, ...keys: string[]): string | undefined => {
+    for (const key of keys) {
+      const direct = readStringFact(rawFacts, key);
+      if (direct) return direct;
+    }
+    const entry = readObject(paths?.[name]);
+    const value = typeof entry?.path === "string" ? normalizeVerifierFactText(entry.path) : "";
+    return value || undefined;
+  };
+  facts.resultPath = readPath("result", "result_path", "resultPath") ?? facts.resultPath;
+  facts.rewardPath = readPath("reward", "reward_path", "rewardPath") ?? facts.rewardPath;
+  facts.ctrfPath = readPath("ctrf", "ctrf_path", "ctrfPath") ?? facts.ctrfPath;
+  facts.metadataPath = readPath("metadata", "metadata_path", "metadataPath") ?? facts.metadataPath;
+  facts.testStdoutPath =
+    readPath("test_stdout", "test_stdout_path", "testStdoutPath") ?? facts.testStdoutPath;
 }
 
 async function readVerifierTimeoutFact(
@@ -1595,6 +1809,50 @@ function readObject(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+function summarizeCtrfFailureDetails(tests: unknown[]): string[] {
+  return tests
+    .map((item) => readObject(item))
+    .filter(
+      (item): item is Record<string, unknown> => item !== undefined && item.status !== "passed",
+    )
+    .map((item) => {
+      const name = typeof item.name === "string" ? item.name.trim() : "";
+      const detail = ["message", "trace", "stdout", "stderr", "output"]
+        .map((key) => readBoundedStringProperty(item, key, key === "trace" ? 700 : 360))
+        .filter(Boolean)
+        .join(" | ");
+      return normalizeVerifierFactText([name, detail].filter(Boolean).join(": "));
+    })
+    .filter(Boolean)
+    .slice(0, 12);
+}
+
+function readBoundedStringProperty(
+  object: Record<string, unknown>,
+  key: string,
+  limit: number,
+): string | undefined {
+  const value = object[key];
+  if (typeof value !== "string") return undefined;
+  const normalized = normalizeVerifierFactText(value);
+  return normalized ? `${key}=${normalized.slice(0, limit)}` : undefined;
+}
+
+function summarizeVerifierTextTail(text: string | undefined): string | undefined {
+  if (!text) return undefined;
+  const lines = text
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const selected = lines.slice(-18);
+  const summary = normalizeVerifierFactText(selected.join(" | "));
+  return summary ? summary.slice(0, 1800) : undefined;
+}
+
+function normalizeVerifierFactText(text: string): string {
+  return text.replace(/\s+/gu, " ").trim();
 }
 
 function parseFiniteNumber(value: unknown): number | undefined {
@@ -1840,5 +2098,6 @@ function cmdQuote(value: string): string {
 
 export const __testHeadlessRuntime = {
   createSanitizedChildEnv,
+  readExternalHeadlessOfficialValidationFacts,
   readHeadlessOfficialValidationFacts,
 };

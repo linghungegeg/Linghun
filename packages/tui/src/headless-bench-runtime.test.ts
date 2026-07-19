@@ -164,6 +164,10 @@ describe("headless-bench-runtime", () => {
             controlledDeadlineReached: true,
             ctrfSummary: { tests: 2, passed: 1, failed: 1, skipped: 0 },
             failedTests: ["test_outputs.py::test_missing", "test_outputs.py::test_bad"],
+            failureDetails: [
+              "test_outputs.py::test_missing: trace=AssertionError: File /app/out.txt does not exist",
+            ],
+            testStdoutSummary: "FAILED test_outputs.py::test_missing - File /app/out.txt does not exist",
           },
         },
       },
@@ -183,6 +187,9 @@ describe("headless-bench-runtime", () => {
     expect(prompt).toContain("Official verifier facts: reward=0; resultReward=0");
     expect(prompt).toContain("ctrfFailed=1/2");
     expect(prompt).toContain("failedTests=test_outputs.py::test_missing, test_outputs.py::test_bad");
+    expect(prompt).toContain("Official verifier failure details:");
+    expect(prompt).toContain("AssertionError: File /app/out.txt does not exist");
+    expect(prompt).toContain("Official verifier stdout tail:");
     expect(prompt).toContain("cliExitCode=6");
     expect(prompt).toContain("controlledDeadlineReached=true");
     expect(prompt).toContain("Official verifier log: /tmp/verifier.log");
@@ -264,6 +271,299 @@ describe("headless-bench-runtime", () => {
         ctrfSummary: { tests: 2, passed: 1, failed: 1, skipped: 0 },
         failedTests: ["test_outputs.py::test_missing_artifact"],
       });
+    }
+  });
+
+  it("returns verifier failure details and stdout tail from project-local artifacts", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-official-detail-facts-"));
+    await mkdir(join(project, "verifier"), { recursive: true });
+    await writeFile(join(project, "verifier", "reward.txt"), "0\n", "utf8");
+    await writeFile(
+      join(project, "verifier", "ctrf.json"),
+      JSON.stringify({
+        results: {
+          summary: { tests: 1, passed: 0, failed: 1, skipped: 0 },
+          tests: [
+            {
+              name: "test_outputs.py::test_out_file",
+              status: "failed",
+              message: "The test failed in the call phase",
+              trace: "AssertionError: File /app/out.txt does not exist",
+            },
+          ],
+        },
+      }),
+      "utf8",
+    );
+    await writeFile(
+      join(project, "verifier", "test-stdout.txt"),
+      "FAILED test_outputs.py::test_out_file - AssertionError: File /app/out.txt does not exist\n",
+      "utf8",
+    );
+    const { __testHeadlessRuntime } = await import("./headless-bench-runtime.js");
+
+    const facts = await __testHeadlessRuntime.readHeadlessOfficialValidationFacts(project);
+
+    expect(facts?.failureDetails?.[0]).toContain("test_outputs.py::test_out_file");
+    expect(facts?.failureDetails?.[0]).toContain("/app/out.txt does not exist");
+    expect(facts?.testStdoutSummary).toContain("FAILED test_outputs.py::test_out_file");
+  });
+
+  it("attaches project-local verifier facts to artifact validation failures", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-artifact-official-facts-"));
+    await mkdir(join(project, "verifier"), { recursive: true });
+    await writeFile(join(project, "verifier", "reward.txt"), "0\n", "utf8");
+    await writeFile(
+      join(project, "verifier", "ctrf.json"),
+      JSON.stringify({
+        results: {
+          summary: { tests: 1, passed: 0, failed: 1, skipped: 0 },
+          tests: [
+            {
+              name: "test_outputs.py::test_out_file",
+              status: "failed",
+              trace: "AssertionError: File /app/out.txt does not exist",
+            },
+          ],
+        },
+      }),
+      "utf8",
+    );
+    await writeFile(
+      join(project, "verifier", "test-stdout.txt"),
+      "FAILED test_outputs.py::test_out_file - AssertionError: File /app/out.txt does not exist\n",
+      "utf8",
+    );
+    const { createHeadlessBenchRepairPrompt, validateHeadlessBenchCompletion } = await import(
+      "./headless-bench-runtime.js"
+    );
+
+    const result = await validateHeadlessBenchCompletion({
+      projectPath: project,
+      config: {
+        enabled: true,
+        profile: "generic",
+        testTimeoutMs: 5_000,
+        maxRepairAttempts: 1,
+        requiredArtifacts: ["/app/out.txt"],
+        preflight: false,
+        environmentSetupRetries: 0,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.failure.category).toBe("missing_artifact");
+      expect(result.failure.missingArtifacts).toEqual(["/app/out.txt"]);
+      expect(result.failure.artifactIssues?.[0]).toMatchObject({
+        path: "/app/out.txt",
+        kind: "text",
+        check: "exists",
+      });
+      expect(result.failure.summary).toContain("Required artifact contract failed");
+      expect(result.failure.summary).toContain("structured project-local verifier facts report non-pass");
+      expect(result.failure.officialResult?.facts).toMatchObject({
+        source: "project_local",
+        reward: 0,
+        failedTests: ["test_outputs.py::test_out_file"],
+      });
+      expect(result.failure.officialResult?.facts?.failureDetails?.[0]).toContain(
+        "/app/out.txt does not exist",
+      );
+      expect(result.failure.officialResult?.facts?.testStdoutSummary).toContain(
+        "FAILED test_outputs.py::test_out_file",
+      );
+
+      const prompt = createHeadlessBenchRepairPrompt({
+        originalPrompt: "Write /app/out.txt.",
+        failure: result.failure,
+        attempt: 1,
+        maxAttempts: 2,
+        profile: "generic",
+      });
+      expect(prompt).toContain("Artifact validation issues: /app/out.txt exists");
+      expect(prompt).toContain("Official verifier failure details:");
+      expect(prompt).toContain("Official verifier stdout tail:");
+      expect(prompt).toContain("FAILED test_outputs.py::test_out_file");
+    }
+  });
+
+  it("injects external official verifier facts into initial and artifact repair prompts", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-external-official-facts-"));
+    const factsFile = join(project, "previous-verifier-facts.json");
+    await writeFile(
+      factsFile,
+      JSON.stringify({
+        facts_status: "available",
+        facts: {
+          reward: 0,
+          result_reward: 0,
+          ctrf_summary: { tests: 3, passed: 0, failed: 3, skipped: 0 },
+          failed_tests: [
+            "test_outputs.py::test_vm_execution",
+            "test_outputs.py::test_frame_bmp_exists",
+          ],
+          failure_details: [
+            "test_outputs.py::test_frame_bmp_exists: trace=AssertionError: File /tmp/frame.bmp does not exist",
+          ],
+          test_stdout_summary:
+            "FAILED test_outputs.py::test_frame_bmp_exists - AssertionError: File /tmp/frame.bmp does not exist",
+        },
+      }),
+      "utf8",
+    );
+    const {
+      createHeadlessBenchInitialPrompt,
+      createHeadlessBenchRepairPrompt,
+      resolveHeadlessBenchConfig,
+      validateHeadlessBenchCompletion,
+    } = await import("./headless-bench-runtime.js");
+
+    const config = await resolveHeadlessBenchConfig({
+      projectPath: project,
+      prompt: "Terminal-Bench task container. Write generated.txt.",
+      env: {
+        LINGHUN_HEADLESS_BENCH: "1",
+        LINGHUN_HEADLESS_EXTERNAL_VERIFIER: "1",
+        LINGHUN_HEADLESS_OFFICIAL_FACTS_FILE: factsFile,
+      },
+      options: {
+        requiredArtifacts: ["generated.txt"],
+        preflight: false,
+      },
+    });
+    const initialPrompt = createHeadlessBenchInitialPrompt({
+      originalPrompt: "Write generated.txt.",
+      config,
+    });
+
+    expect(config.externalOfficialFacts).toMatchObject({
+      source: "external_file",
+      reward: 0,
+      resultReward: 0,
+      failedTests: [
+        "test_outputs.py::test_vm_execution",
+        "test_outputs.py::test_frame_bmp_exists",
+      ],
+    });
+    expect(initialPrompt).toContain("Previous official verifier facts from an earlier external run");
+    expect(initialPrompt).toContain("test_outputs.py::test_frame_bmp_exists");
+    expect(initialPrompt).toContain("/tmp/frame.bmp does not exist");
+
+    const missingResult = await validateHeadlessBenchCompletion({
+      projectPath: project,
+      config,
+    });
+    expect(missingResult.ok).toBe(false);
+    if (!missingResult.ok) {
+      expect(missingResult.failure.category).toBe("missing_artifact");
+      expect(missingResult.failure.officialResult?.facts).toMatchObject({
+        source: "external_file",
+        failedTests: [
+          "test_outputs.py::test_vm_execution",
+          "test_outputs.py::test_frame_bmp_exists",
+        ],
+      });
+      const repairPrompt = createHeadlessBenchRepairPrompt({
+        originalPrompt: "Write generated.txt.",
+        failure: missingResult.failure,
+        attempt: 1,
+        maxAttempts: 2,
+        profile: "generic",
+      });
+      expect(repairPrompt).toContain("Official verifier failure details:");
+      expect(repairPrompt).toContain("Official verifier stdout tail:");
+      expect(repairPrompt).toContain("/tmp/frame.bmp does not exist");
+    }
+
+    await writeFile(join(project, "generated.txt"), "done\n", "utf8");
+    const repairedResult = await validateHeadlessBenchCompletion({
+      projectPath: project,
+      config,
+    });
+
+    expect(repairedResult).toMatchObject({
+      ok: true,
+      testRan: false,
+      deferredToExternalVerifier: true,
+    });
+  });
+
+  it("ignores unavailable external official verifier facts files", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-external-facts-unavailable-"));
+    const factsFile = join(project, "previous-verifier-facts.json");
+    await writeFile(
+      factsFile,
+      JSON.stringify({
+        facts_status: "unavailable",
+        unavailable_reason: "post_verifier_not_ready",
+      }),
+      "utf8",
+    );
+    const { resolveHeadlessBenchConfig, validateHeadlessBenchCompletion } = await import(
+      "./headless-bench-runtime.js"
+    );
+
+    const config = await resolveHeadlessBenchConfig({
+      projectPath: project,
+      prompt: "Terminal-Bench task container. Write vm.js.",
+      env: {
+        LINGHUN_HEADLESS_BENCH: "1",
+        LINGHUN_HEADLESS_EXTERNAL_VERIFIER: "1",
+        LINGHUN_HEADLESS_OFFICIAL_FACTS_FILE: factsFile,
+      },
+      options: {
+        requiredArtifacts: ["vm.js"],
+        preflight: false,
+      },
+    });
+    const result = await validateHeadlessBenchCompletion({
+      projectPath: project,
+      config,
+    });
+
+    expect(config.externalOfficialFacts).toBeUndefined();
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.failure.category).toBe("missing_artifact");
+      expect(result.failure.officialResult).toBeUndefined();
+    }
+  });
+
+  it("keeps artifact validation failures unannotated when verifier artifacts are absent", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-artifact-no-official-facts-"));
+    const { createHeadlessBenchRepairPrompt, validateHeadlessBenchCompletion } = await import(
+      "./headless-bench-runtime.js"
+    );
+
+    const result = await validateHeadlessBenchCompletion({
+      projectPath: project,
+      config: {
+        enabled: true,
+        profile: "generic",
+        testTimeoutMs: 5_000,
+        maxRepairAttempts: 1,
+        requiredArtifacts: ["generated.txt"],
+        preflight: false,
+        environmentSetupRetries: 0,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.failure.category).toBe("missing_artifact");
+      expect(result.failure.officialResult).toBeUndefined();
+
+      const prompt = createHeadlessBenchRepairPrompt({
+        originalPrompt: "Write generated.txt.",
+        failure: result.failure,
+        attempt: 1,
+        maxAttempts: 2,
+        profile: "generic",
+      });
+      expect(prompt).not.toContain("Official verifier facts:");
+      expect(prompt).not.toContain("Official verifier failure details:");
+      expect(prompt).not.toContain("Official verifier stdout tail:");
     }
   });
 
