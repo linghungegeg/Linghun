@@ -399,6 +399,8 @@ describe("headless-bench-runtime", () => {
         facts: {
           reward: 0,
           result_reward: 0,
+          cli_exit_code: 6,
+          controlled_deadline_reached: true,
           ctrf_summary: { tests: 3, passed: 0, failed: 3, skipped: 0 },
           failed_tests: [
             "test_outputs.py::test_vm_execution",
@@ -483,17 +485,11 @@ describe("headless-bench-runtime", () => {
       config,
     });
 
-    expect(repairedResult.ok).toBe(false);
-    if (!repairedResult.ok) {
-      expect(repairedResult.failure.category).toBe("model_patch_failed");
-      expect(repairedResult.failure.summary).toContain("structured external verifier facts report non-pass");
-      expect(repairedResult.failure.officialResult?.facts).toMatchObject({
-        source: "external_file",
-        failedTests: [
-          "test_outputs.py::test_vm_execution",
-          "test_outputs.py::test_frame_bmp_exists",
-        ],
-      });
+    expect(repairedResult.ok).toBe(true);
+    if (repairedResult.ok) {
+      expect(repairedResult.deferredToExternalVerifier).toBe(true);
+      expect(repairedResult.summary).toContain("pass/fail deferred to external verifier");
+      expect(repairedResult.officialResult).toBeUndefined();
     }
   });
 

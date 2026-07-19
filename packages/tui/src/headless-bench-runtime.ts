@@ -418,7 +418,7 @@ export async function validateHeadlessBenchCompletion(input: {
     const externalStructuredFailure = summarizeNonPassingOfficialFacts(
       input.config.externalOfficialFacts,
     );
-    if (externalStructuredFailure) {
+    if (externalStructuredFailure && !hasCurrentExternalVerifierHandoffEvidence(input.config)) {
       return {
         ok: false,
         failure: {
@@ -440,6 +440,14 @@ export async function validateHeadlessBenchCompletion(input: {
             category: sanity.category,
             summary: sanity.summary,
           },
+        };
+      }
+      if (hasCurrentExternalVerifierHandoffEvidence(input.config)) {
+        return {
+          ok: true,
+          testRan: false,
+          summary: headlessNoLocalTestSummary(input.config, true),
+          deferredToExternalVerifier: true,
         };
       }
       return {
@@ -613,6 +621,10 @@ function officialFactsFailureCategory(
   if (facts?.verifierTimeout) return "verifier_timeout";
   if (facts?.controlledDeadlineReached) return "test_timeout";
   return "model_patch_failed";
+}
+
+function hasCurrentExternalVerifierHandoffEvidence(config: HeadlessBenchConfig): boolean {
+  return getArtifactContracts(config).length > 0 || getServiceContracts(config).length > 0;
 }
 
 function createProjectLocalOfficialResult(
