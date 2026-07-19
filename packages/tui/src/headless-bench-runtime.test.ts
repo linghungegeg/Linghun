@@ -66,6 +66,7 @@ describe("headless-bench-runtime", () => {
     });
 
     expect(prompt).toContain("Before long builds, training, or full suites");
+    expect(prompt).toContain("hard single-time budget");
     expect(prompt).toContain("Run installs non-interactively");
     expect(disabledPrompt).toBe("Fix the project.");
   });
@@ -482,10 +483,243 @@ describe("headless-bench-runtime", () => {
       config,
     });
 
-    expect(repairedResult).toMatchObject({
-      ok: true,
-      testRan: false,
-      deferredToExternalVerifier: true,
+    expect(repairedResult.ok).toBe(false);
+    if (!repairedResult.ok) {
+      expect(repairedResult.failure.category).toBe("model_patch_failed");
+      expect(repairedResult.failure.summary).toContain("structured external verifier facts report non-pass");
+      expect(repairedResult.failure.officialResult?.facts).toMatchObject({
+        source: "external_file",
+        failedTests: [
+          "test_outputs.py::test_vm_execution",
+          "test_outputs.py::test_frame_bmp_exists",
+        ],
+      });
+    }
+  });
+
+  it("does not select multi-task external facts without an explicit task name", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-external-multi-facts-"));
+    const factsFile = join(project, "manifest.json");
+    await writeFile(
+      factsFile,
+      JSON.stringify({
+        facts_status: "available",
+        tasks: {
+          alpha: { facts: { task_name: "alpha", reward: 0, failed_tests: ["alpha failed"] } },
+          beta: { facts: { task_name: "beta", reward: 0, failed_tests: ["beta failed"] } },
+        },
+      }),
+      "utf8",
+    );
+    const { resolveHeadlessBenchConfig } = await import("./headless-bench-runtime.js");
+
+    const config = await resolveHeadlessBenchConfig({
+      projectPath: project,
+      prompt: "Terminal-Bench task container.",
+      env: {
+        LINGHUN_HEADLESS_BENCH: "1",
+        LINGHUN_HEADLESS_OFFICIAL_FACTS_FILE: factsFile,
+      },
+      options: { preflight: false },
+    });
+
+    expect(config.externalOfficialFacts).toBeUndefined();
+  });
+
+  it("selects external manifest facts by explicit task name", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-external-task-facts-"));
+    const factsFile = join(project, "manifest.json");
+    await writeFile(
+      factsFile,
+      JSON.stringify({
+        facts_status: "available",
+        tasks: {
+          alpha: {
+            facts: {
+              task_name: "alpha",
+              source_trial: "alpha__1",
+              reward: 0,
+              failed_tests: ["alpha failed"],
+            },
+          },
+          beta: {
+            facts: {
+              task_name: "beta",
+              source_trial: "beta__1",
+              previous_outcome: "no_any_pass",
+              reward: 0,
+              controlled_deadline_reached: true,
+              failed_tests: ["test_beta.py::test_output"],
+              failure_details: ["test_beta.py::test_output: trace=AssertionError: missing output"],
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+    const { createHeadlessBenchInitialPrompt, resolveHeadlessBenchConfig } = await import(
+      "./headless-bench-runtime.js"
+    );
+
+    const config = await resolveHeadlessBenchConfig({
+      projectPath: project,
+      prompt: "Terminal-Bench task container.",
+      env: {
+        LINGHUN_HEADLESS_BENCH: "1",
+        LINGHUN_HEADLESS_OFFICIAL_FACTS_FILE: factsFile,
+        LINGHUN_HEADLESS_TASK_NAME: "suite/beta",
+      },
+      options: { preflight: false },
+    });
+    const prompt = createHeadlessBenchInitialPrompt({
+      originalPrompt: "Fix beta.",
+      config,
+    });
+
+    expect(config.externalOfficialFacts).toMatchObject({
+      source: "external_file",
+      taskName: "beta",
+      sourceTrial: "beta__1",
+      previousOutcome: "no_any_pass",
+      reward: 0,
+      controlledDeadlineReached: true,
+      failedTests: ["test_beta.py::test_output"],
+    });
+    expect(prompt).toContain("task=beta");
+    expect(prompt).toContain("sourceTrial=beta__1");
+    expect(prompt).toContain("previousOutcome=no_any_pass");
+    expect(prompt).toContain("controlledDeadlineReached=true");
+    expect(prompt).toContain("Official verifier repair route:");
+    expect(prompt).toContain("deadline was reached");
+    expect(prompt).toContain("test_beta.py::test_output");
+    expect(prompt).not.toContain("alpha failed");
+  });
+
+  it("classifies external controlled-deadline facts as timeout repair failures", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-external-deadline-facts-"));
+    const factsFile = join(project, "deadline-facts.json");
+    await writeFile(
+      factsFile,
+      JSON.stringify({
+        facts_status: "available",
+        facts: {
+          task_name: "make-doom-for-mips",
+          previous_outcome: "no_any_pass",
+          reward: 0,
+          controlled_deadline_reached: true,
+          failed_tests: ["test_outputs.py::test_vm_execution"],
+        },
+      }),
+      "utf8",
+    );
+    const { resolveHeadlessBenchConfig, validateHeadlessBenchCompletion } = await import(
+      "./headless-bench-runtime.js"
+    );
+
+    const config = await resolveHeadlessBenchConfig({
+      projectPath: project,
+      prompt: "Terminal-Bench task container.",
+      env: {
+        LINGHUN_HEADLESS_BENCH: "1",
+        LINGHUN_HEADLESS_EXTERNAL_VERIFIER: "1",
+        LINGHUN_HEADLESS_OFFICIAL_FACTS_FILE: factsFile,
+      },
+      options: { preflight: false },
+    });
+    const result = await validateHeadlessBenchCompletion({
+      projectPath: project,
+      config,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.failure.category).toBe("test_timeout");
+      expect(result.failure.summary).toContain("controlledDeadlineReached=true");
+      expect(result.failure.officialResult?.facts?.taskName).toBe("make-doom-for-mips");
+    }
+  });
+
+  it("routes html sanitizer facts to data/security repair guidance", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-external-html-facts-"));
+    const factsFile = join(project, "html-facts.json");
+    await writeFile(
+      factsFile,
+      JSON.stringify({
+        facts_status: "available",
+        facts: {
+          task_name: "filter-js-from-html",
+          previous_outcome: "no_any_pass",
+          reward: 0,
+          failed_tests: [
+            "test_outputs.py::test_filter_blocks_xss",
+            "test_outputs.py::test_clean_html_unchanged",
+          ],
+          failure_details: [
+            "test_outputs.py::test_filter_blocks_xss: trace=AssertionError: script tag was not removed",
+          ],
+        },
+      }),
+      "utf8",
+    );
+    const { createHeadlessBenchInitialPrompt, resolveHeadlessBenchConfig } = await import(
+      "./headless-bench-runtime.js"
+    );
+
+    const config = await resolveHeadlessBenchConfig({
+      projectPath: project,
+      prompt: "Terminal-Bench task container.",
+      env: {
+        LINGHUN_HEADLESS_BENCH: "1",
+        LINGHUN_HEADLESS_OFFICIAL_FACTS_FILE: factsFile,
+      },
+      options: { preflight: false },
+    });
+    const prompt = createHeadlessBenchInitialPrompt({
+      originalPrompt: "Filter unsafe HTML.",
+      config,
+    });
+
+    expect(prompt).toContain("Official verifier repair route:");
+    expect(prompt).toContain("data/security surface");
+    expect(prompt).toContain("structured parsing");
+    expect(prompt).not.toContain("ml/data surface");
+  });
+
+  it("selects a single-task external manifest without a task name", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-external-single-facts-"));
+    const factsFile = join(project, "manifest.json");
+    await writeFile(
+      factsFile,
+      JSON.stringify({
+        facts_status: "available",
+        tasks: {
+          solo: {
+            facts: {
+              task_name: "solo",
+              reward: 0,
+              failed_tests: ["solo failed"],
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+    const { resolveHeadlessBenchConfig } = await import("./headless-bench-runtime.js");
+
+    const config = await resolveHeadlessBenchConfig({
+      projectPath: project,
+      prompt: "Terminal-Bench task container.",
+      env: {
+        LINGHUN_HEADLESS_BENCH: "1",
+        LINGHUN_HEADLESS_OFFICIAL_FACTS_FILE: factsFile,
+      },
+      options: { preflight: false },
+    });
+
+    expect(config.externalOfficialFacts).toMatchObject({
+      source: "external_file",
+      taskName: "solo",
+      failedTests: ["solo failed"],
     });
   });
 
@@ -611,7 +845,7 @@ describe("headless-bench-runtime", () => {
     }
   });
 
-  it("marks no-local-test external verifier validation as deferred without test pass", async () => {
+  it("fails no-local-test external verifier validation without current pass evidence", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-external-deferred-"));
     const { validateHeadlessBenchCompletion } = await import("./headless-bench-runtime.js");
 
@@ -629,14 +863,12 @@ describe("headless-bench-runtime", () => {
       },
     });
 
-    expect(result).toMatchObject({
-      ok: true,
-      testRan: false,
-      deferredToExternalVerifier: true,
-    });
-    if (result.ok) {
-      expect(result.summary).toContain("pass/fail deferred to external verifier");
-      expect(result.officialResult).toBeUndefined();
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.failure.category).toBe("unknown_agent_error");
+      expect(result.failure.summary).toContain("pass/fail deferred to external verifier");
+      expect(result.failure.summary).toContain("no PASS evidence");
+      expect(result.failure.officialResult).toBeUndefined();
     }
   });
 
@@ -733,7 +965,7 @@ describe("headless-bench-runtime", () => {
     }
   });
 
-  it("fails no-local-test validation when project-local verifier facts report failure", async () => {
+  it("routes no-local-test project-local deadline facts to timeout repair", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-external-facts-fail-"));
     await mkdir(join(project, "verifier"), { recursive: true });
     await mkdir(join(project, "agent"), { recursive: true });
@@ -771,7 +1003,7 @@ describe("headless-bench-runtime", () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.failure.category).toBe("model_patch_failed");
+      expect(result.failure.category).toBe("test_timeout");
       expect(result.failure.summary).toContain("reward=0");
       expect(result.failure.summary).toContain("cliExitCode=6");
       expect(result.failure.summary).toContain("controlledDeadlineReached=true");
@@ -901,9 +1133,15 @@ describe("headless-bench-runtime", () => {
     expect(result).toMatchObject({
       ok: true,
       testRan: false,
-      deferredToExternalVerifier: true,
     });
-    if (result.ok) expect(result.officialResult).toBeUndefined();
+    if (result.ok) {
+      expect(result.summary).toContain("project-local official verifier facts report pass");
+      expect(result.deferredToExternalVerifier).toBeUndefined();
+      expect(result.officialResult?.facts).toMatchObject({
+        source: "project_local",
+        reward: 1,
+      });
+    }
   });
 
   it("confirms a timed-out official process tree is gone before returning", async () => {

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +16,11 @@ describe("bench diagnostics", () => {
 
     const summary = await summarizeJobDir(root);
 
+    expect(summary.officialSubmissionConfig).toMatchObject({
+      ok: true,
+      checkedTrials: 4,
+      violationCount: 0,
+    });
     expect(summary.trialTasks.configuredTaskCount).toBe(3);
     expect(summary.trialTasks.trialCount).toBe(4);
     expect(summary.trialTasks.effectiveTrialCount).toBe(3);
@@ -59,24 +64,151 @@ describe("bench diagnostics", () => {
 
     expect(stdout).toContain("results: 1/3 (33.3%)");
     expect(stdout).toContain("first unique: 0/2 (0.0%)");
+    expect(stdout).toContain("official submission config: PASS");
     expect(stdout).toContain("- test_timeout: 1");
     expect(stdout).toContain("- model_patch_failed: 1");
-    expect(stdout).not.toContain("agent_timeout");
-    expect(stdout).not.toContain("resource_exhausted");
-    expect(stdout).not.toContain("environment_missing_tool");
+    expect(stdout).not.toContain("- agent_timeout:");
+    expect(stdout).not.toContain("- resource_exhausted:");
+    expect(stdout).not.toContain("- environment_missing_tool:");
+    expect(stdout).not.toContain("--global-agent-timeout-sec");
+  }, 10_000);
+
+  it("flags non-default timeout multipliers before official submission", async () => {
+    const root = await createHarborFixture({
+      trialOverrides: {
+        alpha__1: {
+          agent_timeout_multiplier: 2,
+          verifier_timeout_multiplier: 2,
+        },
+      },
+    });
+
+    const summary = await summarizeJobDir(root);
+
+    expect(summary.officialSubmissionConfig.ok).toBe(false);
+    expect(summary.officialSubmissionConfig.violationCount).toBe(2);
+    expect(summary.officialSubmissionConfig.violations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          file: "alpha__1/config.json",
+          field: "agent_timeout_multiplier",
+          value: 2,
+        }),
+        expect.objectContaining({
+          file: "alpha__1/config.json",
+          field: "verifier_timeout_multiplier",
+          value: 2,
+        }),
+      ]),
+    );
   });
+
+  it("returns non-zero from the official submission check on config drift", async () => {
+    const root = await createHarborFixture({
+      trialOverrides: {
+        alpha__1: {
+          agent_timeout_multiplier: 2,
+        },
+      },
+    });
+
+    try {
+      await execFileAsync(
+        process.execPath,
+        [
+          join(repoRoot, "scripts", "harbor-job-diagnostics.mjs"),
+          root,
+          "--official-submission-check",
+        ],
+        {
+          cwd: repoRoot,
+          encoding: "utf8",
+          windowsHide: true,
+        },
+      );
+      throw new Error("expected official submission check to fail");
+    } catch (error) {
+      expect(error).toMatchObject({ code: 2 });
+      expect(error.stdout).toContain("official submission config:");
+      expect(error.stdout).toContain("- status: fail");
+      expect(error.stdout).toContain("agent_timeout_multiplier");
+    }
+
+    try {
+      await execFileAsync(
+        process.execPath,
+        [
+          join(repoRoot, "scripts", "terminal-bench-report.mjs"),
+          root,
+          "--official-submission-check",
+        ],
+        {
+          cwd: repoRoot,
+          encoding: "utf8",
+          windowsHide: true,
+        },
+      );
+      throw new Error("expected terminal bench report official submission check to fail");
+    } catch (error) {
+      expect(error).toMatchObject({ code: 2 });
+      expect(error.stdout).toContain("official submission config: FAIL");
+      expect(error.stdout).toContain("agent_timeout_multiplier");
+    }
+  }, 15_000);
+
+  it("writes repair facts from structured Harbor trial artifacts", async () => {
+    const root = await createHarborFixture();
+    const outputDir = await mkdtemp(join(tmpdir(), "linghun-bench-repair-facts-"));
+
+    await execFileAsync(
+      process.execPath,
+      [
+        join(repoRoot, "scripts", "harbor-job-diagnostics.mjs"),
+        root,
+        `--write-repair-facts-dir=${outputDir}`,
+      ],
+      {
+        cwd: repoRoot,
+        encoding: "utf8",
+        windowsHide: true,
+      },
+    );
+
+    const manifest = JSON.parse(await readFile(join(outputDir, "manifest.json"), "utf8"));
+    const alphaFacts = JSON.parse(await readFile(join(outputDir, "alpha.json"), "utf8"));
+    const betaFacts = JSON.parse(await readFile(join(outputDir, "beta.json"), "utf8"));
+
+    expect(manifest.tasks.alpha.facts).toMatchObject({
+      task_name: "alpha",
+      source_trial: "alpha__1",
+      recovered_trial: "alpha__2",
+      previous_outcome: "recovered_after_failure",
+      reward: 0,
+      failed_tests: ["alpha fails"],
+    });
+    expect(alphaFacts.facts).toMatchObject(manifest.tasks.alpha.facts);
+    expect(betaFacts.facts).toMatchObject({
+      task_name: "beta",
+      source_trial: "beta__1",
+      previous_outcome: "no_any_pass",
+      verifier_timeout: true,
+    });
+    expect(manifest.tasks).not.toHaveProperty("gamma");
+  }, 15_000);
 });
 
-async function createHarborFixture() {
+async function createHarborFixture(options = {}) {
   const root = await mkdtemp(join(tmpdir(), "linghun-bench-diagnostics-"));
   await writeJson(join(root, "config.json"), {
     datasets: [{ task_names: ["suite/alpha", "suite/beta", "suite/gamma"] }],
+    ...(options.jobConfig ?? {}),
   });
   await writeTrial(root, "alpha__1", {
     taskName: "suite/alpha",
     reward: 0,
     startedAt: "2026-07-17T00:00:00Z",
     failedTests: ["alpha fails"],
+    configOverrides: options.trialOverrides?.alpha__1,
   });
   await writeTrial(root, "alpha__2", {
     taskName: "suite/alpha",
@@ -101,7 +233,11 @@ async function createHarborFixture() {
 
 async function writeTrial(root, name, options) {
   const dir = join(root, name);
-  await writeJson(join(dir, "config.json"), { task: { name: options.taskName }, trial_name: name });
+  await writeJson(join(dir, "config.json"), {
+    task: { name: options.taskName },
+    trial_name: name,
+    ...(options.configOverrides ?? {}),
+  });
   await writeJson(join(dir, "result.json"), {
     trial_name: name,
     task_id: { name: options.taskName },

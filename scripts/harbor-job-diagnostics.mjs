@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { existsSync } from "node:fs";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { extname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -16,6 +16,22 @@ const EXCEPTION_TYPES = ["AgentTimeoutError", "VerifierTimeoutError", "NonZeroAg
 
 const STRUCTURED_EXTENSIONS = new Set([".json", ".jsonl", ".ndjson"]);
 const SKIP_DIRS = new Set([".git", "node_modules"]);
+const OFFICIAL_TIMEOUT_MULTIPLIER_FIELDS = [
+  "timeout_multiplier",
+  "agent_timeout_multiplier",
+  "verifier_timeout_multiplier",
+];
+const OFFICIAL_NULL_RESOURCE_OVERRIDE_FIELDS = [
+  ["agent", "override_timeout_sec"],
+  ["agent", "max_timeout_sec"],
+  ["verifier", "override_timeout_sec"],
+  ["verifier", "max_timeout_sec"],
+  ["environment", "override_cpus"],
+  ["environment", "override_memory_mb"],
+  ["environment", "override_storage_mb"],
+  ["environment", "override_gpus"],
+  ["environment", "override_tpu"],
+];
 
 export { summarizeJobDir, summarizeTrialTasks };
 
@@ -26,6 +42,8 @@ if (isCliEntry()) {
 async function runCli(args) {
   const jobDirArg = args.find((arg) => !arg.startsWith("--"));
   const jsonOutput = args.includes("--json");
+  const officialSubmissionCheck = args.includes("--official-submission-check");
+  const repairFactsDir = getArgValue(args, "--write-repair-facts-dir");
 
   if (args.includes("--help") || args.includes("-h")) {
     printUsage();
@@ -49,11 +67,22 @@ async function runCli(args) {
   } else {
     printSummary(summary);
   }
+  if (repairFactsDir) {
+    await writeRepairFactsDir(summary, resolve(repairFactsDir));
+  }
+  if (officialSubmissionCheck && !summary.officialSubmissionConfig.ok) {
+    process.exit(2);
+  }
 }
 
 function isCliEntry() {
   if (process.argv[1] === "-") return true;
   return Boolean(process.argv[1]) && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+}
+
+function getArgValue(args, name) {
+  const prefix = `${name}=`;
+  return args.find((arg) => arg.startsWith(prefix))?.slice(prefix.length);
 }
 
 async function summarizeJobDir(root) {
@@ -69,6 +98,7 @@ async function summarizeJobDir(root) {
     },
     exceptionTypes: Object.fromEntries(EXCEPTION_TYPES.map((type) => [type, 0])),
     diagnostics: Object.fromEntries(DIAGNOSTIC_TYPES.map((type) => [type, 0])),
+    officialSubmissionConfig: await summarizeOfficialSubmissionConfig(root),
     trialTasks: await summarizeTrialTasks(root),
   };
 
@@ -83,6 +113,85 @@ async function summarizeJobDir(root) {
   }
 
   return summary;
+}
+
+async function summarizeOfficialSubmissionConfig(root) {
+  const violations = [];
+  const jobConfig = await readJsonFile(join(root, "config.json"));
+  if (isPlainObject(jobConfig)) {
+    collectOfficialConfigViolations(jobConfig, "job", "config.json", violations);
+  }
+
+  const trialDirs = await findTrialDirs(root);
+  let checkedTrials = 0;
+  for (const dir of trialDirs) {
+    const config = await readJsonFile(join(dir, "config.json"));
+    const result = await readJsonFile(join(dir, "result.json"));
+    const trialConfig = isPlainObject(config)
+      ? config
+      : isPlainObject(result?.config)
+        ? result.config
+        : undefined;
+    if (!trialConfig) continue;
+    checkedTrials += 1;
+    collectOfficialConfigViolations(
+      trialConfig,
+      "trial",
+      `${displayPath(root, dir)}/config.json`,
+      violations,
+    );
+  }
+
+  return {
+    ok: violations.length === 0,
+    checkedTrials,
+    violationCount: violations.length,
+    violations: violations.slice(0, 50),
+  };
+}
+
+function collectOfficialConfigViolations(config, scope, file, violations) {
+  for (const field of OFFICIAL_TIMEOUT_MULTIPLIER_FIELDS) {
+    const value = config[field];
+    if (!isDefaultMultiplier(value)) {
+      violations.push({
+        scope,
+        file,
+        field,
+        value,
+        expected: "null/undefined/1.0",
+      });
+    }
+  }
+
+  for (const pathParts of OFFICIAL_NULL_RESOURCE_OVERRIDE_FIELDS) {
+    const value = readPath(config, pathParts);
+    if (value !== undefined && value !== null) {
+      violations.push({
+        scope,
+        file,
+        field: pathParts.join("."),
+        value,
+        expected: "null/undefined",
+      });
+    }
+  }
+}
+
+function isDefaultMultiplier(value) {
+  if (value === undefined || value === null) return true;
+  if (value === 1) return true;
+  if (typeof value === "string" && Number(value) === 1) return true;
+  return false;
+}
+
+function readPath(value, pathParts) {
+  let current = value;
+  for (const part of pathParts) {
+    if (!isPlainObject(current)) return undefined;
+    current = current[part];
+  }
+  return current;
 }
 
 async function summarizeTrialTasks(root) {
@@ -172,6 +281,73 @@ async function summarizeTrialTasks(root) {
     firstFailures,
     recoveredAfterFirstFailure,
     noAnyPass,
+    repairTargets: buildRepairTargets(configuredKeys, trialsByTask),
+  };
+}
+
+function buildRepairTargets(configuredKeys, trialsByTask) {
+  const targets = [];
+  for (const taskName of configuredKeys) {
+    const effectiveTrials = (trialsByTask.get(taskName) ?? []).filter(
+      (trial) => trial.exceptionType !== "CancelledError",
+    );
+    if (effectiveTrials.length === 0) continue;
+    const failedTrials = effectiveTrials.filter((trial) => trial.reward !== 1);
+    if (failedTrials.length === 0) continue;
+    const recovered = effectiveTrials.find((trial) => trial.reward === 1);
+    const categoryCounts = countFailureCategories(failedTrials);
+    const sourceFailure =
+      failedTrials.find((trial) => trial.failedTests.length > 0 || trial.failureDetails.length > 0) ??
+      failedTrials[0];
+    targets.push({
+      taskName,
+      attempts: effectiveTrials.length,
+      pass: effectiveTrials.filter((trial) => trial.reward === 1).length,
+      nonPass: failedTrials.length,
+      lost: failedTrials.length,
+      noAnyPass: recovered === undefined,
+      recoveredAfterFailure: recovered !== undefined,
+      primaryCategory: primaryCategory(categoryCounts),
+      categories: categoryCounts,
+      failedTests: uniqueStrings(failedTrials.flatMap((trial) => trial.failedTests)).slice(0, 20),
+      failureDetails: uniqueStrings(failedTrials.flatMap((trial) => trial.failureDetails)).slice(0, 12),
+      sourceTrial: formatTaskTrial(taskName, sourceFailure),
+      ...(recovered ? { recoveredTrial: formatTaskTrial(taskName, recovered) } : {}),
+      replayFacts: createReplayFacts(taskName, sourceFailure, recovered),
+    });
+  }
+  return targets.sort((a, b) => {
+    if (a.noAnyPass !== b.noAnyPass) return a.noAnyPass ? -1 : 1;
+    return b.lost - a.lost || a.taskName.localeCompare(b.taskName);
+  });
+}
+
+function primaryCategory(categoryCounts) {
+  const entries = Object.entries(categoryCounts).filter(([category]) => category !== "resolved");
+  entries.sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+  return entries[0]?.[0] ?? "unknown_agent_error";
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values.filter((value) => typeof value === "string" && value.length > 0))];
+}
+
+function createReplayFacts(taskName, trial, recovered) {
+  return {
+    task_name: taskName,
+    source_trial: trial.trialName,
+    ...(recovered ? { recovered_trial: recovered.trialName } : {}),
+    previous_outcome: recovered ? "recovered_after_failure" : "no_any_pass",
+    reward: trial.reward ?? 0,
+    ...(trial.cliExitCode === undefined ? {} : { cli_exit_code: trial.cliExitCode }),
+    ...(trial.controlledDeadlineReached === undefined
+      ? {}
+      : { controlled_deadline_reached: trial.controlledDeadlineReached }),
+    verifier_timeout: trial.exceptionType === "VerifierTimeoutError",
+    ...(trial.ctrfSummary ? { ctrf_summary: trial.ctrfSummary } : {}),
+    ...(trial.failedTests.length ? { failed_tests: trial.failedTests.slice(0, 20) } : {}),
+    ...(trial.failureDetails.length ? { failure_details: trial.failureDetails.slice(0, 12) } : {}),
+    ...(trial.testStdoutSummary ? { test_stdout_summary: trial.testStdoutSummary } : {}),
   };
 }
 
@@ -213,6 +389,7 @@ async function readTrialFacts(root, dir) {
   const config = await readJsonFile(join(dir, "config.json"));
   const metadata = await readJsonFile(join(dir, "agent", "linghun-metadata.json"));
   const ctrf = await readJsonFile(join(dir, "verifier", "ctrf.json"));
+  const testStdout = await readOptionalTextFile(join(dir, "verifier", "test-stdout.txt"));
   const trialName = stringValue(result?.trial_name) ??
     stringValue(config?.trial_name) ??
     displayPath(root, dir);
@@ -235,6 +412,8 @@ async function readTrialFacts(root, dir) {
     crossTrialStateShared: booleanValue(metadata?.cross_trial_state_shared),
     ctrfSummary: readCtrfSummary(ctrf),
     failedTests: readFailedTests(ctrf),
+    failureDetails: readFailureDetails(ctrf),
+    testStdoutSummary: summarizeTextTail(testStdout),
     path: displayPath(root, dir),
   };
 }
@@ -242,6 +421,14 @@ async function readTrialFacts(root, dir) {
 async function readJsonFile(path) {
   try {
     return JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+async function readOptionalTextFile(path) {
+  try {
+    return await readFile(path, "utf8");
   } catch {
     return undefined;
   }
@@ -311,6 +498,40 @@ function readFailedTests(ctrf) {
     .slice(0, 20);
 }
 
+function readFailureDetails(ctrf) {
+  const tests = Array.isArray(ctrf?.results?.tests) ? ctrf.results.tests : [];
+  return tests
+    .filter((test) => isPlainObject(test) && test.status !== "passed")
+    .map((test) => {
+      const name = stringValue(test.name) ?? "";
+      const detail = ["message", "trace", "stdout", "stderr", "output"]
+        .map((key) => boundedString(test[key], key === "trace" ? 700 : 360))
+        .filter(Boolean)
+        .join(" | ");
+      return normalizeFactText([name, detail].filter(Boolean).join(": "));
+    })
+    .filter(Boolean)
+    .slice(0, 12);
+}
+
+function boundedString(value, limit) {
+  return typeof value === "string" ? normalizeFactText(value).slice(0, limit) : undefined;
+}
+
+function summarizeTextTail(text) {
+  if (!text) return undefined;
+  const lines = text
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const summary = normalizeFactText(lines.slice(-18).join(" | "));
+  return summary ? summary.slice(0, 1800) : undefined;
+}
+
+function normalizeFactText(text) {
+  return text.replace(/\s+/gu, " ").trim();
+}
+
 function optionalNumber(object, key) {
   const value = finiteNumber(object[key]);
   return value === undefined ? {} : { [key]: value };
@@ -345,6 +566,8 @@ function formatTaskTrial(taskName, trial) {
     controlledDeadlineReached: trial.controlledDeadlineReached ?? null,
     ctrfSummary: trial.ctrfSummary ?? null,
     failedTests: trial.failedTests,
+    failureDetails: trial.failureDetails,
+    testStdoutSummary: trial.testStdoutSummary ?? null,
     path: trial.path,
   };
 }
@@ -516,6 +739,16 @@ function printSummary(summary) {
   console.log("diagnostics:");
   printCounters(summary.diagnostics);
   console.log("");
+  console.log("official submission config:");
+  console.log(`- status: ${summary.officialSubmissionConfig.ok ? "pass" : "fail"}`);
+  console.log(`- checked trials: ${summary.officialSubmissionConfig.checkedTrials}`);
+  console.log(`- violations: ${summary.officialSubmissionConfig.violationCount}`);
+  for (const violation of summary.officialSubmissionConfig.violations.slice(0, 10)) {
+    console.log(
+      `  - ${violation.file}: ${violation.field}=${JSON.stringify(violation.value)} expected ${violation.expected}`,
+    );
+  }
+  console.log("");
   console.log("trial task summary:");
   console.log(`- configured tasks: ${summary.trialTasks.configuredTaskCount}`);
   console.log(`- trials: ${summary.trialTasks.trialCount}`);
@@ -535,6 +768,14 @@ function printSummary(summary) {
       console.log(`  - ${item.taskName}: ${item.attempts.length} effective attempt(s)`);
     }
   }
+  if (summary.trialTasks.repairTargets.length > 0) {
+    console.log("- repair targets:");
+    for (const target of summary.trialTasks.repairTargets.slice(0, 10)) {
+      console.log(
+        `  - ${target.taskName}: pass=${target.pass}/${target.attempts} primary=${target.primaryCategory} failedTests=${target.failedTests.slice(0, 3).join(", ") || "none"}`,
+      );
+    }
+  }
   if (summary.parseErrors.length > 0) {
     console.log("");
     console.log("parse warnings:");
@@ -542,6 +783,34 @@ function printSummary(summary) {
       console.log(`- ${warning.file}: ${warning.error}`);
     }
   }
+}
+
+async function writeRepairFactsDir(summary, outputDir) {
+  await mkdir(outputDir, { recursive: true });
+  const manifest = {
+    facts_status: "available",
+    generated_at: new Date().toISOString(),
+    source_job_dir: summary.jobDir,
+    tasks: {},
+  };
+  for (const target of summary.trialTasks.repairTargets) {
+    const fileName = `${safeFileName(target.taskName)}.json`;
+    const payload = {
+      facts_status: "available",
+      task_name: target.taskName,
+      facts: target.replayFacts,
+    };
+    await writeFile(join(outputDir, fileName), JSON.stringify(payload, null, 2), "utf8");
+    manifest.tasks[target.taskName] = {
+      file: fileName,
+      facts: target.replayFacts,
+    };
+  }
+  await writeFile(join(outputDir, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8");
+}
+
+function safeFileName(value) {
+  return value.replace(/[^A-Za-z0-9._-]+/gu, "_").replace(/^_+|_+$/gu, "") || "task";
 }
 
 function formatRate(rate) {
@@ -560,7 +829,7 @@ function printCounters(counters) {
 }
 
 function printUsage() {
-  console.log("Usage: node scripts/harbor-job-diagnostics.mjs <harbor-job-dir> [--json]");
+  console.log("Usage: node scripts/harbor-job-diagnostics.mjs <harbor-job-dir> [--json] [--official-submission-check] [--write-repair-facts-dir=<dir>]");
   console.log("");
   console.log("Read-only summary of structured JSON/JSONL fields in a Harbor job directory.");
 }

@@ -8,6 +8,7 @@ import { summarizeJobDir } from "./harbor-job-diagnostics.mjs";
 const args = process.argv.slice(2);
 const root = args.find((arg) => !arg.startsWith("--")) || ".bench/terminal-bench-wsl";
 const cleanup = args.includes("--cleanup");
+const officialSubmissionCheck = args.includes("--official-submission-check");
 const lowDiskGb = Number(getArgValue("--low-disk-gb") || 50);
 const wslDistro = getArgValue("--wsl-distro");
 
@@ -198,6 +199,7 @@ const counters = new Map();
 const profileCounters = new Map();
 let total = 0;
 let resolved = 0;
+let officialSubmissionViolationCount = 0;
 
 if (jobSummaries.length > 0) {
   for (const summary of jobSummaries) {
@@ -226,6 +228,20 @@ if (jobSummaries.length > 0) {
   const firstPass = jobSummaries.reduce((sum, summary) => sum + summary.trialTasks.firstUnique.pass, 0);
   const firstTotal = jobSummaries.reduce((sum, summary) => sum + summary.trialTasks.firstUnique.total, 0);
   console.log(`first unique: ${firstPass}/${firstTotal}${firstTotal ? ` (${((firstPass / firstTotal) * 100).toFixed(1)}%)` : ""}`);
+  officialSubmissionViolationCount = jobSummaries.reduce(
+    (sum, summary) => sum + summary.officialSubmissionConfig.violationCount,
+    0,
+  );
+  console.log(
+    `official submission config: ${officialSubmissionViolationCount === 0 ? "PASS" : `FAIL (${officialSubmissionViolationCount} violation(s))`}`,
+  );
+  for (const summary of jobSummaries) {
+    for (const violation of summary.officialSubmissionConfig.violations.slice(0, 5)) {
+      console.log(
+        `- ${violation.file}: ${violation.field}=${JSON.stringify(violation.value)} expected ${violation.expected}`,
+      );
+    }
+  }
 }
 for (const [category, count] of [...counters.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
   console.log(`- ${category}: ${count}`);
@@ -238,19 +254,18 @@ if (jobSummaries.length === 0) {
 }
 
 console.log("");
-console.log("recommended next batch settings:");
-console.log("- default concurrent: 3");
-console.log("- heavy tasks (SWE/QEMU/ML/security/large build): concurrent 2-3, agent timeout 1200-1800s");
-console.log("- simple/polyglot tasks: concurrent 3, agent timeout 900-1200s");
-console.log("- test timeout: 600s");
+console.log("official-safe next batch settings:");
+console.log("- formal leaderboard runs: keep benchmark default timeout multipliers; do not set timeout_multiplier, agent_timeout_multiplier, or verifier_timeout_multiplier above 1.0");
+console.log("- tune score with task strategy, validation discipline, and task selection/order; treat longer timeout experiments as non-submission diagnostics only");
+console.log("- verifier timeout: keep official default unless the benchmark release explicitly changes it");
 console.log("- headless env: LINGHUN_HEADLESS_BENCH=1 LINGHUN_HEADLESS_TEST_TIMEOUT_MS=600000 LINGHUN_HEADLESS_MAX_REPAIRS=1");
 console.log("- cleanup after every 10 tasks: node scripts/terminal-bench-report.mjs <result-root> --cleanup");
 console.log("- WSL cleanup example: node scripts/terminal-bench-report.mjs <result-root> --cleanup --wsl-distro=Ubuntu-24.04-LinghunBench");
 const heavyCount = [...profileCounters.entries()].reduce((sum, [profile, count]) => sum + (isHeavyProfile(profile) ? count : 0), 0);
 if (heavyCount > total / 3 || (counters.get("agent_timeout") || 0) + (counters.get("test_timeout") || 0) > total / 5) {
-  console.log("- observed mix: prefer --n-concurrent=2, --global-agent-timeout-sec=1800, --global-test-timeout-sec=900 for the next heavy batch");
+  console.log("- observed mix: improve single-time strategy and early verifier feedback before rerunning heavy tasks; do not raise formal timeout multipliers");
 } else if ((profileCounters.get("polyglot_cpp") || 0) + (profileCounters.get("polyglot_simple") || 0) > total / 3) {
-  console.log("- observed mix: polyglot/simple can use --n-concurrent=3, --global-agent-timeout-sec=1200, --global-test-timeout-sec=600");
+  console.log("- observed mix: polyglot/simple failures are likely better served by focused test reading and short local validation");
 } else {
   console.log("- observed mix: profile signal is weak; tune by failure modes above");
 }
@@ -272,4 +287,8 @@ if (cFree !== undefined) {
 
 if (cleanup) {
   runDockerCleanup();
+}
+
+if (officialSubmissionCheck && officialSubmissionViolationCount > 0) {
+  process.exit(2);
 }
