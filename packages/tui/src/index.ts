@@ -767,6 +767,8 @@ import {
 } from "./handoff-session-runtime.js";
 import {
   type HeadlessBenchOptions,
+  type HeadlessBenchFailure,
+  type HeadlessBenchConfig,
   type HeadlessBenchToolFailureFact,
   type HeadlessOfficialValidationResult,
   type HeadlessBenchValidationResult,
@@ -2308,7 +2310,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           );
         }
         if (validation.ok) {
-          if (validation.deferredToExternalVerifier && !validation.testRan) {
+          if (benchConfig.externalVerifier && !validation.testRan) {
             writeLine(
               output,
               "[headless] bench local validation unavailable; pass/fail deferred to external verifier, not closed locally.",
@@ -2360,6 +2362,13 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
             errorOutput,
             `错误：headless bench 修补已达上限 ${benchConfig.maxRepairAttempts}，最后失败类别：${failure.category}`,
           );
+          if (shouldDeferHeadlessBenchFailureToExternalVerifier(benchConfig, failure)) {
+            writeLine(
+              output,
+              "[headless] bench validation still not passing; pass/fail deferred to external verifier, not closed locally.",
+            );
+            break;
+          }
           return 5;
         }
         const repairDeadlinePhase = getHeadlessDeadlinePhase(
@@ -2503,6 +2512,19 @@ type HeadlessTurnStatus = {
   deadlineClosure?: boolean;
   deadlineHandoff?: boolean;
 };
+
+function shouldDeferHeadlessBenchFailureToExternalVerifier(
+  config: HeadlessBenchConfig,
+  failure: HeadlessBenchFailure,
+): boolean {
+  if (!config.externalVerifier) return false;
+  if (failure.officialResult?.facts?.source === "project_local") return false;
+  return (
+    failure.category === "missing_artifact" ||
+    failure.category === "model_patch_failed" ||
+    failure.category === "unknown_agent_error"
+  );
+}
 
 type HeadlessApprovalPumpResult = {
   approvals: number;

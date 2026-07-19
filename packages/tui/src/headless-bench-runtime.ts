@@ -451,19 +451,10 @@ export async function validateHeadlessBenchCompletion(input: {
         };
       }
       return {
-        ok: false,
-        failure: {
-          category: "unknown_agent_error",
-          summary: `${headlessNoLocalTestSummary(input.config, true)}; no project-local reward=1 facts or local official test command ran, so no PASS evidence was generated.`,
-          ...(input.config.externalOfficialFacts
-            ? {
-                officialResult: createExternalOfficialResult(
-                  input.config.externalOfficialFacts,
-                  input.config.externalOfficialFactsPath,
-                ),
-              }
-            : {}),
-        },
+        ok: true,
+        testRan: false,
+        summary: headlessNoLocalTestSummary(input.config, true),
+        deferredToExternalVerifier: true,
       };
     }
     return {

@@ -841,7 +841,7 @@ describe("headless-bench-runtime", () => {
     }
   });
 
-  it("fails no-local-test external verifier validation without current pass evidence", async () => {
+  it("defers no-local-test external verifier validation without current pass evidence", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-external-deferred-"));
     const { validateHeadlessBenchCompletion } = await import("./headless-bench-runtime.js");
 
@@ -859,12 +859,11 @@ describe("headless-bench-runtime", () => {
       },
     });
 
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.failure.category).toBe("unknown_agent_error");
-      expect(result.failure.summary).toContain("pass/fail deferred to external verifier");
-      expect(result.failure.summary).toContain("no PASS evidence");
-      expect(result.failure.officialResult).toBeUndefined();
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.testRan).toBe(false);
+      expect(result.deferredToExternalVerifier).toBe(true);
+      expect(result.summary).toContain("pass/fail deferred to external verifier");
     }
   });
 

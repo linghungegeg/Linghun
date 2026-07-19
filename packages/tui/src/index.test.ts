@@ -2678,6 +2678,54 @@ describe("runHeadlessTask", () => {
     expect(checklist?.summary).toContain("externalVerifier=deferred");
   });
 
+  it("defers external verifier mode after external non-pass facts exhaust repairs", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-external-facts-fail-defer-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const stdout = new MemoryOutput();
+    const stderr = new MemoryOutput();
+    let attempts = 0;
+
+    const exitCode = await runHeadlessTask({
+      prompt: "bench with previous external non-pass facts",
+      projectPath: project,
+      stdout,
+      stderr,
+      bench: {
+        enabled: true,
+        preflight: false,
+        maxRepairAttempts: 1,
+        externalVerifier: true,
+        externalOfficialFacts: {
+          source: "external_file",
+          reward: 0,
+          ctrfSummary: { tests: 1, passed: 0, failed: 1, skipped: 0 },
+          failedTests: ["test_outputs.py::test_previous_failure"],
+        },
+      },
+      __testContext: context,
+      __testStore: store,
+      __testSkipHydration: true,
+      __testSendMessage: async () => {
+        attempts += 1;
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(attempts).toBe(2);
+    expect(stderr.text).toContain("headless bench 修补已达上限 1");
+    expect(stderr.text).toContain("model_patch_failed");
+    expect(stdout.text).toContain("pass/fail deferred to external verifier, not closed locally");
+    expect(
+      context.evidence.some(
+        (item) =>
+          item.supportsClaims.includes("verification_passed") ||
+          item.supportsClaims.includes("test_passed"),
+      ),
+    ).toBe(false);
+  });
+
   it("defers external verifier mode from project-local pass facts alone using exit 0", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-bench-external-facts-pass-"));
     await mkdir(join(project, "verifier"), { recursive: true });
