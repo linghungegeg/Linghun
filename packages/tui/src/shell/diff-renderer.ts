@@ -34,28 +34,37 @@ function ansi(code: string, text: string, noColor: boolean): string {
 
 function ansiColor(color: string | undefined, text: string, noColor: boolean): string {
   if (noColor || !color) return text;
-  const code = ansiColorCode(color);
+  const code = ansiColorCode(color, "foreground");
   return code ? ansi(code, text, false) : text;
 }
 
-function ansiColorCode(color: string): string | undefined {
+function ansiBackgroundColor(color: string | undefined, text: string, noColor: boolean): string {
+  if (noColor || !color) return text;
+  const code = ansiColorCode(color, "background");
+  return code ? ansi(code, text, false) : text;
+}
+
+function ansiColorCode(
+  color: string,
+  layer: "foreground" | "background" = "foreground",
+): string | undefined {
   const normalized = color.trim();
   const named: Record<string, string> = {
-    black: "30",
-    red: "31",
-    green: "32",
-    yellow: "33",
-    blue: "34",
-    magenta: "35",
-    cyan: "36",
-    white: "37",
-    redBright: "91",
-    greenBright: "92",
-    yellowBright: "93",
-    blueBright: "94",
-    magentaBright: "95",
-    cyanBright: "96",
-    whiteBright: "97",
+    black: layer === "foreground" ? "30" : "40",
+    red: layer === "foreground" ? "31" : "41",
+    green: layer === "foreground" ? "32" : "42",
+    yellow: layer === "foreground" ? "33" : "43",
+    blue: layer === "foreground" ? "34" : "44",
+    magenta: layer === "foreground" ? "35" : "45",
+    cyan: layer === "foreground" ? "36" : "46",
+    white: layer === "foreground" ? "37" : "47",
+    redBright: layer === "foreground" ? "91" : "101",
+    greenBright: layer === "foreground" ? "92" : "102",
+    yellowBright: layer === "foreground" ? "93" : "103",
+    blueBright: layer === "foreground" ? "94" : "104",
+    magentaBright: layer === "foreground" ? "95" : "105",
+    cyanBright: layer === "foreground" ? "96" : "106",
+    whiteBright: layer === "foreground" ? "97" : "107",
   };
   if (named[normalized]) return named[normalized];
   const hex = normalized.match(/^#([\da-f]{2})([\da-f]{2})([\da-f]{2})$/iu);
@@ -63,7 +72,7 @@ function ansiColorCode(color: string): string | undefined {
   const red = Number.parseInt(hex[1] ?? "0", 16);
   const green = Number.parseInt(hex[2] ?? "0", 16);
   const blue = Number.parseInt(hex[3] ?? "0", 16);
-  return `38;2;${red};${green};${blue}`;
+  return `${layer === "foreground" ? "38" : "48"};2;${red};${green};${blue}`;
 }
 
 function dim(text: string, noColor: boolean): string {
@@ -145,7 +154,13 @@ export function renderPlainDiffLines(
               options.noColor,
               options.theme,
             );
-      rendered.push(`${dim(prefix, options.noColor)}${styledGutter}${styledBody}`);
+      const styledLine = applyChangedLineBackground(
+        `${styledGutter}${styledBody}`,
+        line.kind,
+        options.noColor,
+        options.theme,
+      );
+      rendered.push(`${dim(prefix, options.noColor)}${styledLine}`);
     });
   }
 
@@ -377,6 +392,17 @@ function bold(text: string, noColor: boolean): string {
   return ansi("1", text, noColor);
 }
 
+function applyChangedLineBackground(
+  text: string,
+  kind: DiffLineKind,
+  noColor: boolean,
+  theme?: ShellTheme,
+): string {
+  if (kind !== "add" && kind !== "remove") return text;
+  const color = kind === "add" ? (theme?.diffAddedBackground ?? "#1a3d1a") : (theme?.diffRemovedBackground ?? "#3d1a1a");
+  return ansiBackgroundColor(color, text, noColor);
+}
+
 function colorByKind(
   text: string,
   kind: DiffLineKind,
@@ -385,11 +411,11 @@ function colorByKind(
   theme?: ShellTheme,
 ): string {
   if (kind === "add") {
-    const color = theme?.diffAddedWord ?? theme?.success;
+    const color = gutter ? (theme?.diffAdded ?? theme?.success) : (theme?.diffAddedWord ?? theme?.success);
     return color ? ansiColor(color, text, noColor) : green(text, noColor);
   }
   if (kind === "remove") {
-    const color = theme?.diffRemovedWord ?? theme?.error;
+    const color = gutter ? (theme?.diffRemoved ?? theme?.error) : (theme?.diffRemovedWord ?? theme?.error);
     return color ? ansiColor(color, text, noColor) : red(text, noColor);
   }
   return gutter ? dim(text, noColor) : text;

@@ -139,6 +139,10 @@ export function createStructuredToolOutput(
   if (bashEnd) {
     bodyLines.push(bashEnd);
   }
+  const detailsHint = formatToolDetailsHint(layered, language);
+  if (detailsHint) {
+    bodyLines.push(detailsHint);
+  }
   const body = bodyLines.join("\n");
   const text = [lead, body].filter(Boolean).join("\n");
   const isError = isToolOutputFailure(name, output);
@@ -158,6 +162,11 @@ export function createStructuredToolOutput(
     },
     text,
   };
+}
+
+function formatToolDetailsHint(layered: LayeredToolOutput, language: Language): string | undefined {
+  if (!layered.truncated && !layered.details && !layered.fullOutputPath) return undefined;
+  return language === "en-US" ? "Full output is tucked away in details." : "完整内容已收起，可查看详情。";
 }
 
 export function formatToolOutput(
@@ -213,7 +222,6 @@ function formatPrimaryToolLead(
   const totalLines = readNumber(metadata, "totalLines") ?? readNumber(metadata, "contentLines");
   const visibleLines =
     readNumber(metadata, "windowLines") ?? readNumber(metadata, "lines") ?? lineCount(output.text);
-  // Editing tools: show tool name + filename prominently.
   if (isEditingTool(name)) {
     const changedFiles = readStringList(metadata, "changedFiles");
     const filePart = changedFiles.length > 0 ? `**${changedFiles[0]}**` : "";
@@ -221,28 +229,28 @@ function formatPrimaryToolLead(
     const removedLines = readNumber(metadata, "removedLines") ?? 0;
     const patchPart = `+${addedLines} -${removedLines}`;
     if (language === "en-US") {
-      return filePart ? `${name}(${filePart}) ${patchPart}` : `${name} ${patchPart}`;
+      return filePart ? `Updated ${filePart} ${patchPart}.` : `Updated files ${patchPart}.`;
     }
-    return filePart ? `${name}(${filePart}) ${patchPart}` : `${name} ${patchPart}`;
+    return filePart ? `已修改 ${filePart} ${patchPart}` : `已修改文件 ${patchPart}`;
   }
   if (name === "Diff") {
     const changedFiles = readStringList(metadata, "changedFiles");
     const addedLines = readNumber(metadata, "addedLines") ?? 0;
     const removedLines = readNumber(metadata, "removedLines") ?? 0;
     return language === "en-US"
-      ? `Diff summary: ${changedFiles.length} changed file(s), +${addedLines} -${removedLines}.`
-      : `Diff 摘要：${changedFiles.length} 个文件，+${addedLines} -${removedLines}。`;
+      ? `Changes: ${changedFiles.length} file(s), +${addedLines} -${removedLines}.`
+      : `改动：${changedFiles.length} 个文件，+${addedLines} -${removedLines}`;
   }
   if (language === "en-US") {
-    if (name === "Grep") return `Found **${count ?? 0}** matches.`;
+    if (name === "Grep") return `Found **${count ?? 0}** match(es).`;
     if (name === "Glob") return `Found **${count ?? visibleLines}** files.`;
     if (name === "Read") {
       const readFile = readStringValue(metadata, "file") ?? readStringValue(metadata, "path");
       const lineLabel = `**${totalLines ?? visibleLines}** lines`;
-      return readFile ? `Read(${readFile}) ${lineLabel}.` : `Read ${lineLabel}.`;
+      return readFile ? `Read ${readFile} · ${lineLabel}.` : `Read ${lineLabel}.`;
     }
-    if (name === "ReadSnippets") return `ReadSnippets **${count ?? visibleLines}** ranges.`;
-    if (name === "SourcePack") return `SourcePack **${count ?? visibleLines}** snippets.`;
+    if (name === "ReadSnippets") return `Read **${count ?? visibleLines}** range(s).`;
+    if (name === "SourcePack") return `Prepared **${count ?? visibleLines}** snippet(s).`;
     if (name === "Bash") return formatBashLead(output, language);
     // Phase 17: WebSearch / WebFetch dedicated format.
     if (name === "WebSearch") return formatWebSearchLead(output, language);
@@ -250,25 +258,25 @@ function formatPrimaryToolLead(
     // Phase 18: try structured output for non-built-in tools.
     const enStructured = tryExtractLeadText(output.text);
     if (enStructured) return `${name}: ${enStructured}`;
-    return `${name} summary: ${layered.summary}`;
+    return `Completed: ${layered.summary}`;
   }
   if (name === "Grep") return `找到 **${count ?? 0}** 处匹配。`;
   if (name === "Glob") return `找到 **${count ?? visibleLines}** 个文件。`;
   if (name === "Read") {
     const readFile = readStringValue(metadata, "file") ?? readStringValue(metadata, "path");
     const lineLabel = `**${totalLines ?? visibleLines}** 行`;
-    return readFile ? `Read(${readFile}) ${lineLabel}` : `读取 ${lineLabel}`;
+    return readFile ? `已读取 ${readFile} · ${lineLabel}` : `已读取 ${lineLabel}`;
   }
-  if (name === "ReadSnippets") return `ReadSnippets **${count ?? visibleLines}** 个范围`;
-  if (name === "SourcePack") return `SourcePack **${count ?? visibleLines}** 个片段`;
+  if (name === "ReadSnippets") return `已读取 **${count ?? visibleLines}** 个范围`;
+  if (name === "SourcePack") return `已准备 **${count ?? visibleLines}** 个片段`;
   if (name === "Bash") return formatBashLead(output, language);
   // Phase 17: WebSearch / WebFetch dedicated format.
   if (name === "WebSearch") return formatWebSearchLead(output, language);
   if (name === "WebFetch") return formatWebFetchLead(output, language);
   // Phase 18: try structured output for non-built-in tools.
   const zhStructured = tryExtractLeadText(output.text);
-  if (zhStructured) return `${name}：${zhStructured}`;
-  return `${name} 摘要：${layered.summary}`;
+  if (zhStructured) return `已完成：${zhStructured}`;
+  return `已完成：${layered.summary}`;
 }
 
 function formatWebFailureLead(
@@ -302,20 +310,22 @@ function formatBashLead(output: ToolOutput, language: Language): string {
   const outcome = readBashOutcome(metadata);
   const failed = isToolOutputFailure("Bash", output);
   const shortCmd = command.length > 60 ? `${command.slice(0, 57)}...` : command;
-  const cmdPart = shortCmd ? `Bash(${shortCmd})` : "Bash";
+  const commandPart = shortCmd ? ` · ${shortCmd}` : "";
   if (outcome === "timeout") {
-    return language === "en-US" ? `${cmdPart} timed out` : `${cmdPart} 已超时`;
+    return language === "en-US" ? `Command timed out${commandPart}` : `命令已超时${commandPart}`;
   }
   if (outcome === "cancelled") {
-    return language === "en-US" ? `${cmdPart} cancelled` : `${cmdPart} 已取消`;
+    return language === "en-US" ? `Command cancelled${commandPart}` : `命令已取消${commandPart}`;
   }
   if (exitCode === undefined) {
-    return cmdPart;
+    return language === "en-US" ? `Command started${commandPart}` : `命令已开始${commandPart}`;
   }
   if (!failed) {
-    return `${cmdPart} ✓`;
+    return language === "en-US" ? `Command completed${commandPart}` : `命令已完成${commandPart}`;
   }
-  return language === "en-US" ? `${cmdPart} ✗ exit ${exitCode}` : `${cmdPart} ✗ 退出 ${exitCode}`;
+  return language === "en-US"
+    ? `Command failed · exit ${exitCode}${commandPart}`
+    : `命令失败 · 退出 ${exitCode}${commandPart}`;
 }
 
 function formatBashEndSummary(

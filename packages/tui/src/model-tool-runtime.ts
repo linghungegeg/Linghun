@@ -207,6 +207,7 @@ import { formatRoutePauseMessage, resolveRoleRoute } from "./tui-model-runtime.j
 import {
   writeErrorLine,
   writeStructuredToolOutput,
+  writeToolRunningBlock,
 } from "./tui-output-surface.js";
 import { decidePermission, toPermissionPromptView } from "./tui-permission-runtime.js";
 import {
@@ -861,12 +862,14 @@ export async function executeApprovedModelToolUse(
   const activityOwner = requestOwner
     ? { kind: "foreground" as const, requestTurnId: requestOwner.requestTurnId }
     : undefined;
+  const toolTarget = extractToolTarget(toolName, toolCall.input);
   startRequestActivity(output, context, "tool_running", {
     toolName,
-    toolTarget: extractToolTarget(toolName, toolCall.input),
+    toolTarget,
     toolUseId: toolCall.id,
     ...(requestOwner ? { requestTurnId: requestOwner.requestTurnId } : {}),
   });
+  writeToolRunningBlock(output, toolName, toolCall.id, toolTarget);
   await context.store.appendEvent(
     sessionId,
     {
@@ -1172,6 +1175,7 @@ export async function executeApprovedModelToolUse(
               reportWriteGuard,
             )
           : structuredToolOutput.text,
+        toolCall.id,
       );
     }
     return {
@@ -4455,8 +4459,13 @@ function installToolProgressHandler(
       (context.requestActivityToolBytes ?? 0) + Buffer.byteLength(displayText, "utf-8");
     const remainingLines = Math.max(0, 6 - visibleProgressLines);
     const visibleLines = lines.slice(0, remainingLines);
-    if (remainingLines > 0) {
-      output.write(`${truncateDisplay(visibleLines.join("\n"), 2_000)}\n`);
+    const inkSession = context.isInkSession === true;
+    if (remainingLines > 0 && visibleLines.length > 0) {
+      if (inkSession) {
+        writeToolRunningBlock(output, event.toolName, callId, truncateDisplay(visibleLines.join(" "), 240));
+      } else {
+        output.write(`${truncateDisplay(visibleLines.join("\n"), 2_000)}\n`);
+      }
       visibleProgressLines += Math.min(lines.length, remainingLines);
     }
     // 确保至少显示前 5 行才允许截断
@@ -4466,11 +4475,22 @@ function installToolProgressHandler(
       visibleProgressLines >= PROGRESS_PREVIEW_LINES &&
       !progressSuppressed
     ) {
-      output.write(
-        context.language === "en-US"
-          ? "... more command output hidden; press Ctrl+O for details.\n"
-          : "... 更多命令输出已隐藏；按 Ctrl+O 查看完整内容。\n",
-      );
+      if (inkSession) {
+        writeToolRunningBlock(
+          output,
+          event.toolName,
+          callId,
+          context.language === "en-US"
+            ? "More output hidden; press Ctrl+O for details."
+            : "更多输出已收起，可查看详情。",
+        );
+      } else {
+        output.write(
+          context.language === "en-US"
+            ? "... more command output hidden; press Ctrl+O for details.\n"
+            : "... 更多命令输出已隐藏；按 Ctrl+O 查看完整内容。\n",
+        );
+      }
       progressSuppressed = true;
     }
   };

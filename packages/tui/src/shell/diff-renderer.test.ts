@@ -24,8 +24,10 @@ describe("diff-renderer", () => {
     const output = rendered.join("\n");
     expect(stripAnsi(output)).toContain("const label = 'old';");
     expect(stripAnsi(output)).toContain("const label = 'new';");
-    expect(output).toContain("\x1B[1m\x1B[31mold\x1B[0m\x1B[0m");
-    expect(output).toContain("\x1B[1m\x1B[32mnew\x1B[0m\x1B[0m");
+    expect(output).toContain("\x1B[1m");
+    expect(output).toContain("\x1B[31mold\x1B[0m");
+    expect(output).toContain("\x1B[32mnew\x1B[0m");
+    expect(output).toContain("\x1B[48;2;");
   });
 
   it("keeps large diff rendering at line-level coloring", () => {
@@ -40,6 +42,7 @@ describe("diff-renderer", () => {
 
     expect(output).toContain("\x1B[31mold value 0\x1B[0m");
     expect(output).toContain("\x1B[32mnew value 1\x1B[0m");
+    expect(output).toContain("\x1B[48;2;");
     expect(output).not.toContain("\x1B[1m");
   });
 
@@ -84,6 +87,7 @@ describe("diff-renderer", () => {
       },
     ).join("\n");
     expect(unknownOutput).toContain("\x1B[32mconst value = 1;\x1B[0m");
+    expect(unknownOutput).toContain("\x1B[48;2;");
     expect(getDiffSyntaxHighlightCacheStats()).toMatchObject({ size: 0, hits: 0, misses: 0 });
 
     const noColorOutput = renderPlainDiffLines(

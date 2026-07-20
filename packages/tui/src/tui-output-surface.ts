@@ -189,7 +189,11 @@ export class ShellBlockOutput extends Writable {
     callback();
   }
 
-  writeStructuredToolOutput(structured: StructuredToolOutput, primaryText = structured.text): void {
+  writeStructuredToolOutput(
+    structured: StructuredToolOutput,
+    primaryText = structured.text,
+    toolUseId?: string,
+  ): void {
     const normalizedPrimary = this.visibleTextSanitizer.push(primaryText).replace(/\r/g, "").trim();
     if (!normalizedPrimary) return;
     const base = createOutputBlock(normalizedPrimary, this.context.language);
@@ -202,6 +206,7 @@ export class ShellBlockOutput extends Writable {
         : `${TOGGLE_DETAILS_KEYBIND} 查看完整内容`;
     const block: ProductBlockViewModel = {
       ...base,
+      id: toolBlockId(structured.block.toolName, toolUseId ?? structured.block.id) ?? base.id,
       kind: isError ? "error" : "details",
       status: isError ? "fail" : "info",
       title: "",
@@ -218,7 +223,7 @@ export class ShellBlockOutput extends Writable {
       },
     };
     this.appendTranscriptSourceBlock(block);
-    this.blocks.push(block);
+    this.upsertBlock(block);
     this.commitTerminalFirstStableBlock(block);
     if (!this.context.suppressLastFullOutputCapture) {
       this.context.lastFullOutput = block.fullText;
@@ -226,6 +231,41 @@ export class ShellBlockOutput extends Writable {
     this.compactOutputMemory().catch((error) => {
       void this.appendCompactOutputMemoryWarning(error);
     });
+    this.onWrite();
+  }
+
+  writeToolRunningBlock(toolName: string, toolUseId: string, summary?: string): void {
+    const cleanSummary = this.visibleTextSanitizer.push(summary ?? "").replace(/\r/g, "").trim();
+    const title = this.context.language === "en-US" ? "Running" : "正在处理";
+    const toolLabel = cleanSummary || (this.context.language === "en-US" ? "Working" : "处理中");
+    const body = cleanSummary
+      ? this.context.language === "en-US"
+        ? `Running ${cleanSummary}`
+        : `正在处理 ${cleanSummary}`
+      : title;
+    const base = createOutputBlock(body, this.context.language, toolBlockId(toolName, toolUseId));
+    const block: ProductBlockViewModel = {
+      ...base,
+      kind: "details",
+      status: "running",
+      title: "",
+      fullText: body,
+      nextAction: undefined,
+      ctrlOCollapsed: false,
+      messageKind: "tool_call",
+      displayBlock: {
+        id: toolUseId,
+        kind: "tool_call",
+        title,
+        status: "running",
+        summary: toolLabel,
+        body,
+        collapsible: false,
+        bordered: true,
+      },
+    };
+    this.appendTranscriptSourceBlock(block);
+    this.upsertBlock(block);
     this.onWrite();
   }
 
@@ -771,6 +811,15 @@ export class ShellBlockOutput extends Writable {
     });
   }
 
+  private upsertBlock(block: ProductBlockViewModel): void {
+    const index = this.blocks.findIndex((candidate) => candidate.id === block.id);
+    if (index >= 0) {
+      this.blocks[index] = block;
+      return;
+    }
+    this.blocks.push(block);
+  }
+
   private appendTranscriptSourceBlock(block: ProductBlockViewModel): void {
     const kind = transcriptSourceKindForBlock(block);
     if (!kind) return;
@@ -783,6 +832,11 @@ export class ShellBlockOutput extends Writable {
     });
   }
 
+}
+
+function toolBlockId(toolName: string | undefined, toolUseId: string | undefined): string | undefined {
+  if (!toolName || !toolUseId) return undefined;
+  return `tool:${toolName}:${toolUseId}`;
 }
 
 function createVisibleStructuredDetails(
@@ -1485,19 +1539,35 @@ export function writeStructuredToolOutput(
   output: Writable,
   structured: StructuredToolOutput,
   primaryText = structured.text,
+  toolUseId?: string,
 ): void {
   const candidate = output as {
     writeStructuredToolOutput?: (
       structured: StructuredToolOutput,
       primaryText?: string,
+      toolUseId?: string,
     ) => void;
   };
   if (typeof candidate.writeStructuredToolOutput === "function") {
-    candidate.writeStructuredToolOutput(structured, primaryText);
+    candidate.writeStructuredToolOutput(structured, primaryText, toolUseId);
     return;
   }
   const sanitized = sanitizeFallbackVisibleText(output, primaryText);
   if (sanitized) writeLine(output, sanitized);
+}
+
+export function writeToolRunningBlock(
+  output: Writable,
+  toolName: string,
+  toolUseId: string,
+  summary?: string,
+): void {
+  const candidate = output as {
+    writeToolRunningBlock?: (toolName: string, toolUseId: string, summary?: string) => void;
+  };
+  if (typeof candidate.writeToolRunningBlock === "function") {
+    candidate.writeToolRunningBlock(toolName, toolUseId, summary);
+  }
 }
 
 function sanitizeFallbackVisibleText(output: Writable, text: string): string {
@@ -1529,7 +1599,8 @@ export function createShellBlockOutputForTest(
   discardAssistantBlock(id: string): void;
   replaceAssistantBlockContent(id: string, text: string): void;
   writeLocalCommandOutputLine(text: string): void;
-  writeStructuredToolOutput(structured: StructuredToolOutput, primaryText?: string): void;
+  writeStructuredToolOutput(structured: StructuredToolOutput, primaryText?: string, toolUseId?: string): void;
+  writeToolRunningBlock(toolName: string, toolUseId: string, summary?: string): void;
   compactOutputMemory(options?: { projectMainScreen?: boolean }): Promise<{ beforeCount: number; afterCount: number }>;
 } {
   return new ShellBlockOutput(context, blocks, onWrite, terminalFirstAssistantSink);

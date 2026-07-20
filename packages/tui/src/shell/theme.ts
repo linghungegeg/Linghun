@@ -28,6 +28,8 @@ export type ShellTheme = {
   /** Phase 1 output-maturity — diff semantic colors. */
   diffAdded: string | undefined;
   diffRemoved: string | undefined;
+  diffAddedBackground: string | undefined;
+  diffRemovedBackground: string | undefined;
   diffAddedWord: string | undefined;
   diffRemovedWord: string | undefined;
   /** Phase 1 output-maturity — tool execution state color. */
@@ -75,6 +77,8 @@ export function createShellTheme(
       suggestion: undefined,
       diffAdded: undefined,
       diffRemoved: undefined,
+      diffAddedBackground: undefined,
+      diffRemovedBackground: undefined,
       diffAddedWord: undefined,
       diffRemovedWord: undefined,
       toolRunning: undefined,
@@ -114,10 +118,12 @@ export function createShellTheme(
       inactive: "#666666",
       suggestion: "blue",
       background: "white",
-      diffAdded: "#d4edda",
-      diffRemoved: "#f8d7da",
-      diffAddedWord: "#28a745",
-      diffRemovedWord: "#dc3545",
+      diffAdded: "#176f2c",
+      diffRemoved: "#b42318",
+      diffAddedBackground: "#d4edda",
+      diffRemovedBackground: "#f8d7da",
+      diffAddedWord: "#0b5d1e",
+      diffRemovedWord: "#8a1c13",
       toolRunning: "#b8860b",
       permissionPlan: "#0077cc",
       permissionAuto: "#b8860b",
@@ -154,10 +160,12 @@ export function createShellTheme(
     inactive: "#666666",
     suggestion: "blueBright",
     background: undefined,
-    diffAdded: "#1a3d1a",
-    diffRemoved: "#3d1a1a",
-    diffAddedWord: "#2ea043",
-    diffRemovedWord: "#f85149",
+    diffAdded: "#8ddb8c",
+    diffRemoved: "#ff9aa8",
+    diffAddedBackground: "#1a3d1a",
+    diffRemovedBackground: "#3d1a1a",
+    diffAddedWord: "#b7f7b7",
+    diffRemovedWord: "#ffccd3",
     toolRunning: "#d4a72c",
     permissionPlan: "#00aaff",
     permissionAuto: "#e0a020",

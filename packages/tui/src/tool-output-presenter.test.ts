@@ -301,10 +301,10 @@ describe("tool-output-presenter", () => {
       expect(structured.block.title).toBe("1 search");
     });
 
-    it("Bash 成功时 formatToolOutput 含 lead '✓'", () => {
+    it("Bash 成功时 formatToolOutput 使用自然终态 lead", () => {
       const text = formatToolOutput("Bash", { text: "done", data: { exitCode: 0 } }, "zh-CN");
-      expect(text).toContain("Bash");
-      expect(text).toContain("✓");
+      expect(text).toContain("命令已完成");
+      expect(text).not.toContain("Bash(");
     });
 
     it("Bash 失败 exit 也写入退出码", () => {
@@ -321,9 +321,9 @@ describe("tool-output-presenter", () => {
       );
 
       expect(structured.block.kind).toBe("tool_result_success");
-      expect(structured.block.title).toContain("✓");
+      expect(structured.block.title).toContain("命令已完成");
       expect(structured.text).not.toContain("退出码 1");
-      expect(structured.text).not.toContain("✗");
+      expect(structured.text).not.toContain("命令失败");
     });
 
     it.each([
@@ -617,12 +617,13 @@ describe("tool-output-presenter", () => {
         "zh-CN",
       );
 
-      expect(structured.text).toContain("Diff 摘要：4 个文件，+8 -3。");
+      expect(structured.text).toContain("改动：4 个文件，+8 -3");
       expect(structured.layered.preview).toContain(
         "- 路径:\n  1. src/a.ts\n  2. src/b.ts\n  3. src/c.ts",
       );
       expect(structured.layered.preview).toContain("另有 1 项在详情中");
       expect(structured.layered.preview).not.toContain("src/d.ts");
+      expect(structured.text).toContain("完整内容已收起，可查看详情。");
       expect(structured.layered.details).toBe(details);
       expect(structured.block.detailsPath).toBe(".linghun/session/tool-results/diff.txt");
       expect(structured.block.evidenceId).toBe("ev-diff");
@@ -664,6 +665,7 @@ describe("tool-output-presenter", () => {
       );
 
       expect(structured.text).toContain("找到 **10** 处匹配。");
+      expect(structured.text).not.toContain("Grep 摘要");
       expect(structured.layered.preview).toContain("1. src/a.ts:1: alpha");
       expect(structured.layered.preview).not.toContain("另有 8 项");
       expect(structured.layered.details).toBeUndefined();
@@ -834,6 +836,7 @@ describe("tool-output-presenter", () => {
       expect(structured.text).not.toContain("大响应");
       expect(structured.text).not.toContain("tokens");
       expect(structured.block.body).not.toContain("大响应");
+      expect(structured.text).toContain("完整内容已收起，可查看详情。");
       expect(structured.layered.details).toBe(details);
       expect(structured.layered.details).toContain("| result | kept |");
       expect(structured.layered.details).toContain("```ts");

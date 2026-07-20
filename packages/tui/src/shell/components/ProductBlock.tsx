@@ -75,6 +75,66 @@ function messageResponseBodyWidth(width: number): number {
   return Math.max(8, width - 5);
 }
 
+type MessageSurface = {
+  response: boolean;
+  rail: boolean;
+  tone: "default" | "diagnostic" | "error";
+  dim: boolean;
+};
+
+function messageSurfaceFor(block: ProductBlockViewModel): MessageSurface {
+  const kind = block.messageKind;
+  const diagnostic = kind === "diagnostic";
+  const structured = kind === "diff" || kind === "code" || kind === "workspace_status";
+  const tool =
+    kind === "tool_call" ||
+    kind === "tool_result_success" ||
+    kind === "tool_result_cancelled" ||
+    kind === "tool_result_rejected";
+  const response = kind === "local_command_output" || diagnostic || structured || tool;
+  return {
+    response,
+    rail: block.displayBlock?.bordered ?? (diagnostic || structured || tool),
+    tone: diagnostic ? "diagnostic" : "default",
+    dim: kind === "tool_result_cancelled" || kind === "tool_result_rejected",
+  };
+}
+
+function renderMessageBody({
+  block,
+  body,
+  theme,
+  width,
+  useAsciiBorders,
+  surface,
+}: {
+  block: ProductBlockViewModel;
+  body: string;
+  theme: ShellTheme;
+  width: number;
+  useAsciiBorders: boolean;
+  surface: MessageSurface;
+}): React.ReactNode {
+  const markdown = (
+    <MessageMarkdown
+      text={body}
+      theme={theme}
+      dim={surface.dim}
+      tone={surface.tone}
+      wrapWidth={surface.response ? messageResponseBodyWidth(width) : Math.max(8, width)}
+      useAsciiBorders={useAsciiBorders}
+      selectionLineIndexes={block.selectionLineIndexes}
+      selectionLineRanges={block.selectionLineRanges}
+    />
+  );
+  if (!surface.response) return markdown;
+  return (
+    <MessageResponse width={width} rail={surface.rail} tone={surface.tone}>
+      {markdown}
+    </MessageResponse>
+  );
+}
+
 export function ProductBlock({
   block,
   theme,
@@ -102,7 +162,7 @@ export function ProductBlock({
     if (!body) return null;
     const bodyWidth = Math.max(8, width - 2);
     return (
-      <Box marginTop={1} marginBottom={1} flexDirection="row">
+      <Box marginTop={1} marginBottom={0} flexDirection="row">
         <Text color={theme.inactive ?? theme.muted}>│ </Text>
         <Box flexDirection="column" width={bodyWidth}>
           {wrapText(body, bodyWidth).map((line, idx) => (
@@ -142,46 +202,17 @@ export function ProductBlock({
     const nextAction = visibleNextAction(block, previewBody);
     const body = messageBody(block, nextAction);
     if (!body) return null;
-    const isLocalOutput = block.messageKind === "local_command_output";
-    const isDiagnostic = block.messageKind === "diagnostic";
-    const isStructuredSurface =
-      block.messageKind === "diff" || block.messageKind === "code" || block.messageKind === "workspace_status";
-    const isCancelled = block.messageKind === "tool_result_cancelled";
-    const isRejected = block.messageKind === "tool_result_rejected";
-    const dim = isCancelled || isRejected;
-    const tone = isDiagnostic ? "diagnostic" : "default";
-    const useMessageResponse =
-      isLocalOutput || block.messageKind === "tool_result_success" || isDiagnostic || isStructuredSurface;
-    const useRail =
-      block.displayBlock?.bordered ??
-      (block.messageKind === "tool_result_success" || isDiagnostic || isStructuredSurface);
+    const surface = messageSurfaceFor(block);
     return (
       <Box flexDirection="column" marginTop={0} marginBottom={1}>
-        {useMessageResponse ? (
-          <MessageResponse width={width} rail={useRail} tone={tone}>
-            <MessageMarkdown
-              text={body}
-              theme={theme}
-              dim={dim}
-              tone={tone}
-              wrapWidth={messageResponseBodyWidth(width)}
-              useAsciiBorders={useAsciiBorders}
-              selectionLineIndexes={block.selectionLineIndexes}
-              selectionLineRanges={block.selectionLineRanges}
-            />
-          </MessageResponse>
-        ) : (
-          <MessageMarkdown
-            text={body}
-            theme={theme}
-            dim={dim}
-            tone={tone}
-            wrapWidth={Math.max(8, width)}
-            useAsciiBorders={useAsciiBorders}
-            selectionLineIndexes={block.selectionLineIndexes}
-            selectionLineRanges={block.selectionLineRanges}
-          />
-        )}
+        {renderMessageBody({
+          block,
+          body,
+          theme,
+          width,
+          useAsciiBorders,
+          surface,
+        })}
         {nextAction ? (
           <CtrlOToExpand theme={theme} hint={fitText(nextAction, Math.max(8, width - 2))} />
         ) : null}
@@ -275,17 +306,19 @@ export function ProductBlock({
           </Text>
         ) : null}
         {body ? (
-          <MessageResponse width={width} rail={block.displayBlock?.bordered ?? true} tone="error">
-            <MessageMarkdown
-              text={body}
-              theme={theme}
-              tone="error"
-              wrapWidth={messageResponseBodyWidth(width)}
-              useAsciiBorders={useAsciiBorders}
-              selectionLineIndexes={block.selectionLineIndexes}
-              selectionLineRanges={block.selectionLineRanges}
-            />
-          </MessageResponse>
+          renderMessageBody({
+            block,
+            body,
+            theme,
+            width,
+            useAsciiBorders,
+            surface: {
+              response: true,
+              rail: block.displayBlock?.bordered ?? true,
+              tone: "error",
+              dim: false,
+            },
+          })
         ) : null}
         {nextAction ? (
           <CtrlOToExpand theme={theme} hint={fitText(nextAction, Math.max(8, width - 2))} />

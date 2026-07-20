@@ -43,6 +43,7 @@ import {
   type TerminalFirstAssistantSink,
   writeErrorLine,
 } from "./tui-output-surface.js";
+import type { StructuredToolOutput } from "./tool-output-presenter.js";
 
 // Module 4 — upsertJobBackgroundTask / createJobBackgroundTask /
 // toJobContext / listDurableJobs / findDurableJob / getDurableJobsRoot /
@@ -560,6 +561,8 @@ export function __testCreateShellBlockOutput(
   // unsupported first-pass final answer 不残留于 streaming block / lastFullOutput。
   discardAssistantBlock(id: string): void;
   replaceAssistantBlockContent(id: string, text: string): void;
+  writeStructuredToolOutput(structured: StructuredToolOutput, primaryText?: string, toolUseId?: string): void;
+  writeToolRunningBlock(toolName: string, toolUseId: string, summary?: string): void;
   compactOutputMemory(options?: { projectMainScreen?: boolean }): Promise<{ beforeCount: number; afterCount: number }>;
 } {
   return createShellBlockOutputForTest(context, blocks, onWrite, terminalFirstAssistantSink);
