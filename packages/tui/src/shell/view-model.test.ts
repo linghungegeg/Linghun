@@ -1482,6 +1482,21 @@ describe("mapRequestActivityToView — real context field mapping", () => {
     expect(result?.elapsed).toBe("1m05s");
   });
 
+  it("hides Bash failure tails from activity preview", () => {
+    const ctx = createContext({
+      requestActivityPhase: "tool_running",
+      requestActivityToolName: "Bash",
+      requestActivityToolTarget:
+        "- 尾部： + ~~~~~~~~~~~~~~~~ + CategoryInfo : InvalidOperation: (:) [ConvertFrom-Json]，InvalidOperationException + FullyQualifiedErrorId : DuplicateKeysInJsonString,Microsoft.PowerShell.Commands.ConvertFromJsonCommand 退出码 1",
+    } as unknown as Partial<TuiContext>);
+
+    const result = mapRequestActivityToView(ctx);
+
+    expect(result?.phase).toBe("tool_running");
+    expect(result?.toolName).toBe("Bash");
+    expect(result?.toolTarget).toBeUndefined();
+  });
+
   it("does not show elapsed for completed/error activity", () => {
     const startedAt = Date.now() - 65_000;
     const completed = mapRequestActivityToView(

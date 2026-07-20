@@ -1496,6 +1496,19 @@ function applyCtrlOExpandState(
   };
 }
 
+function sanitizeActivityToolTarget(
+  target: string | undefined,
+  toolName: string | undefined,
+): string | undefined {
+  const clean = (target ?? "").replace(/\s+/gu, " ").trim();
+  if (!clean) return undefined;
+  if (toolName !== "Bash") return clean.length > 120 ? `${clean.slice(0, 117)}...` : clean;
+  const noisyPattern =
+    /(?:^|\s)(?:[-+]?\s*尾部：|tail:|退出码\s*\d+|exit\s+code\s+\d+|CategoryInfo\s*:|FullyQualifiedErrorId\s*:|InvalidOperationException|ConvertFrom-Json)/iu;
+  if (noisyPattern.test(clean)) return undefined;
+  return clean.length > 120 ? `${clean.slice(0, 117)}...` : clean;
+}
+
 /**
  * Maps a TuiContext's requestActivityPhase to a TaskActivityView for the shell.
  * Returns undefined if no activity is in progress.
@@ -1606,11 +1619,12 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
   if (startedAt && mapped !== "completed" && mapped !== "error") {
     elapsed = formatElapsedSince(new Date(startedAt).toISOString());
   }
+  const rawToolTarget = (context as { requestActivityToolTarget?: string }).requestActivityToolTarget;
   return {
     phase: mapped,
     text: texts[phase] ?? texts[mapped] ?? "",
     toolName: toolName ?? undefined,
-    toolTarget: (context as { requestActivityToolTarget?: string }).requestActivityToolTarget,
+    toolTarget: sanitizeActivityToolTarget(rawToolTarget, toolName),
     elapsed,
     language: context.language,
     totalLines: (context as { requestActivityToolLines?: number }).requestActivityToolLines,
@@ -1650,7 +1664,10 @@ function deriveWorkRequestState(
     requestPhase: phase,
     startedAtMs,
     toolName: (context as { requestActivityToolName?: string }).requestActivityToolName,
-    toolTarget: (context as { requestActivityToolTarget?: string }).requestActivityToolTarget,
+    toolTarget: sanitizeActivityToolTarget(
+      (context as { requestActivityToolTarget?: string }).requestActivityToolTarget,
+      (context as { requestActivityToolName?: string }).requestActivityToolName,
+    ),
     retryAttempt: retryInfo?.attempt,
     retryMax: retryInfo?.max,
     retryDelaySec: retryInfo?.delaySec,
