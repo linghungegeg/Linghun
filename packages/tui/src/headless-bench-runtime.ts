@@ -16,6 +16,7 @@ const SUMMARY_LIMIT = 4_000;
 const OFFICIAL_PROCESS_STOP_TIMEOUT_MS = 5_000;
 const ARTIFACT_SANITY_TIMEOUT_MS = 8_000;
 const SERVICE_SANITY_TIMEOUT_MS = 2_000;
+const EXTERNAL_VERIFIER_LOCAL_TEST_MIN_REMAINING_MS = 90_000;
 
 export type HeadlessBenchFailureCategory =
   | "model_patch_failed"
@@ -57,7 +58,7 @@ export type HeadlessArtifactKind =
 
 export type HeadlessArtifactContract = {
   path: string;
-  source: "option" | "env" | "prompt";
+  source: "option" | "env" | "prompt" | "official_facts" | "test";
   kind: HeadlessArtifactKind;
   checks: string[];
   formatHint?: string;
@@ -66,7 +67,7 @@ export type HeadlessArtifactContract = {
 export type HeadlessServiceContract = {
   host: string;
   port: number;
-  source: "prompt";
+  source: "prompt" | "official_facts" | "test";
   label?: string;
 };
 
@@ -97,6 +98,7 @@ export type HeadlessBenchConfig = {
   requiredArtifacts: string[];
   artifactContracts?: HeadlessArtifactContract[];
   serviceContracts?: HeadlessServiceContract[];
+  playbookHints?: string[];
   preflight: boolean;
   environmentSetupRetries: number;
   externalVerifier?: boolean;
@@ -227,6 +229,20 @@ export async function resolveHeadlessBenchConfig(input: {
     0,
     MAX_ENVIRONMENT_SETUP_RETRIES,
   );
+  const externalOfficialFactsPath =
+    input.options?.externalOfficialFactsPath ?? env.LINGHUN_HEADLESS_OFFICIAL_FACTS_FILE;
+  const externalOfficialFactsTaskName =
+    input.options?.externalOfficialFactsTaskName ?? env.LINGHUN_HEADLESS_TASK_NAME;
+  const externalOfficialFacts =
+    input.options?.externalOfficialFacts ??
+    (await readExternalHeadlessOfficialValidationFacts(
+      externalOfficialFactsPath,
+      externalOfficialFactsTaskName,
+    ));
+  const taskLocalTestContracts =
+    enabled || promptLooksLikeTerminalBench || Boolean(defaultTestCommand)
+      ? await detectTaskLocalTestContracts(input.projectPath)
+      : { artifactContracts: [], serviceContracts: [] };
   const artifactContracts = mergeArtifactContracts([
     ...(input.options?.artifactContracts ?? []),
     ...(input.options?.requiredArtifacts ?? []).map((path) =>
@@ -236,10 +252,14 @@ export async function resolveHeadlessBenchConfig(input: {
       createArtifactContract(path, "env", input.prompt)
     ),
     ...detectRequiredArtifactContracts(input.prompt),
+    ...detectOfficialFactsArtifactContracts(externalOfficialFacts),
+    ...taskLocalTestContracts.artifactContracts,
   ]);
   const serviceContracts = mergeServiceContracts([
     ...(input.options?.serviceContracts ?? []),
     ...detectServiceContracts(input.prompt),
+    ...detectOfficialFactsServiceContracts(externalOfficialFacts),
+    ...taskLocalTestContracts.serviceContracts,
   ]);
   const requiredArtifacts = artifactContracts.map((contract) => contract.path);
   const defaultRepairAttempts =
@@ -253,21 +273,18 @@ export async function resolveHeadlessBenchConfig(input: {
     MAX_REPAIR_ATTEMPTS,
   );
   const testCommand = input.options?.testCommand ?? env.LINGHUN_HEADLESS_TEST_COMMAND ?? defaultTestCommand;
-  const externalOfficialFactsPath =
-    input.options?.externalOfficialFactsPath ?? env.LINGHUN_HEADLESS_OFFICIAL_FACTS_FILE;
-  const externalOfficialFactsTaskName =
-    input.options?.externalOfficialFactsTaskName ?? env.LINGHUN_HEADLESS_TASK_NAME;
-  const externalOfficialFacts =
-    input.options?.externalOfficialFacts ??
-    (await readExternalHeadlessOfficialValidationFacts(
-      externalOfficialFactsPath,
-      externalOfficialFactsTaskName,
-    ));
   const profile = await detectHeadlessBenchTaskProfile({
     prompt: input.prompt,
     projectPath: input.projectPath,
     requiredArtifacts,
     testCommand,
+  });
+  const playbookHints = createHeadlessBenchPlaybookHints({
+    prompt: input.prompt,
+    profile,
+    artifactContracts,
+    serviceContracts,
+    officialFacts: externalOfficialFacts,
   });
   return {
     enabled,
@@ -278,6 +295,7 @@ export async function resolveHeadlessBenchConfig(input: {
     requiredArtifacts,
     artifactContracts,
     serviceContracts,
+    playbookHints,
     preflight: input.options?.preflight ?? parseBoolean(env.LINGHUN_HEADLESS_PREFLIGHT) ?? true,
     environmentSetupRetries,
     externalVerifier:
@@ -340,6 +358,7 @@ export function createHeadlessBenchInitialPrompt(input: {
     externalFacts,
     preflight,
     formatInitialProfileStrategy(input.config.profile),
+    formatHeadlessPlaybookHints(input.config.playbookHints),
     "If rg is unavailable, use grep/find/sed/awk fallbacks instead of failing the task.",
     "For leaderboard-style runs, treat the benchmark default per-trial timeout as a hard single-time budget; leave enough time for official validation and do not depend on extended timeout multipliers.",
     "Before long builds, training, or full suites, run a bounded probe/read of task-local tests, verifier facts, and likely failure surfaces.",
@@ -464,6 +483,24 @@ export async function validateHeadlessBenchCompletion(input: {
       ...(deferredToExternalVerifier ? { deferredToExternalVerifier: true } : {}),
     };
   }
+  if (shouldDeferLocalOfficialTestToExternalVerifier(input.config, input.deadlineAtMs)) {
+    const sanity = await validateExternalVerifierSanity(input.projectPath, input.config);
+    if (!sanity.ok) {
+      return {
+        ok: false,
+        failure: {
+          category: sanity.category,
+          summary: sanity.summary,
+        },
+      };
+    }
+    return {
+      ok: true,
+      testRan: false,
+      summary: headlessExternalVerifierDeadlineHandoffSummary(input.config, input.deadlineAtMs),
+      deferredToExternalVerifier: true,
+    };
+  }
   let result: Awaited<ReturnType<typeof runOfficialTestCommand>> | undefined;
   let setupRetry = 0;
   while (setupRetry <= input.config.environmentSetupRetries) {
@@ -562,6 +599,29 @@ function headlessNoLocalTestSummary(
   return deferredToExternalVerifier
     ? `${localSummary}; pass/fail deferred to external verifier`
     : localSummary;
+}
+
+function shouldDeferLocalOfficialTestToExternalVerifier(
+  config: HeadlessBenchConfig,
+  deadlineAtMs: number | undefined,
+): boolean {
+  if (config.externalVerifier !== true) return false;
+  const remainingMs = remainingDeadlineMs(deadlineAtMs);
+  return remainingMs !== undefined && remainingMs <= EXTERNAL_VERIFIER_LOCAL_TEST_MIN_REMAINING_MS;
+}
+
+function headlessExternalVerifierDeadlineHandoffSummary(
+  config: HeadlessBenchConfig,
+  deadlineAtMs: number | undefined,
+): string {
+  const remainingMs = remainingDeadlineMs(deadlineAtMs);
+  const remaining = remainingMs === undefined
+    ? "unknown"
+    : `${Math.max(0, Math.ceil(remainingMs / 1000))}s`;
+  const localSummary = config.requiredArtifacts.length
+    ? "required artifacts/services passed sanity checks"
+    : "no explicit artifact requirement detected";
+  return `${localSummary}; local official test skipped with ${remaining} remaining; pass/fail deferred to external verifier`;
 }
 
 function summarizeNonPassingOfficialFacts(
@@ -772,6 +832,7 @@ export function createHeadlessBenchRepairPrompt(input: {
   profile?: HeadlessBenchTaskProfile;
   artifactContracts?: HeadlessArtifactContract[];
   serviceContracts?: HeadlessServiceContract[];
+  playbookHints?: string[];
   preflight?: HeadlessEnvironmentPreflight;
   workspaceUnchanged?: boolean;
   remainingDeadline?: string;
@@ -805,6 +866,7 @@ export function createHeadlessBenchRepairPrompt(input: {
       ? "The previous repair did not change workspace content. Use the same failure evidence to choose a different minimal repair path."
       : "",
     formatRepairProfileStrategy(input.failure.category, input.profile ?? "generic"),
+    formatHeadlessPlaybookHints(input.playbookHints),
     input.preflight?.missingTools.includes("rg")
       ? "rg is missing in this environment; use grep/find/sed/awk fallbacks."
       : "",
@@ -1085,6 +1147,70 @@ function formatInitialProfileStrategy(profile: HeadlessBenchTaskProfile): string
   }
 }
 
+function createHeadlessBenchPlaybookHints(input: {
+  prompt: string;
+  profile: HeadlessBenchTaskProfile;
+  artifactContracts: HeadlessArtifactContract[];
+  serviceContracts: HeadlessServiceContract[];
+  officialFacts?: HeadlessOfficialValidationFacts;
+}): string[] {
+  const surface = [
+    input.prompt,
+    officialFactsSearchText(input.officialFacts),
+    ...input.artifactContracts.map((contract) => contract.path),
+    ...input.serviceContracts.map((contract) => `${contract.host}:${contract.port}`),
+  ]
+    .join("\n")
+    .toLowerCase();
+  const hints: string[] = [];
+  if (input.artifactContracts.length > 0) {
+    hints.push("artifact contract playbook: keep a required-output checklist and verify every path exists, is readable, and is non-empty before final");
+  }
+  if (input.serviceContracts.length > 0) {
+    hints.push("service playbook: start services with bounded commands, wait-loop the configured port, then run the real client smoke check before final");
+  }
+  switch (input.profile) {
+    case "qemu_or_service":
+    case "security_or_network":
+      hints.push("runtime/service playbook: verify logs, ports, process health, and cleanup; never treat a daemon launch alone as success");
+      break;
+    case "ml_or_data":
+      hints.push("ml/data playbook: inspect schema and thresholds first, use bounded samples or deterministic seeds, and only then run expensive validation");
+      break;
+    case "binary_or_artifact":
+      hints.push("binary/artifact playbook: verify executable bits, file format, expected output names, and shortest real invocation before final");
+      break;
+    case "polyglot_cpp":
+    case "polyglot_simple":
+      hints.push("interface playbook: match test-facing names, signatures, executable paths, and build entrypoints exactly before changing deeper logic");
+      break;
+    case "swe_python":
+    case "large_python_project":
+      hints.push("python test playbook: read failing tests, patch only the tested surface, then rerun focused pytest before broader validation");
+      break;
+    case "generic":
+      break;
+  }
+  if (/\b(?:xss|html|filter|sanitize|script|javascript)\b/u.test(surface)) {
+    hints.push("filter/security playbook: run both malicious and clean-input cases; preserve clean HTML while blocking or crafting the targeted script behavior");
+  }
+  if (/\b(?:qemu|ssh|vnc|vm|frame\.bmp|mips|doom|windows)\b/u.test(surface)) {
+    hints.push("vm playbook: wait for the observable output or port with a bounded loop; capture the exact smoke result before final");
+  }
+  if (/\b(?:fasttext|torch|pytorch|caffe|mteb|stan|raman|model|accuracy|iou|matrix|posterior|peak)\b/u.test(surface)) {
+    hints.push("numeric/model playbook: derive the verifier threshold, validate output shape and parseability, and avoid unbounded training loops");
+  }
+  if (/\b(?:sql|sqlite|wal|query|recovered\.json|sol\.sql)\b/u.test(surface)) {
+    hints.push("data/query playbook: preserve expected file names and compare result rows or runtime against the verifier surface before final");
+  }
+  return uniqueStrings(hints).slice(0, 7);
+}
+
+function formatHeadlessPlaybookHints(hints: string[] | undefined): string {
+  if (!hints?.length) return "";
+  return `Playbook route: ${hints.join(" | ")}`;
+}
+
 export function formatEngineeringProfileStrategyHint(profile: EngineeringTaskProfile): string {
   switch (profile) {
     case "polyglot_cpp":
@@ -1256,6 +1382,164 @@ function detectRequiredArtifactContracts(prompt: string): HeadlessArtifactContra
 
 function detectRequiredArtifacts(prompt: string): string[] {
   return detectRequiredArtifactContracts(prompt).map((contract) => contract.path);
+}
+
+async function detectTaskLocalTestContracts(projectPath: string): Promise<{
+  artifactContracts: HeadlessArtifactContract[];
+  serviceContracts: HeadlessServiceContract[];
+}> {
+  const candidates = uniqueStrings([
+    "/tests/test_outputs.py",
+    join(projectPath, "tests", "test_outputs.py"),
+    join(projectPath, "test_outputs.py"),
+  ]);
+  const texts: string[] = [];
+  for (const candidate of candidates) {
+    const content = await readOptionalText(candidate);
+    if (content) texts.push(content.slice(0, 600_000));
+  }
+  const text = texts.join("\n");
+  if (!text) return { artifactContracts: [], serviceContracts: [] };
+  return {
+    artifactContracts: detectTaskLocalTestArtifactContracts(text),
+    serviceContracts: extractServiceContractsFromText(text, "test"),
+  };
+}
+
+function detectTaskLocalTestArtifactContracts(text: string): HeadlessArtifactContract[] {
+  const paths: string[] = [];
+  for (const pattern of TASK_LOCAL_TEST_ARTIFACT_PATTERNS) {
+    for (const match of text.matchAll(pattern)) {
+      const path = match.groups?.path;
+      if (path) paths.push(normalizeArtifactPath(path));
+    }
+  }
+  for (const match of text.matchAll(TASK_LOCAL_TEST_PATH_ASSIGNMENT_PATTERN)) {
+    const name = match.groups?.name;
+    const path = match.groups?.path;
+    const index = match.index ?? 0;
+    if (!name || !path) continue;
+    const context = text.slice(index, index + 700);
+    if (!testPathVariableIsObserved(context, name)) continue;
+    paths.push(normalizeArtifactPath(path));
+  }
+  return mergeArtifactContracts(
+    uniqueStrings(paths)
+      .filter(shouldPromoteOfficialFactArtifactPath)
+      .map((path) => createArtifactContract(path, "test", text)),
+  );
+}
+
+const TASK_LOCAL_TEST_ARTIFACT_PATTERNS: RegExp[] = [
+  /\bPath\(['"](?<path>\/(?:app|tmp)\/[A-Za-z0-9._/-]+)['"]\)\.(?:exists|read_text)\(/giu,
+  /\bos\.path\.(?:exists|getsize)\(['"](?<path>\/(?:app|tmp)\/[A-Za-z0-9._/-]+)['"]\)/giu,
+  /\bsubprocess\.run\(\s*\[\s*['"](?<path>\/app\/[A-Za-z0-9._/-]+)['"]/giu,
+];
+
+const TASK_LOCAL_TEST_PATH_ASSIGNMENT_PATTERN =
+  /\b(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*Path\(['"](?<path>\/(?:app|tmp)\/[A-Za-z0-9._/-]+)['"]\)/giu;
+
+function testPathVariableIsObserved(context: string, name: string): boolean {
+  const escapedName = escapeRegExp(name);
+  return new RegExp(
+    `\\b(?:assert\\s+)?${escapedName}\\.exists\\(\\)|\\b${escapedName}\\.read_text\\(|\\bopen\\(${escapedName}\\b|\\bos\\.path\\.getsize\\(${escapedName}\\b`,
+    "u",
+  ).test(context);
+}
+
+function detectOfficialFactsArtifactContracts(
+  facts: HeadlessOfficialValidationFacts | undefined,
+): HeadlessArtifactContract[] {
+  const text = officialFactsSearchText(facts);
+  if (!text) return [];
+  const paths = uniqueStrings(extractOfficialFactArtifactPaths(text)).filter(
+    shouldPromoteOfficialFactArtifactPath,
+  );
+  return mergeArtifactContracts(
+    paths.map((path) => createArtifactContract(path, "official_facts", text)),
+  );
+}
+
+function detectOfficialFactsServiceContracts(
+  facts: HeadlessOfficialValidationFacts | undefined,
+): HeadlessServiceContract[] {
+  const text = officialFactsSearchText(facts);
+  return extractServiceContractsFromText(text, "official_facts");
+}
+
+function officialFactsSearchText(facts: HeadlessOfficialValidationFacts | undefined): string {
+  if (!facts) return "";
+  return [
+    facts.taskName,
+    ...(facts.failedTests ?? []),
+    ...(facts.failureDetails ?? []),
+    facts.testStdoutSummary,
+    facts.verifierTimeoutSummary,
+  ]
+    .filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+    .join("\n");
+}
+
+const OFFICIAL_FACT_ARTIFACT_PATTERNS: RegExp[] = [
+  /\bFile\s+(?<path>\/[A-Za-z0-9._/-]+)\s+does not exist\b/giu,
+  /\bNo such file or directory:\s+['"]?(?<path>\/[A-Za-z0-9._/-]+)['"]?/giu,
+  /\b(?:file|model|script|sql|solution|output|artifact|result)\s+(?:is\s+)?(?:not\s+found|missing)\s+(?:at\s+)?(?<path>\/[A-Za-z0-9._/-]+)/giu,
+  /(?<path>\/[A-Za-z0-9._/-]+)\s+cannot be opened\b/giu,
+  /\bPath\(['"](?<path>\/[A-Za-z0-9._/-]+)['"]\)[\s\S]{0,180}?(?:\.exists\(\)|does not exist|not found|missing)/giu,
+  /\bos\.path\.getsize\(['"](?<path>\/[A-Za-z0-9._/-]+)['"]\)/giu,
+];
+
+const OFFICIAL_FACT_SERVICE_PATTERNS: RegExp[] = [
+  /\b(?<host>localhost|127\.0\.0\.1):(?<port>\d{2,5})\b/giu,
+  /\b(?:ssh|sshpass)[\s\S]{0,260}?['"]-p['"]\s*,\s*['"](?<port>\d{2,5})['"][\s\S]{0,260}?(?<host>localhost|127\.0\.0\.1)\b/giu,
+  /\b(?:ssh|sshpass)[\s\S]{0,260}?\s-p\s+(?<port>\d{2,5})\s+[\s\S]{0,260}?(?<host>localhost|127\.0\.0\.1)\b/giu,
+];
+
+function extractServiceContractsFromText(
+  text: string,
+  source: HeadlessServiceContract["source"],
+): HeadlessServiceContract[] {
+  if (!text) return [];
+  const contracts: HeadlessServiceContract[] = [];
+  for (const pattern of OFFICIAL_FACT_SERVICE_PATTERNS) {
+    for (const match of text.matchAll(pattern)) {
+      const host = normalizeServiceHost(match.groups?.host);
+      const port = Number.parseInt(match.groups?.port ?? "", 10);
+      if (!Number.isInteger(port) || port <= 0 || port > 65_535) continue;
+      contracts.push({ host, port, source });
+    }
+  }
+  return mergeServiceContracts(contracts);
+}
+
+function extractOfficialFactArtifactPaths(text: string): string[] {
+  const paths: string[] = [];
+  for (const pattern of OFFICIAL_FACT_ARTIFACT_PATTERNS) {
+    for (const match of text.matchAll(pattern)) {
+      const path = match.groups?.path;
+      if (path) paths.push(normalizeArtifactPath(path));
+    }
+  }
+  return paths;
+}
+
+function shouldPromoteOfficialFactArtifactPath(path: string): boolean {
+  if (!path.startsWith("/app/") && !path.startsWith("/tmp/")) return false;
+  if (path.startsWith("/tests/")) return false;
+  if (/\/(?:reference|expected|private)[^/]*$/iu.test(path)) return false;
+  const baseName = path.split("/").filter(Boolean).at(-1) ?? "";
+  if (!baseName || !baseName.includes(".") && /^(app|caffe|tests?|tmp)$/iu.test(baseName)) {
+    return false;
+  }
+  return true;
+}
+
+function normalizeServiceHost(value: string | undefined): string {
+  return value === "localhost" || value === undefined ? "127.0.0.1" : value;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
 function normalizeArtifactPath(value: string): string {

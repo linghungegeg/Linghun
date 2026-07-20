@@ -72,7 +72,9 @@ describe("headless-bench-runtime", () => {
   });
 
   it("promotes explicit output paths into structured artifact contracts", async () => {
-    const { resolveHeadlessBenchConfig } = await import("./headless-bench-runtime.js");
+    const { createHeadlessBenchInitialPrompt, resolveHeadlessBenchConfig } = await import(
+      "./headless-bench-runtime.js"
+    );
     const project = await mkdtemp(join(tmpdir(), "linghun-headless-artifact-contract-"));
 
     const config = await resolveHeadlessBenchConfig({
@@ -119,6 +121,61 @@ describe("headless-bench-runtime", () => {
         checks: expect.arrayContaining(["exists", "non_empty", "shell_syntax_if_available"]),
       },
     ]);
+  });
+
+  it("promotes task-local test expectations into artifact and service contracts", async () => {
+    const { createHeadlessBenchInitialPrompt, resolveHeadlessBenchConfig } = await import(
+      "./headless-bench-runtime.js"
+    );
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-test-contract-"));
+    await mkdir(join(project, "tests"), { recursive: true });
+    await writeFile(
+      join(project, "tests", "test_outputs.py"),
+      [
+        "import os",
+        "from pathlib import Path",
+        "def test_solution_file_exists():",
+        "    solution_path = Path('/app/sol.sql')",
+        "    assert solution_path.exists()",
+        "def test_model_size():",
+        "    assert os.path.getsize('/app/model.bin') > 0",
+        "def test_reference_exists():",
+        "    ref = Path('/tests/reference.jpg')",
+        "    assert ref.exists()",
+        "def test_sshpass():",
+        "    subprocess.run(['sshpass', '-p', 'password123', 'ssh', '-p', '2222', 'root@localhost', 'uname -r'])",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = await resolveHeadlessBenchConfig({
+      projectPath: project,
+      env: { LINGHUN_HEADLESS_BENCH: "1" },
+      prompt: "Terminal-Bench task container.",
+    });
+
+    expect(config.requiredArtifacts).toEqual(
+      expect.arrayContaining(["/app/sol.sql", "/app/model.bin"]),
+    );
+    expect(config.requiredArtifacts).not.toContain("/tests/reference.jpg");
+    expect(config.artifactContracts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: "/app/sol.sql", source: "test", kind: "text" }),
+        expect.objectContaining({ path: "/app/model.bin", source: "test" }),
+      ]),
+    );
+    expect(config.serviceContracts).toEqual([
+      { host: "127.0.0.1", port: 2222, source: "test" },
+    ]);
+    expect(config.maxRepairAttempts).toBe(2);
+
+    const prompt = createHeadlessBenchInitialPrompt({
+      originalPrompt: "Solve the task.",
+      config,
+    });
+    expect(prompt).toContain("Playbook route:");
+    expect(prompt).toContain("artifact contract playbook");
+    expect(prompt).toContain("service playbook");
   });
 
   it("detects service contracts only from runtime service context", async () => {
@@ -176,6 +233,7 @@ describe("headless-bench-runtime", () => {
       maxAttempts: 2,
       profile: "generic",
       remainingDeadline: "42s remaining",
+      playbookHints: ["artifact contract playbook: verify required paths before final"],
       preflight: {
         checkedTools: ["rg"],
         missingTools: ["rg"],
@@ -184,6 +242,8 @@ describe("headless-bench-runtime", () => {
     });
 
     expect(prompt).toContain("Remaining deadline before repair: 42s remaining");
+    expect(prompt).toContain("Playbook route:");
+    expect(prompt).toContain("artifact contract playbook");
     expect(prompt).toContain("rg is missing");
     expect(prompt).toContain("Official verifier facts: reward=0; resultReward=0");
     expect(prompt).toContain("ctrfFailed=1/2");
@@ -485,12 +545,98 @@ describe("headless-bench-runtime", () => {
       config,
     });
 
-    expect(repairedResult.ok).toBe(true);
-    if (repairedResult.ok) {
-      expect(repairedResult.deferredToExternalVerifier).toBe(true);
-      expect(repairedResult.summary).toContain("pass/fail deferred to external verifier");
-      expect(repairedResult.officialResult).toBeUndefined();
+    expect(repairedResult.ok).toBe(false);
+    if (!repairedResult.ok) {
+      expect(repairedResult.failure.category).toBe("missing_artifact");
+      expect(repairedResult.failure.missingArtifacts).toContain("/tmp/frame.bmp");
     }
+  });
+
+  it("promotes external official missing-file facts into artifact contracts", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-external-fact-artifacts-"));
+    const factsFile = join(project, "previous-verifier-facts.json");
+    await writeFile(
+      factsFile,
+      JSON.stringify({
+        facts_status: "available",
+        facts: {
+          task_name: "query-optimize",
+          reward: 0,
+          failed_tests: ["test_outputs.py::test_compare_golden_vs_solution_runtime"],
+          failure_details: [
+            "test_outputs.py::test_compare_golden_vs_solution_runtime: AssertionError: Solution SQL not found at /app/sol.sql",
+            "test_outputs.py::test_model_size: File /app/model.bin does not exist",
+            "test_outputs.py::test_reference: Path(\"/tests/reference.jpg\").exists()",
+          ],
+        },
+      }),
+      "utf8",
+    );
+    const { resolveHeadlessBenchConfig } = await import("./headless-bench-runtime.js");
+
+    const config = await resolveHeadlessBenchConfig({
+      projectPath: project,
+      prompt: "Terminal-Bench task container.",
+      env: {
+        LINGHUN_HEADLESS_BENCH: "1",
+        LINGHUN_HEADLESS_OFFICIAL_FACTS_FILE: factsFile,
+      },
+      options: { preflight: false },
+    });
+
+    expect(config.requiredArtifacts).toEqual(
+      expect.arrayContaining(["/app/sol.sql", "/app/model.bin"]),
+    );
+    expect(config.artifactContracts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "/app/sol.sql",
+          source: "official_facts",
+          kind: "text",
+        }),
+        expect.objectContaining({
+          path: "/app/model.bin",
+          source: "official_facts",
+        }),
+      ]),
+    );
+    expect(config.requiredArtifacts).not.toContain("/tests/reference.jpg");
+    expect(config.maxRepairAttempts).toBe(2);
+  });
+
+  it("promotes external official ssh verifier facts into service contracts", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-external-fact-service-"));
+    const factsFile = join(project, "previous-verifier-facts.json");
+    await writeFile(
+      factsFile,
+      JSON.stringify({
+        facts_status: "available",
+        facts: {
+          task_name: "qemu-alpine-ssh",
+          reward: 0,
+          failed_tests: ["test_outputs.py::test_sshpass"],
+          test_stdout_summary:
+            "CalledProcessError: Command '['sshpass', '-p', 'password123', 'ssh', '-o', 'StrictHostKeyChecking=no', '-p', '2222', 'root@localhost', 'uname -r']' returned non-zero exit status 255.",
+        },
+      }),
+      "utf8",
+    );
+    const { resolveHeadlessBenchConfig } = await import("./headless-bench-runtime.js");
+
+    const config = await resolveHeadlessBenchConfig({
+      projectPath: project,
+      prompt: "Terminal-Bench task container.",
+      env: {
+        LINGHUN_HEADLESS_BENCH: "1",
+        LINGHUN_HEADLESS_OFFICIAL_FACTS_FILE: factsFile,
+      },
+      options: { preflight: false },
+    });
+
+    expect(config.serviceContracts).toEqual([
+      { host: "127.0.0.1", port: 2222, source: "official_facts" },
+    ]);
+    expect(config.maxRepairAttempts).toBe(2);
   });
 
   it("does not select multi-task external facts without an explicit task name", async () => {
@@ -957,6 +1103,38 @@ describe("headless-bench-runtime", () => {
     if (!result.ok) {
       expect(result.failure.category).toBe("model_patch_failed");
       expect(result.failure.summary).toContain("127.0.0.1:9");
+    }
+  });
+
+  it("hands off to external verifier instead of starting local tests near deadline", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-headless-external-deadline-handoff-"));
+    const script = join(project, "should-not-run.js");
+    await writeFile(script, "process.exit(1);", "utf8");
+    await writeFile(join(project, "out.txt"), "done\n", "utf8");
+    const { validateHeadlessBenchCompletion } = await import("./headless-bench-runtime.js");
+
+    const result = await validateHeadlessBenchCompletion({
+      projectPath: project,
+      deadlineAtMs: Date.now() + 30_000,
+      config: {
+        enabled: true,
+        profile: "generic",
+        testCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`,
+        testTimeoutMs: 120_000,
+        maxRepairAttempts: 1,
+        requiredArtifacts: ["out.txt"],
+        preflight: false,
+        environmentSetupRetries: 0,
+        externalVerifier: true,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.testRan).toBe(false);
+      expect(result.deferredToExternalVerifier).toBe(true);
+      expect(result.summary).toContain("local official test skipped");
+      expect(result.summary).toContain("pass/fail deferred to external verifier");
     }
   });
 

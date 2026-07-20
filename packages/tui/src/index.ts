@@ -2406,6 +2406,7 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
           profile: benchConfig.profile,
           artifactContracts: benchConfig.artifactContracts,
           serviceContracts: benchConfig.serviceContracts,
+          playbookHints: benchConfig.playbookHints,
           workspaceUnchanged,
           remainingDeadline: formatHeadlessRemainingTime(deadlineAtMs),
           checklist,
