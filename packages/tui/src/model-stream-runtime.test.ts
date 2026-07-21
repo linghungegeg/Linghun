@@ -7190,6 +7190,51 @@ describe("final answer gate aggregation", () => {
     expect(output.text).not.toContain("AgentCompletionReturnsForMainChain");
   });
 
+  it("does not duplicate owned final no-tools output after Shell stream replacement", async () => {
+    const { context } = await makeSendMessageContext();
+    const blocks: Parameters<typeof createShellBlockOutputForTest>[1] = [];
+    const output = createShellBlockOutputForTest(context, blocks);
+    const requestTurnId = "turn-final-no-tools-shell-dedupe";
+    context.currentRequestTurnId = requestTurnId;
+    const gateway = gatewayByTurn([
+      [
+        {
+          type: "assistant_text_delta",
+          text: [
+            "最终回答：已按现有证据收口。",
+            "EvidenceSummary=[]",
+            "AgentCompletionReturnsForMainChain=[]",
+            'LinghunFinalAnswerClaims: {"claims":[]}',
+          ].join("\n"),
+        },
+        { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+      ],
+    ], { count: 0 });
+
+    const cleaned = await __testStreamFinalModelAnswerWithoutTools(
+      {
+        messages: [{ role: "user", content: "给出最终回答" }],
+        provider: "deepseek",
+        model: "deepseek-chat",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+        originalUserText: "给出最终回答",
+        requestTurnId,
+        abortSignal: new AbortController().signal,
+      },
+      context,
+      gateway,
+      context.sessionId!,
+      output,
+      new AbortController().signal,
+    );
+
+    const assistantBlocks = blocks.filter((block) => block.messageKind === "assistant_text");
+    expect(assistantBlocks).toHaveLength(1);
+    expect(assistantBlocks[0]?.fullText).toBe(cleaned);
+    expect(blocks.filter((block) => block.fullText === cleaned)).toHaveLength(1);
+  });
+
   it("commits only the cleaned final answer after intermediate tool narration", async () => {
     const { context, events } = await makeSendMessageContext();
     await writeFile(join(context.projectPath, "sample.txt"), "ok\n", "utf8");

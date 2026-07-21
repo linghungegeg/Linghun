@@ -5,7 +5,10 @@ import { __testCreateShellBlockOutput } from "./details-status-runtime.js";
 import type { ProductBlockViewModel } from "./shell/types.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 import { createStructuredToolOutput } from "./tool-output-presenter.js";
-import { writeToolRunningBlock } from "./tui-output-surface.js";
+import {
+  createTerminalFirstAssistantSink,
+  writeToolRunningBlock,
+} from "./tui-output-surface.js";
 
 function createContext(): TuiContext {
   return {
@@ -50,7 +53,9 @@ describe("tui-output-surface", () => {
     expect(blocks).toHaveLength(1);
     expect(blocks[0]?.id).toBe("tool:Bash:call-2");
     expect(blocks[0]?.messageKind).toBe("tool_call");
-    expect(blocks[0]?.fullText).toContain("second chunk");
+    expect(blocks[0]?.fullText).toBe("second chunk");
+    expect(blocks[0]?.displayBlock?.title).toBe("正在处理");
+    expect(blocks[0]?.displayBlock?.body).toBe("second chunk");
   });
 
   it("keeps running tool helper silent for plain writable fallback", () => {
@@ -65,5 +70,31 @@ describe("tui-output-surface", () => {
     writeToolRunningBlock(output, "Bash", "call-plain", "progress");
 
     expect(chunks).toEqual([]);
+  });
+
+  it("adds background color to terminal-first streamed diff lines", () => {
+    const chunks: string[] = [];
+    const output = new Writable({
+      write(chunk, _encoding, callback) {
+        chunks.push(chunk.toString());
+        callback();
+      },
+    }) as Writable & { isTTY: true };
+    output.isTTY = true;
+
+    const sink = createTerminalFirstAssistantSink(output, {
+      columns: 80,
+      frameTopRow: 10,
+      noColor: false,
+      rows: 24,
+    });
+
+    expect(sink).toBeDefined();
+    sink?.stageStableAssistantText("```diff\n-old\n+new\n```\n");
+    expect(sink?.commitStableAssistantText()).toBe(true);
+
+    const written = chunks.join("");
+    expect(written).toContain("\x1B[48;2;61;26;26;31m-");
+    expect(written).toContain("\x1B[48;2;26;61;26;32m+");
   });
 });

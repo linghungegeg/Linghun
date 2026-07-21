@@ -249,8 +249,8 @@ function formatPrimaryToolLead(
       const lineLabel = `**${totalLines ?? visibleLines}** lines`;
       return readFile ? `Read ${readFile} · ${lineLabel}.` : `Read ${lineLabel}.`;
     }
-    if (name === "ReadSnippets") return `Read **${count ?? visibleLines}** range(s).`;
-    if (name === "SourcePack") return `Prepared **${count ?? visibleLines}** snippet(s).`;
+    if (name === "ReadSnippets") return `Read ${count ?? visibleLines} range(s).`;
+    if (name === "SourcePack") return `Prepared ${count ?? visibleLines} snippet(s).`;
     if (name === "Bash") return formatBashLead(output, language);
     // Phase 17: WebSearch / WebFetch dedicated format.
     if (name === "WebSearch") return formatWebSearchLead(output, language);
@@ -267,8 +267,8 @@ function formatPrimaryToolLead(
     const lineLabel = `**${totalLines ?? visibleLines}** 行`;
     return readFile ? `已读取 ${readFile} · ${lineLabel}` : `已读取 ${lineLabel}`;
   }
-  if (name === "ReadSnippets") return `已读取 **${count ?? visibleLines}** 个范围`;
-  if (name === "SourcePack") return `已准备 **${count ?? visibleLines}** 个片段`;
+  if (name === "ReadSnippets") return `已读取${count ?? visibleLines}个范围`;
+  if (name === "SourcePack") return `已准备 ${count ?? visibleLines} 个片段`;
   if (name === "Bash") return formatBashLead(output, language);
   // Phase 17: WebSearch / WebFetch dedicated format.
   if (name === "WebSearch") return formatWebSearchLead(output, language);
@@ -1063,7 +1063,7 @@ function formatStructuredPreviewItems(
 ): { text: string; truncated: boolean } | undefined {
   if (name === "ReadSnippets") {
     return formatNumberedPreviewList(
-      language === "en-US" ? "Ranges" : "范围",
+      language === "en-US" ? "Ranges" : "",
       readRangeTargets(metadata, "ranges"),
       language,
       true,
@@ -1145,7 +1145,9 @@ function formatNumberedPreviewList(
   if (itemCount === 0) return undefined;
   const visibleItems = items.slice(0, STRUCTURED_PREVIEW_ITEM_LIMIT);
   const hiddenCount = itemCount - visibleItems.length;
-  const lines = [`- ${label}:`, ...visibleItems.map((item, index) => `  ${index + 1}. ${item}`)];
+  const lines = label
+    ? [`- ${label}:`, ...visibleItems.map((item, index) => `  ${index + 1}. ${item}`)]
+    : visibleItems.map((item, index) => `  ${index + 1}. ${item}`);
   if (hiddenCount > 0) {
     lines.push(
       language === "en-US"

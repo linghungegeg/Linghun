@@ -504,7 +504,8 @@ describe("tool-output-presenter", () => {
         "zh-CN",
       );
 
-      expect(layered.preview).toContain("- 范围:\n  1. src/alpha.ts:10-20");
+      expect(layered.preview).toContain("1. src/alpha.ts:10-20");
+      expect(layered.preview).not.toContain("范围:");
       expect(layered.preview).toContain("\n  2. src/beta.ts:30-40");
       expect(layered.preview).toContain("\n  3. src/gamma.ts:50-60");
       expect(layered.preview).toContain("另有 1 项在详情中");
@@ -526,7 +527,7 @@ describe("tool-output-presenter", () => {
         "en-US",
       );
 
-      expect(layered.preview).toContain("- Ranges:\n  1. src/alpha.ts:10-20");
+      expect(layered.preview).toContain("1. src/alpha.ts:10-20");
       expect(layered.truncated).toBe(true);
       expect(layered.details).toBe("snippet output");
     });
@@ -548,9 +549,9 @@ describe("tool-output-presenter", () => {
 
       expect(grep.text.match(/找到 \*\*3\*\* 处匹配。/gu)).toHaveLength(1);
       expect(grep.text).not.toContain("3 条结果");
-      expect(grep.layered.preview).toContain("- 结果:\n  1. src/a.ts:1: alpha");
+      expect(grep.layered.preview).toContain("1. src/a.ts:1: alpha");
       expect(grep.layered.preview).toContain("\n  2. src/b.ts:2: beta");
-      expect(glob.preview).toContain("- 路径:\n  1. src/a.ts");
+      expect(glob.preview).toContain("1. src/a.ts");
       expect(glob.preview).toContain("\n  2. src/b.ts");
       expect(glob.preview).not.toContain("src/a.ts; src/b.ts");
     });
@@ -583,9 +584,9 @@ describe("tool-output-presenter", () => {
         "zh-CN",
       );
 
-      expect(sourcePack.preview).toContain("- 结果:\n  1. src/a.ts:4-8\n  2. src/b.ts:12-16");
+      expect(sourcePack.preview).toContain("1. src/a.ts:4-8\n  2. src/b.ts:12-16");
       expect(sourcePack.details).toBe("source pack output");
-      expect(edit.preview).toContain("- 路径:\n  1. src/a.ts\n  2. src/b.ts");
+      expect(edit.preview).toContain("1. src/a.ts\n  2. src/b.ts");
       expect(edit.preview).not.toContain("src/a.ts; src/b.ts");
     });
 

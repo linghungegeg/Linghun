@@ -24,6 +24,7 @@ import {
 } from "./shell/models/transcript-source.js";
 import { isDiffFenceLanguage } from "./shell/diff-renderer.js";
 import { renderPlainMarkdownLines } from "./shell/plain-renderer.js";
+import type { ShellTheme } from "./shell/theme.js";
 import {
   canInsertTerminalHistoryText,
   insertTerminalHistoryText,
@@ -88,6 +89,7 @@ export type TerminalFirstAssistantSinkOptions = {
   // height so history writes land at the right boundary even at the instant a
   // user message is committed. Preferred over viewportGeometry when present.
   frameTopRow?: number | (() => number | undefined);
+  theme?: ShellTheme | (() => ShellTheme | undefined);
 };
 
 export type AssistantStreamOptions = {
@@ -238,11 +240,7 @@ export class ShellBlockOutput extends Writable {
     const cleanSummary = this.visibleTextSanitizer.push(summary ?? "").replace(/\r/g, "").trim();
     const title = this.context.language === "en-US" ? "Running" : "正在处理";
     const toolLabel = cleanSummary || (this.context.language === "en-US" ? "Working" : "处理中");
-    const body = cleanSummary
-      ? this.context.language === "en-US"
-        ? `Running ${cleanSummary}`
-        : `正在处理 ${cleanSummary}`
-      : title;
+    const body = cleanSummary || title;
     const base = createOutputBlock(body, this.context.language, toolBlockId(toolName, toolUseId));
     const block: ProductBlockViewModel = {
       ...base,
@@ -1172,12 +1170,13 @@ function renderTerminalFirstAssistantText(
   state?: TerminalFirstMarkdownState,
 ): string {
   const noColor = resolveOption(options.noColor, false);
+  const theme = resolveOptionalOption(options.theme);
   const columns = resolveTerminalFirstColumns(options);
   const wrapWidth = Math.max(8, Math.floor(columns));
   const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const lines = state
-    ? renderTerminalFirstMarkdownDeltaLines(normalized, noColor, wrapWidth, state)
-    : renderPlainMarkdownLines(normalized, noColor, { wrapWidth });
+    ? renderTerminalFirstMarkdownDeltaLines(normalized, noColor, wrapWidth, state, theme)
+    : renderPlainMarkdownLines(normalized, noColor, { wrapWidth, theme });
   return withTerminalFirstRows(lines);
 }
 
@@ -1188,6 +1187,7 @@ function renderTerminalFirstStableBlock(
   const text = terminalFirstStableBlockText(block);
   if (!text) return undefined;
   const noColor = resolveOption(options.noColor, false);
+  const theme = resolveOptionalOption(options.theme);
   const columns = resolveTerminalFirstColumns(options);
   const wrapWidth = Math.max(8, Math.floor(columns));
   const messageKind = block.messageKind;
@@ -1197,7 +1197,7 @@ function renderTerminalFirstStableBlock(
   if (messageKind === "assistant_text") {
     if (hasTerminalFirstCodeFence(text)) {
       const state = createTerminalFirstMarkdownState();
-      return withTerminalFirstRows(renderTerminalFirstMarkdownDeltaLines(text, noColor, wrapWidth, state));
+      return withTerminalFirstRows(renderTerminalFirstMarkdownDeltaLines(text, noColor, wrapWidth, state, theme));
     }
     return renderTerminalFirstAssistantText(text, options);
   }
@@ -1209,7 +1209,7 @@ function renderTerminalFirstStableBlock(
       .replace(/\n/g, "\r\n") + "\r\n\r\n";
   }
   if (messageKind === "diagnostic") {
-    return renderPlainMarkdownLines(text, noColor, { diagnostic: true, wrapWidth })
+    return renderPlainMarkdownLines(text, noColor, { diagnostic: true, wrapWidth, theme })
       .join("\n")
       .replace(/\n/g, "\r\n") + "\r\n\r\n";
   }
@@ -1274,6 +1274,7 @@ function renderTerminalFirstMarkdownDeltaLines(
   noColor: boolean,
   wrapWidth: number,
   state: TerminalFirstMarkdownState,
+  theme?: ShellTheme,
 ): string[] {
   const lines = text.split("\n");
   const out: string[] = [];
@@ -1314,14 +1315,9 @@ function renderTerminalFirstMarkdownDeltaLines(
     }
     const wrappedLines = wrapText(raw.length === 0 ? " " : raw, bodyWidth);
     wrappedLines.forEach((wrapped, wrappedIndex) => {
-      const wrappedBody =
-        isDiff && wrapped.startsWith("+") && !wrapped.startsWith("+++")
-          ? greenAnsi(wrapped, noColor)
-          : isDiff && wrapped.startsWith("-") && !wrapped.startsWith("---")
-            ? redAnsi(wrapped, noColor)
-            : dimAnsi(wrapped, noColor);
+      const wrappedBody = formatTerminalFirstDiffBody(wrapped, isDiff, noColor, theme);
       const prefix = wrappedIndex === 0 ? gutter : " ".repeat(gutter.length);
-      out.push(`${dimAnsi(prefix, noColor)}${wrappedBody}`);
+      out.push(`${formatTerminalFirstDiffGutter(prefix, wrapped, isDiff, noColor, theme)}${wrappedBody}`);
     });
     state.codeLineNumber += 1;
   }
@@ -1377,17 +1373,88 @@ function cyanAnsi(text: string, noColor: boolean): string {
   return `\x1B[36m${text}\x1B[0m`;
 }
 
-function redAnsi(text: string, noColor: boolean): string {
-  if (noColor) return text;
-  return `\x1B[31m${text}\x1B[0m`;
+function formatTerminalFirstDiffGutter(
+  text: string,
+  raw: string,
+  isDiff: boolean,
+  noColor: boolean,
+  theme?: ShellTheme,
+): string {
+  const codes = terminalFirstDiffLineCodes(raw, isDiff, theme, true);
+  return codes.length > 0 ? ansiStyle(codes.join(";"), text, noColor) : dimAnsi(text, noColor);
 }
 
-function greenAnsi(text: string, noColor: boolean): string {
-  if (noColor) return text;
-  return `\x1B[32m${text}\x1B[0m`;
+function formatTerminalFirstDiffBody(
+  text: string,
+  isDiff: boolean,
+  noColor: boolean,
+  theme?: ShellTheme,
+): string {
+  const codes = terminalFirstDiffLineCodes(text, isDiff, theme, false);
+  return codes.length > 0 ? ansiStyle(codes.join(";"), text, noColor) : dimAnsi(text, noColor);
 }
 
-function ansiStyle(code: string, text: string): string {
+function terminalFirstDiffLineCodes(
+  raw: string,
+  isDiff: boolean,
+  theme: ShellTheme | undefined,
+  gutter: boolean,
+): string[] {
+  const kind = terminalFirstDiffLineKind(raw, isDiff);
+  if (!kind) return [];
+  const foregroundColor = kind === "add"
+    ? gutter ? theme?.diffAdded : (theme?.diffAddedWord ?? theme?.diffAdded)
+    : gutter ? theme?.diffRemoved : (theme?.diffRemovedWord ?? theme?.diffRemoved);
+  const foreground = ansiColorCode(foregroundColor ?? (kind === "add" ? "green" : "red"), "foreground");
+  const background = ansiColorCode(
+    kind === "add"
+      ? (theme?.diffAddedBackground ?? "#1a3d1a")
+      : (theme?.diffRemovedBackground ?? "#3d1a1a"),
+    "background",
+  );
+  return [background, foreground].filter((code): code is string => Boolean(code));
+}
+
+function terminalFirstDiffLineKind(raw: string, isDiff: boolean): "add" | "remove" | undefined {
+  if (!isDiff) return undefined;
+  if (raw.startsWith("+") && !raw.startsWith("+++")) return "add";
+  if (raw.startsWith("-") && !raw.startsWith("---")) return "remove";
+  return undefined;
+}
+
+function ansiColorCode(
+  color: string,
+  layer: "foreground" | "background" = "foreground",
+): string | undefined {
+  const normalized = color.trim();
+  const named: Record<string, string> = {
+    black: layer === "foreground" ? "30" : "40",
+    red: layer === "foreground" ? "31" : "41",
+    green: layer === "foreground" ? "32" : "42",
+    yellow: layer === "foreground" ? "33" : "43",
+    blue: layer === "foreground" ? "34" : "44",
+    magenta: layer === "foreground" ? "35" : "45",
+    cyan: layer === "foreground" ? "36" : "46",
+    white: layer === "foreground" ? "37" : "47",
+    redBright: layer === "foreground" ? "91" : "101",
+    greenBright: layer === "foreground" ? "92" : "102",
+    yellowBright: layer === "foreground" ? "93" : "103",
+    blueBright: layer === "foreground" ? "94" : "104",
+    magentaBright: layer === "foreground" ? "95" : "105",
+    cyanBright: layer === "foreground" ? "96" : "106",
+    whiteBright: layer === "foreground" ? "97" : "107",
+  };
+  if (named[normalized]) return named[normalized];
+  const hex = normalized.match(/^#([\da-f]{2})([\da-f]{2})([\da-f]{2})$/iu);
+  if (!hex) return undefined;
+  const red = Number.parseInt(hex[1] ?? "0", 16);
+  const green = Number.parseInt(hex[2] ?? "0", 16);
+  const blue = Number.parseInt(hex[3] ?? "0", 16);
+  return `${layer === "foreground" ? "38" : "48"};2;${red};${green};${blue}`;
+}
+
+function ansiStyle(code: string, text: string, noColor = false): string {
+  if (noColor) return text;
   return `\x1B[${code}m${text}\x1B[0m`;
 }
 
@@ -1465,13 +1532,15 @@ export function discardAssistantBlock(output: Writable, id: string): void {
  * D.13V — Final Answer Gate 本地降级时替换 streaming block 的 fullText 与
  * lastFullOutput 为安全文本（buildDowngradedFinalAnswer 输出）。
  */
-export function replaceAssistantBlockContent(output: Writable, id: string, text: string): void {
+export function replaceAssistantBlockContent(output: Writable, id: string, text: string): boolean {
   const candidate = output as {
     replaceAssistantBlockContent?: (id: string, text: string) => void;
   };
   if (typeof candidate.replaceAssistantBlockContent === "function") {
     candidate.replaceAssistantBlockContent(id, text);
+    return true;
   }
+  return false;
 }
 
 /**

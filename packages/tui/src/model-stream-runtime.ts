@@ -5859,12 +5859,14 @@ export async function sendMessage(
       createdAt: new Date().toISOString(),
     }, requestOwnerIsCurrent);
     if (await stopStaleRequest()) return;
-    if (finalAssistantText) {
-      replaceAssistantBlockContent(output, assistantStreamBlockId, finalAssistantText);
-    }
+    const finalAssistantHandledByStream = finalAssistantText
+      ? replaceAssistantBlockContent(output, assistantStreamBlockId, finalAssistantText)
+      : false;
     endAssistantStream(output);
     clearRequestActivity(context, { kind: "foreground", requestTurnId });
-    writeFinalAssistantText(output, finalAssistantText);
+    if (!finalAssistantHandledByStream) {
+      writeFinalAssistantText(output, finalAssistantText);
+    }
     output.write("\n");
     enqueueAutoLearningAfterSuccessfulTurn(context, text, {
       requestTurnId,
@@ -6828,10 +6830,11 @@ async function streamFinalModelAnswerWithoutTools(
   const assistantStreamBlockId =
     reuseAssistantStreamBlockId ?? `assistant-stream-final-${randomUUID()}`;
   const ownsAssistantStreamBlock = !reuseAssistantStreamBlockId;
-  const maybeExposeFinalNoToolsResult = (text: string): void => {
+  const maybeExposeFinalNoToolsResult = (text: string): boolean => {
     if (ownsAssistantStreamBlock) {
-      replaceAssistantBlockContent(output, assistantStreamBlockId, text);
+      return replaceAssistantBlockContent(output, assistantStreamBlockId, text);
     }
+    return false;
   };
   if (!reuseAssistantStreamBlockId) {
     beginAssistantStream(output, assistantStreamBlockId, { holdStableCommit: true });
@@ -7250,10 +7253,12 @@ async function streamFinalModelAnswerWithoutTools(
   // D.13V — 仅当我们自己 begin 的 stream 才负责 end；复用外层 id 时由外层 end。
   if (!reuseAssistantStreamBlockId) {
     if (requestIsStale()) return "";
-    maybeExposeFinalNoToolsResult(assistantText);
+    const finalAssistantHandledByStream = maybeExposeFinalNoToolsResult(assistantText);
     endAssistantStream(output);
     clearRequestActivity(context, activityOwner);
-    writeFinalAssistantText(output, assistantText);
+    if (!finalAssistantHandledByStream) {
+      writeFinalAssistantText(output, assistantText);
+    }
   }
   return assistantText;
 }
@@ -8753,12 +8758,14 @@ export async function continueModelAfterToolResults(
         createdAt: new Date().toISOString(),
       }, requestOwnerIsCurrent);
       if (await stopStaleContinuation()) return;
-      if (finalAssistantText) {
-        replaceAssistantBlockContent(output, assistantStreamBlockId, finalAssistantText);
-      }
+      const finalAssistantHandledByStream = finalAssistantText
+        ? replaceAssistantBlockContent(output, assistantStreamBlockId, finalAssistantText)
+        : false;
       endAssistantStream(output);
       clearRequestActivity(context, { kind: "foreground", requestTurnId });
-      writeFinalAssistantText(output, finalAssistantText);
+      if (!finalAssistantHandledByStream) {
+        writeFinalAssistantText(output, finalAssistantText);
+      }
       output.write("\n");
       const reportedAt = new Date().toISOString();
       for (const noticeId of agentCompletionNoticeIdsForTurn) {
