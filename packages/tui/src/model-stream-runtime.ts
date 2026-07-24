@@ -329,7 +329,6 @@ function createMainChainFinalGateClaimOptions(
   return {
     visibleClaimInference: MAIN_CHAIN_VISIBLE_CLAIM_INFERENCE,
     requireStructuredClaimContract: shouldRequireStructuredFinalAnswerClaimContract(context),
-    readonlyAuditClaimNoiseFilter: shouldFilterReadonlyAuditClaimNoise(context),
   };
 }
 
@@ -339,7 +338,6 @@ function createMainChainVisibleFinalGateClaimOptions(
   return {
     visibleClaimInference: MAIN_CHAIN_VISIBLE_CLAIM_INFERENCE,
     requireStructuredClaimContract: false,
-    readonlyAuditClaimNoiseFilter: shouldFilterReadonlyAuditClaimNoise(context),
   };
 }
 
@@ -415,14 +413,6 @@ function shouldRequireStructuredFinalAnswerClaimContract(context: TuiContext): b
     policy.executionPlan?.requireVerification ||
       policy.permissionSignal?.expectedMutating ||
       policy.permissionPlan?.expectedMutating,
-  );
-}
-
-function shouldFilterReadonlyAuditClaimNoise(context: TuiContext): boolean {
-  const constraints = currentRequestUserActionConstraints(context);
-  return Boolean(
-    (constraints && hasReadOnlyUserConstraint(constraints)) ||
-      readonlyEvidenceCarryoverActive(context),
   );
 }
 

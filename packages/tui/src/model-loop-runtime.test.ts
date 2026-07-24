@@ -1068,20 +1068,40 @@ describe("model-loop-runtime", () => {
       }
     });
 
-    it("filters generic readonly audit structured claim noise only in readonly audit mode", () => {
-      const text = withClaims("只读审计完成：已检查 workflow/agent 相关源码。", [
+    it("gates the same structured claims regardless of readonly audit wording", () => {
+      const claims: FinalAnswerClaimMatch[] = [
         { kind: "completion_claim", phrase: "completion_claim" },
         { kind: "code_fact", phrase: "code_fact" },
         { kind: "workflow_status_claim", phrase: "workflow_status_claim" },
         { kind: "agent_status_claim", phrase: "agent_status_claim" },
-      ]);
-      const verdict = evaluateFinalAnswerClaims(text, [], new Date(), {
-        visibleClaimInference: "result_only",
-        readonlyAuditClaimNoiseFilter: true,
-      });
+      ];
+      const options = { visibleClaimInference: "none" as const };
+      const auditVerdict = evaluateFinalAnswerClaims(
+        withClaims("只读审计完成：已检查 workflow/agent 相关源码。", claims),
+        [],
+        new Date(),
+        options,
+      );
+      const neutralVerdict = evaluateFinalAnswerClaims(
+        withClaims("范围检查完成：已检查 workflow/agent 相关源码。", claims),
+        [],
+        new Date(),
+        options,
+      );
 
-      expect(verdict.status).toBe("passed");
-      expect(verdict.matchedClaims).toEqual([]);
+      expect(auditVerdict).toMatchObject({
+        status: "needs_disclaimer",
+        unsupportedKinds: [
+          "completion_claim",
+          "code_fact",
+          "workflow_status_claim",
+          "agent_status_claim",
+        ],
+      });
+      expect(neutralVerdict).toMatchObject({
+        status: auditVerdict.status,
+        unsupportedKinds: auditVerdict.unsupportedKinds,
+      });
     });
 
     it("keeps broad completion and verification claims blocked outside the readonly audit clause", () => {
@@ -1098,10 +1118,9 @@ describe("model-loop-runtime", () => {
       expect(testClaim.unsupportedKinds).toContain("test_claim");
     });
 
-    it("keeps real pass, mutation, workflow, and code facts blocked under readonly audit filtering", () => {
+    it("keeps real pass, mutation, workflow, and code facts evidence-gated in readonly audit reports", () => {
       const options = {
         visibleClaimInference: "result_only" as const,
-        readonlyAuditClaimNoiseFilter: true,
       };
       const workflow = evaluateFinalAnswerClaims(
         withClaims("只读审计完成；Workflow 已完成。", [
@@ -1136,23 +1155,31 @@ describe("model-loop-runtime", () => {
       expect(codeFact.unsupportedKinds).toContain("code_fact");
     });
 
-    it("filters readonly audit discussions of pass-claim wording", () => {
-      const options = {
-        visibleClaimInference: "full" as const,
-        readonlyAuditClaimNoiseFilter: true,
-      };
-      const verdict = evaluateFinalAnswerClaims(
-        "只读审计发现 `测试通过` 和 `verified` 正则兜底会误判；本轮没有运行测试。",
+    it("does not downgrade test claims because the surrounding text mentions readonly audit", () => {
+      const auditVerdict = evaluateFinalAnswerClaims(
+        "只读审计结论：测试通过。",
         [],
         new Date(),
-        options,
+        { visibleClaimInference: "full" },
+      );
+      const neutralVerdict = evaluateFinalAnswerClaims(
+        "测试通过。",
+        [],
+        new Date(),
+        { visibleClaimInference: "full" },
       );
 
-      expect(verdict.status).toBe("passed");
-      expect(verdict.matchedClaims).toEqual([]);
+      expect(auditVerdict).toMatchObject({
+        status: "needs_disclaimer",
+        unsupportedKinds: ["test_claim", "verification_claim"],
+      });
+      expect(neutralVerdict).toMatchObject({
+        status: auditVerdict.status,
+        unsupportedKinds: auditVerdict.unsupportedKinds,
+      });
     });
 
-    it("filters readonly audit negative verification summaries as claim noise", () => {
+    it("does not erase structured claims when readonly audit text says verification was not run", () => {
       const verdict = evaluateFinalAnswerClaims(
         withClaims("只读审计结论：已有验证失败 artifact；本轮没有运行测试，缺测试证据。", [
           { kind: "verification_claim", phrase: "verification_claim" },
@@ -1162,12 +1189,13 @@ describe("model-loop-runtime", () => {
         new Date(),
         {
           visibleClaimInference: "result_only",
-          readonlyAuditClaimNoiseFilter: true,
         },
       );
 
-      expect(verdict.status).toBe("passed");
-      expect(verdict.matchedClaims).toEqual([]);
+      expect(verdict).toMatchObject({
+        status: "needs_disclaimer",
+        unsupportedKinds: ["verification_claim", "test_claim"],
+      });
     });
 
     it("blocks completion/PASS without test/build evidence even if Read evidence exists", () => {
@@ -1587,18 +1615,23 @@ describe("model-loop-runtime", () => {
       expect(hasStructuredFinalAnswerClaimContract("回答")).toBe(false);
     });
 
-    it("keeps common executed actions visible while excluding readonly inspection", () => {
+    it("keeps common executed actions visible while the default contract path ignores readonly inspection descriptions", () => {
       expect(inferVisibleFinalAnswerClaims("已执行 npm test。").map((item) => item.kind)).toContain(
         "action_executed",
       );
       expect(inferVisibleFinalAnswerClaims("已启动 nginx。 ").map((item) => item.kind)).toContain(
         "action_executed",
       );
-      expect(inferVisibleFinalAnswerClaims("已执行 pre_context。").map((item) => item.kind)).not.toContain(
-        "action_executed",
-      );
-      expect(inferVisibleFinalAnswerClaims("pre_context 已执行成功。")).toHaveLength(0);
-      expect(inferVisibleFinalAnswerClaims("源码交叉验证已完成。")).toHaveLength(0);
+      for (const text of [
+        "已执行 pre_context。",
+        "pre_context 已执行成功。",
+        "源码交叉验证已完成。",
+      ]) {
+        expect(evaluateFinalAnswerClaims(text, [])).toMatchObject({
+          status: "passed",
+          matchedClaims: [],
+        });
+      }
       expect(
         inferVisibleFinalAnswerClaims("Read 检查后已执行 npm install。").map((item) => item.kind),
       ).toContain("action_executed");

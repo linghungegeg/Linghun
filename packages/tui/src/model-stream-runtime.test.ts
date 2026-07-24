@@ -5387,10 +5387,48 @@ describe("final answer gate aggregation", () => {
       context as never,
       "只读审计覆盖到 final gate、verification evidence 和源码证据链路；本轮没有运行测试。",
       true,
-      { visibleClaimInference: "result_only", readonlyAuditClaimNoiseFilter: true },
+      { visibleClaimInference: "result_only" },
     );
 
     expect(result.status).toBe("passed");
+  });
+
+  it("gates the same structured claim contract regardless of readonly audit wording", () => {
+    const context = {
+      ...makeGateContext(),
+      currentRequestTurnId: "readonly-audit-claim-turn",
+      currentUserActionConstraintsRequestTurnId: "readonly-audit-claim-turn",
+      currentUserActionConstraints: {
+        readonlyOnly: true,
+        forbidWrite: true,
+        forbidTests: true,
+        forbidBuild: true,
+        forbidLint: false,
+        forbidTypecheck: true,
+        forbidSmoke: false,
+        forbidShell: false,
+        forbidAllTools: false,
+      },
+    };
+    const claims = [{ kind: "verification_claim", phrase: "verification_claim" }];
+    const auditVerdict = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      withClaims("只读审计结论：验证已完成。", claims),
+      false,
+      { visibleClaimInference: "none" },
+    );
+    const neutralVerdict = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      withClaims("范围检查结论：验证已完成。", claims),
+      false,
+      { visibleClaimInference: "none" },
+    );
+
+    expect(auditVerdict).toMatchObject({
+      status: "needs_disclaimer",
+      unsupportedKinds: ["verification_claim"],
+    });
+    expect(neutralVerdict).toEqual(auditVerdict);
   });
 
   it("keeps missing contract repair open while owner-scoped execution evidence advances", () => {

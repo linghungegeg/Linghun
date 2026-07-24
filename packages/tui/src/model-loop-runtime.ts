@@ -991,7 +991,6 @@ export type FinalAnswerVisibleClaimInferenceMode = "full" | "result_only" | "non
 export type FinalAnswerClaimEvaluationOptions = {
   visibleClaimInference?: FinalAnswerVisibleClaimInferenceMode;
   requireStructuredClaimContract?: boolean;
-  readonlyAuditClaimNoiseFilter?: boolean;
 };
 
 export const STRUCTURED_FINAL_ANSWER_CLAIM_PREFIX = "LinghunFinalAnswerClaims:";
@@ -1626,25 +1625,15 @@ export function evaluateFinalAnswerClaims(
   options: FinalAnswerClaimEvaluationOptions = {},
 ): FinalAnswerClaimVerdict {
   const visible = stripStructuredFinalAnswerClaims(text);
-  const inferred = filterReadonlyAuditClaimNoise(
-    filterVisibleFinalAnswerClaims(
-      inferVisibleFinalAnswerClaims(text),
-      options.visibleClaimInference ?? "none",
-    ),
-    visible,
-    options,
+  const inferred = filterVisibleFinalAnswerClaims(
+    inferVisibleFinalAnswerClaims(text),
+    options.visibleClaimInference ?? "none",
   );
   const visibleTargetedCodeFacts = inferred.filter(
     (claim) => claim.kind === "code_fact" && extractClaimTargets(claim).length > 0,
   );
-  const structured = filterReadonlyAuditClaimNoise(
-    extractStructuredFinalAnswerClaims(text).filter(
-      (claim) => claim.kind !== "architecture_boundary" && claim.kind !== "completeness",
-    ).filter(
-      (claim) => !isReadonlyAuditCompletionClaim(claim.kind, visible, claim.phrase),
-    ),
-    visible,
-    options,
+  const structured = extractStructuredFinalAnswerClaims(text).filter(
+    (claim) => claim.kind !== "architecture_boundary" && claim.kind !== "completeness",
   ).map((claim) => enrichStructuredCodeFactClaimTargets(claim, visible)).filter(
     (claim) =>
       claim.kind !== "code_fact" ||
@@ -1661,15 +1650,6 @@ export function evaluateFinalAnswerClaims(
     return true;
   });
   return evaluateStructuredFinalAnswerClaims(claims, evidence, now, text);
-}
-
-function filterReadonlyAuditClaimNoise(
-  claims: FinalAnswerClaimMatch[],
-  visibleText: string,
-  options: FinalAnswerClaimEvaluationOptions,
-): FinalAnswerClaimMatch[] {
-  if (options.readonlyAuditClaimNoiseFilter !== true) return claims;
-  return claims.filter((claim) => !isReadonlyAuditClaimNoise(claim, visibleText));
 }
 
 function enrichStructuredCodeFactClaimTargets(
@@ -1727,21 +1707,6 @@ export function inferVisibleFinalAnswerClaims(text: string): FinalAnswerClaimMat
       );
       for (const match of matches) {
         if (
-          isReadonlyInspectionOnlyClaim(
-            kind,
-            claimText,
-            match[0] ?? "",
-            match.index ?? 0,
-          ) ||
-          isReadonlyAuditCompletionClaim(
-            kind,
-            claimText,
-            match[0] ?? "",
-          )
-        ) {
-          continue;
-        }
-        if (
           match[0] &&
           (kind === "code_fact" && isNegativeCodeFactPhrase(match[0])
             ? true
@@ -1782,141 +1747,6 @@ export function inferVisibleFinalAnswerClaims(text: string): FinalAnswerClaimMat
   );
   add("completion_claim", /(?:已完成|已经完成|已修复|已经修复|(?:检查|审计|复核|核对)(?:完(?:成)?|结束)|completed|fixed|done)/iu);
   return claims;
-}
-
-function isReadonlyInspectionOnlyClaim(
-  kind: FinalAnswerClaimKind,
-  claimText: string,
-  matchText: string,
-  matchIndex: number,
-): boolean {
-  if (kind !== "action_executed" && kind !== "completion_claim") return false;
-  const readonlyPattern =
-    /(?:pre_context|pre_impact|pre_plan|Read(?:Snippets)?|SourcePack|Grep|Glob|源码交叉验证)/iu;
-  if (!readonlyPattern.test(claimText)) return false;
-  if (readonlyPattern.test(matchText)) return true;
-  const prefix = claimText.slice(0, matchIndex);
-  if (!readonlyPattern.test(prefix)) return false;
-  return /^(?:已|已经|successfully\s+)?(?:执行|ran|executed)(?:成功|了|过)?\s*$|^(?:已完成|已经完成|completed|done)\s*$/iu.test(
-    matchText.trim(),
-  );
-}
-
-function isReadonlyAuditCompletionClaim(
-  kind: FinalAnswerClaimKind,
-  claimText: string,
-  matchText: string,
-): boolean {
-  if (kind !== "completion_claim") return false;
-  if (!/(?:完成|完|completed|done)/iu.test(matchText)) return false;
-  const normalizedMatch = matchText.trim().toLowerCase();
-  const matchingClauses = splitClaimClauses(claimText).filter((clause) =>
-    normalizedMatch ? clause.toLowerCase().includes(normalizedMatch) : false
-  );
-  const claimClauses = matchingClauses.length > 0 ? matchingClauses : [claimText];
-  if (claimClauses.some((clause) =>
-    /(?:修复|修改|改动|实现|写入|创建|删除|提交|发布|测试通过|验证通过|构建通过|fixed|repaired|modified|implemented|written|created|deleted|committed|published|tests?\s+passed|verified|build\s+passed)/iu.test(
-      clause,
-    )
-  )) return false;
-  return /(?:只读|审计|检查|核对|覆盖|源码|代码片段|读取|读到|audit|review|inspect(?:ion)?|check(?:ed)?|coverage|source\s+(?:read|inspection|review))/iu.test(
-    claimClauses.join(" "),
-  );
-}
-
-function isReadonlyAuditClaimNoise(
-  claim: FinalAnswerClaimMatch,
-  visibleText: string,
-): boolean {
-  if (isReadonlyAuditCompletionClaim(claim.kind, visibleText, claim.phrase)) {
-    return true;
-  }
-  if (
-    claim.kind !== "completion_claim" &&
-    claim.kind !== "code_fact" &&
-    claim.kind !== "test_claim" &&
-    claim.kind !== "verification_claim" &&
-    claim.kind !== "agent_status_claim" &&
-    claim.kind !== "workflow_status_claim"
-  ) {
-    return false;
-  }
-  if (claim.kind === "code_fact" && !isGenericStructuredClaim(claim)) {
-    return false;
-  }
-  const clauses = splitClaimClauses(visibleText);
-  if (clauses.length === 0) return false;
-  if (claim.kind === "completion_claim") {
-    if (!isGenericStructuredClaim(claim)) return false;
-    const completionClauses = clauses.filter((clause) =>
-      /(?:完成|完|completed|done)/iu.test(clause)
-    );
-    return completionClauses.length > 0 &&
-      completionClauses.every(isReadonlyAuditMetaClause);
-  }
-  if (claim.kind === "code_fact") {
-    if (clauses.some(hasConcreteCodeFactStatement)) return false;
-    return clauses.some(hasReadonlyAuditContext) &&
-      clauses.every((clause) =>
-        !hasRealEngineeringResultClaim(clause) &&
-        !hasRealAgentOrWorkflowTerminalClaim(clause)
-      );
-  }
-  const matchingClauses = isGenericStructuredClaim(claim)
-    ? clauses
-    : clauses.filter((clause) => clause.toLowerCase().includes(claim.phrase.toLowerCase()));
-  if (matchingClauses.length === 0) return false;
-  if (matchingClauses.some(hasRealAgentOrWorkflowTerminalClaim)) return false;
-  return matchingClauses.some(hasReadonlyAuditContext) &&
-    matchingClauses.every((clause) => !hasRealEngineeringResultClaim(clause));
-}
-
-function isGenericStructuredClaim(claim: FinalAnswerClaimMatch): boolean {
-  return claim.phrase.trim().toLowerCase() === claim.kind;
-}
-
-function isReadonlyAuditMetaClause(clause: string): boolean {
-  return hasReadonlyAuditContext(clause) &&
-    !hasRealEngineeringResultClaim(clause) &&
-    !hasRealAgentOrWorkflowTerminalClaim(clause);
-}
-
-function hasReadonlyAuditContext(text: string): boolean {
-  return /(?:只读|审计|检查|核对|覆盖|源码|代码片段|读取|读到|未运行(?:测试|验证)?|没有运行(?:测试|验证)?|缺(?:少)?(?:测试|验证)?证据|未能证实|验证失败|测试失败|audit|review|inspect(?:ion)?|check(?:ed)?|coverage|source\s+(?:read|inspection|review)|did\s+not\s+run\s+(?:tests?|verification)|no\s+(?:test|verification)\s+evidence|not\s+established|verification\s+failed|tests?\s+failed)/iu.test(
-    text,
-  );
-}
-
-function hasRealEngineeringResultClaim(text: string): boolean {
-  return splitClaimClauses(text).some(
-    (clause) => {
-      const negated = /(?:未|没有|无|不|不要|别|禁止|未运行|没有运行|不运行|did\s+not|didn't|not\s+|no\s+|without\s+(?:running|modifying|editing|writing))/iu.test(
-        clause,
-      );
-      return !negated &&
-        /(?:修复|修改|改动|实现|写入|创建|删除|提交|发布|测试通过|验证通过|构建通过|已通过|fixed|repaired|modified|implemented|written|created|deleted|committed|published|tests?\s+passed|verified|build\s+passed)/iu.test(
-          clause,
-        ) &&
-        !(
-        hasReadonlyAuditContext(clause) &&
-        /(?:示例|例子|正则|关键词|claim|声明|误判|误触|扫描|讨论|提到|提及|覆盖|链路|未运行|没有运行|不运行|example|regex|keyword|false positive|fallback|did not run|no tests? (?:ran|run))/iu.test(
-          clause,
-        )
-      );
-    },
-  );
-}
-
-function hasRealAgentOrWorkflowTerminalClaim(text: string): boolean {
-  return /(?:agent|子\s*agent|智能体|workflow|工作流).{0,60}(?:完成|completed|通过|passed|成功)/iu.test(
-    text,
-  );
-}
-
-function hasConcreteCodeFactStatement(text: string): boolean {
-  return /(?:负责|调用|返回|实现|引用|使用|未发现|未找到|找不到|不存在|无(?:任何)?|calls?|callers?|references?|matches?|usages?|uses?|returns?|implements?|unused|not\s+(?:used|using|referenced|called|invoked)|(?:(?:do|does)\s+not|don't|doesn't)\s+(?:call|use|reference|invoke))/iu.test(
-    text,
-  );
 }
 
 function stripClaimExplanationExamples(clause: string): string {
