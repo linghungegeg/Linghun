@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { ToolName, ToolOutput } from "@linghun/tools";
 import {
   type PermissionRule,
   type PermissionState,
@@ -76,6 +77,41 @@ describe("permission-continuation-runtime", () => {
       expect(result).toContain("Edit");
       expect(result).toContain("src/index.ts");
       expect(result).toContain("medium");
+    });
+  });
+
+  describe("formatModelToolOutput", () => {
+    const reportWriteGuard: ReportWriteGuard = {
+      requestedPath: "report.md",
+      pathExplicit: true,
+      completed: false,
+      reminderSent: false,
+      evidenceReminderSent: false,
+      finalReferenceReminderSent: false,
+      nonWriteToolRounds: 0,
+      evidenceRead: false,
+    };
+
+    const completionCases: Array<[
+      ToolName,
+      ToolOutput,
+      ReportWriteGuard | undefined,
+      string,
+    ]> = [
+      ["Write", { text: "done", changedFiles: ["report.md"] }, reportWriteGuard, "Write · 报告已保存：report.md"],
+      ["Write", { text: "done" }, reportWriteGuard, "Write · 报告文件写入已完成。"],
+      ["Read", { text: "done" }, reportWriteGuard, "Read · 已完成，继续整理报告分析。"],
+      ["ReadSnippets", { text: "done" }, reportWriteGuard, "ReadSnippets · 已完成，继续整理报告分析。"],
+      ["SourcePack", { text: "done" }, reportWriteGuard, "SourcePack · 已完成，继续整理报告分析。"],
+      ["Glob", { text: "done" }, reportWriteGuard, "Glob · 已完成，继续整理报告分析。"],
+      ["Grep", { text: "done" }, reportWriteGuard, "Grep · 已完成，继续整理报告分析。"],
+      ["WebSearch", { text: "done" }, undefined, "WebSearch · 已完成"],
+      ["WebFetch", { text: "done" }, undefined, "WebFetch · 已完成"],
+    ];
+
+    it.each(completionCases)("%s 的直接完成行保留工具名前缀", (toolName, output, guard, expected) => {
+      const text = formatModelToolOutput(toolName, output, "zh-CN", undefined, guard);
+      expect(text.split("\n")[0]).toBe(expected);
     });
   });
 

@@ -127,7 +127,7 @@ describe("model-tool-runtime Web terminal output", () => {
 
       expect(result.ok).toBe(false);
       expect(output.errors).toHaveLength(1);
-      expect(output.errors[0]).toContain("WebSearch 已超时");
+      expect(output.errors[0]?.split("\n")[0]).toBe("WebSearch · 已超时");
       expect(context.lastToolFailure?.summary).toContain("WebSearch timed out");
       expect(context.lastToolFailure?.summary).not.toContain("exited non-zero");
     } finally {
@@ -164,7 +164,7 @@ describe("model-tool-runtime Web terminal output", () => {
       expect(result.ok).toBe(true);
       expect(observedSignal).toBe(controller.signal);
       expect(output.errors).toEqual([]);
-      expect(output.text).toContain("执行 1 次搜索");
+      expect(output.text).toContain("WebSearch · 执行 1 次搜索");
     } finally {
       builtInTools.WebSearch.call = originalCall;
     }

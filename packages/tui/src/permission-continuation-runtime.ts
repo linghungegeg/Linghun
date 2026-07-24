@@ -636,10 +636,14 @@ export function formatModelToolOutput(
   }
   const changedFile = output.changedFiles?.[0];
   if (toolName === "Write" && changedFile) {
-    return language === "en-US" ? `Report saved: ${changedFile}` : `报告已保存：${changedFile}`;
+    return language === "en-US"
+      ? `${toolName} · Report saved: ${changedFile}`
+      : `${toolName} · 报告已保存：${changedFile}`;
   }
   if (toolName === "Write") {
-    return language === "en-US" ? "Report file write completed." : "报告文件写入已完成。";
+    return language === "en-US"
+      ? `${toolName} · Report file write completed.`
+      : `${toolName} · 报告文件写入已完成。`;
   }
   if (
     toolName === "Read" ||
@@ -649,8 +653,8 @@ export function formatModelToolOutput(
     toolName === "Grep"
   ) {
     return language === "en-US"
-      ? `${toolName} completed; continuing the report analysis.`
-      : `${toolName} 已完成，继续整理报告分析。`;
+      ? `${toolName} · completed; continuing the report analysis.`
+      : `${toolName} · 已完成，继续整理报告分析。`;
   }
   return formatToolOutput(toolName, output, language, evidenceId);
 }

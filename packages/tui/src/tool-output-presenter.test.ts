@@ -260,6 +260,29 @@ describe("tool-output-presenter", () => {
       expect(structured.block.collapsible).toBe(false);
     });
 
+    it.each([
+      ["Read", { path: "src/example.ts", totalLines: 3 }],
+      ["ReadSnippets", { count: 1 }],
+      ["SourcePack", { count: 1 }],
+      ["Write", { changedFiles: ["src/example.ts"], addedLines: 1, removedLines: 0 }],
+      ["Edit", { changedFiles: ["src/example.ts"], addedLines: 1, removedLines: 1 }],
+      ["MultiEdit", { changedFiles: ["src/example.ts"], addedLines: 2, removedLines: 1 }],
+      ["Grep", { count: 1 }],
+      ["Glob", { count: 1 }],
+      ["Bash", { exitCode: 0 }],
+      ["Todo", {}],
+      ["Diff", { changedFiles: ["src/example.ts"], addedLines: 1, removedLines: 1 }],
+      ["WebSearch", {}],
+      ["WebFetch", {}],
+    ] as const)("%s 完成行统一显示工具名且不重复", (name, data) => {
+      const structured = createStructuredToolOutput(name, { text: "done", data }, "zh-CN");
+      const title = structured.block.title ?? "";
+      const occurrences = title.split(name).length - 1;
+
+      expect(title).toMatch(new RegExp(`^${name} · `, "u"));
+      expect(occurrences).toBe(1);
+    });
+
     it("失败结构化 DisplayBlock 包含错误状态和退出码文本", () => {
       const structured = createStructuredToolOutput(
         "Bash",
@@ -274,9 +297,9 @@ describe("tool-output-presenter", () => {
     });
 
     it.each([
-      ["WebSearch", { aborted: true, timedOut: false }, "WebSearch 已取消"],
-      ["WebFetch", { aborted: false, timedOut: true }, "WebFetch 已超时"],
-      ["WebSearch", { aborted: false, timedOut: false }, "WebSearch 失败"],
+      ["WebSearch", { aborted: true, timedOut: false }, "WebSearch · 已取消"],
+      ["WebFetch", { aborted: false, timedOut: true }, "WebFetch · 已超时"],
+      ["WebSearch", { aborted: false, timedOut: false }, "WebSearch · 失败"],
     ] as const)("%s 按结构化失败原因生成终态 lead", (name, failure, lead) => {
       const structured = createStructuredToolOutput(
         name,
@@ -298,12 +321,12 @@ describe("tool-output-presenter", () => {
       );
 
       expect(structured.block.kind).toBe("tool_result_success");
-      expect(structured.block.title).toBe("1 search");
+      expect(structured.block.title).toBe("WebSearch · 1 search");
     });
 
     it("Bash 成功时 formatToolOutput 使用自然终态 lead", () => {
       const text = formatToolOutput("Bash", { text: "done", data: { exitCode: 0 } }, "zh-CN");
-      expect(text).toContain("命令已完成");
+      expect(text).toContain("Bash · 命令已完成");
       expect(text).not.toContain("Bash(");
     });
 
@@ -685,8 +708,8 @@ describe("tool-output-presenter", () => {
         "zh-CN",
       );
 
-      expect(grep.text).toBe("找到 **0** 处匹配。");
-      expect(glob.text).toBe("找到 **0** 个文件。");
+      expect(grep.text).toBe("Grep · 找到 **0** 处匹配。");
+      expect(glob.text).toBe("Glob · 找到 **0** 个文件。");
       expect(grep.layered.preview).toBe("");
       expect(glob.layered.preview).toBe("");
       expect(grep.layered.truncated).toBe(false);

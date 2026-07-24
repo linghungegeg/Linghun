@@ -126,7 +126,10 @@ export function createStructuredToolOutput(
   evidenceId?: string,
 ): StructuredToolOutput {
   const layered = createLayeredToolOutput(name, output, language, evidenceId);
-  const lead = formatPrimaryToolLead(name, output, layered, language);
+  const lead = formatStructuredToolResultLead(
+    name,
+    formatPrimaryToolLead(name, output, layered, language),
+  );
   const bodyLines: string[] = [];
   if (layered.preview) {
     bodyLines.push(layered.preview);
@@ -277,6 +280,13 @@ function formatPrimaryToolLead(
   const zhStructured = tryExtractLeadText(output.text);
   if (zhStructured) return `已完成：${zhStructured}`;
   return `已完成：${layered.summary}`;
+}
+
+function formatStructuredToolResultLead(name: ToolName, humanLead: string): string {
+  const normalized = humanLead.trim();
+  const duplicateName = new RegExp(`^${name}(?:\\s*[：:.·-]\\s*|\\s+)(.+)$`, "u");
+  const withoutDuplicateName = normalized.match(duplicateName)?.[1] ?? normalized;
+  return `${name} · ${withoutDuplicateName}`;
 }
 
 function formatWebFailureLead(
