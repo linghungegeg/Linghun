@@ -229,9 +229,14 @@ export type PolicyDecision = {
     categories: string[];
   };
   architectureSignal: {
+    candidate: boolean;
     cardPresent: boolean;
     guardReminder: boolean;
     driftPending: boolean;
+    actualImpact: {
+      status: "none" | "pending" | "confirmed";
+      files: string[];
+    };
   };
   runtimeSignal: {
     runningAgents: number;
@@ -726,9 +731,14 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     },
     failureSignal,
     architectureSignal: {
+      candidate: false,
       cardPresent: Boolean(input.currentArchitectureCard),
       guardReminder: Boolean(input.currentArchitectureCard && (finalExpectedMutating || blockedRuntime)),
       driftPending: Boolean(input.architectureDriftPending),
+      actualImpact: {
+        status: input.currentArchitectureCard ? "pending" : "none",
+        files: [],
+      },
     },
     platformSignal: {
       platform: input.platform ?? "unknown",

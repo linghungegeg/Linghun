@@ -22,6 +22,7 @@ import {
   markAgentCompletionNoticeReported,
 } from "./agent-completion-finalizer.js";
 import {
+  type ArchitectureRoutingSignal,
   createArchitectureCard,
   createArchitectureRuntimeDirective,
   shouldTriggerArchitectureRuntime,
@@ -3701,9 +3702,6 @@ export async function handleNaturalInput(
   // 这些产品能力仍可通过精确 slash command 使用（/trust、/index、/doctor、/status），
   // 普通自然语言不再被中文/英文关键词表转成本地命令意图。
 
-  if (!shouldTriggerArchitectureRuntime(text, context)) {
-    context.currentArchitectureCard = undefined;
-  }
   const modelGuard = checkResourceGuard(context, "model");
   if (modelGuard) {
     writeLine(output, modelGuard);
@@ -4312,22 +4310,6 @@ export async function sendMessage(
     ...context,
     provider: getRuntimeStatusProvider(context),
   });
-  const architectureCard = shouldTriggerArchitectureRuntime(text, context)
-    ? createArchitectureCard(text, context)
-    : undefined;
-  if (architectureCard) {
-    context.currentArchitectureCard = architectureCard;
-    await recordArchitectureRuntimeCard(context, sessionId, architectureCard);
-    writeLine(
-      output,
-      context.language === "en-US"
-        ? "Architecture preflight started: collecting project facts before changing or verifying."
-        : "已进入架构预检：先收集项目事实，再决定是否执行或验证。",
-    );
-  }
-  const architectureDirective = architectureCard
-    ? createArchitectureRuntimeDirective(architectureCard)
-    : undefined;
   void refreshWorkspaceReferenceCache(context, runtimeStatus).catch(async (error) => {
     const reason = error instanceof Error ? error.message : String(error);
     await appendSystemEvent(
@@ -4415,6 +4397,7 @@ export async function sendMessage(
   if (memoryRefresh === "stale" || await stopStaleRequest()) return;
   context.failureLearning.records = failureLearningRecords;
 
+  context.currentArchitectureCard = undefined;
   const _tMsInput0 = Date.now();
   const _msInput = createMetaSchedulerInput(
     context,
@@ -4441,6 +4424,32 @@ export async function sendMessage(
       : {}),
   });
   perfEvents.push(`perf:scheduler_eval_ms=${Date.now() - _tMsEval0}`);
+  const parsedActionConstraints = parseUserActionConstraints(text);
+  const policyDecision = metaSchedulerDecision.policyDecision;
+  const architectureRouting: ArchitectureRoutingSignal = {
+    taskKind: policyDecision.taskKind,
+    expectedMutating: policyDecision.permissionPlan.expectedMutating,
+    riskLevel: policyDecision.riskLevel,
+    requireVerification: policyDecision.executionPlan.requireVerification,
+    readonly: hasReadOnlyUserConstraint(parsedActionConstraints),
+  };
+  const architectureCard = shouldTriggerArchitectureRuntime(text, architectureRouting)
+    ? createArchitectureCard(text, {
+        ...context,
+        evidence: evidenceForCurrentVerificationScope(context),
+      })
+    : undefined;
+  context.currentArchitectureCard = architectureCard;
+  policyDecision.architectureSignal = {
+    ...policyDecision.architectureSignal,
+    candidate: Boolean(architectureCard),
+    cardPresent: Boolean(architectureCard),
+    guardReminder: false,
+    actualImpact: {
+      status: architectureCard ? "pending" : "none",
+      files: [],
+    },
+  };
   context.lastMetaSchedulerDecision = metaSchedulerDecision;
   context.lastMetaSchedulerFailureLearningRequired =
     metaSchedulerDecision.shouldCaptureFailureLearning;
@@ -4449,14 +4458,24 @@ export async function sendMessage(
   for (const event of metaSchedulerDecision.internalEvents) {
     await appendSystemEvent(context, sessionId, event, "info");
   }
-  enqueuePolicyHints(context, metaSchedulerDecision.policyDecision);
-  await appendPolicyDecisionEvent(context, sessionId, metaSchedulerDecision.policyDecision);
-  if (
-    metaSchedulerDecision.policyDecision.userStatePersistence >= 5
-  ) {
+  enqueuePolicyHints(context, policyDecision);
+  await appendPolicyDecisionEvent(context, sessionId, policyDecision);
+  if (policyDecision.userStatePersistence >= 5) {
     context.userStateCooldownUntilMs = Date.now() + 300_000;
     context.userStateDismissedUntilMs = Date.now() + 300_000;
   }
+  if (architectureCard) {
+    await recordArchitectureRuntimeCard(context, sessionId, architectureCard, "candidate");
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? "Architecture preflight candidate started: collecting project facts before changing or verifying."
+        : "已进入架构预检候选：先收集项目事实，再决定是否执行或验证。",
+    );
+  }
+  const architectureDirective = architectureCard
+    ? createArchitectureRuntimeDirective(architectureCard, "candidate")
+    : undefined;
   const gitStatusSummary = await buildGitStatusSummary(context.projectPath);
   const _tDirective0 = Date.now();
   const _msDirective = formatMetaSchedulerDirective(metaSchedulerDecision);
@@ -4514,7 +4533,6 @@ export async function sendMessage(
     });
   }
   if (await stopStaleRequest()) return;
-  const parsedActionConstraints = parseUserActionConstraints(text);
   if (
     !resumedInterruptedTurn ||
     hasUserActionConstraint(parsedActionConstraints) ||

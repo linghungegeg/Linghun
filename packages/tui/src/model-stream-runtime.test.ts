@@ -2142,7 +2142,8 @@ describe("runtime-local auto-learning drain", () => {
 type TestStreamEvent =
   | { type: "assistant_text_delta"; text: string }
   | { type: "usage"; usage: { inputTokens: number; outputTokens: number; totalTokens: number } }
-  | { type: "message_stop"; chunkCount: number; hadUsage: boolean; finishReason?: string };
+  | { type: "message_stop"; chunkCount: number; hadUsage: boolean; finishReason?: string }
+  | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> };
 
 function gatewayByTurn(
   turns: TestStreamEvent[][],
@@ -2285,6 +2286,96 @@ async function makeSendMessageContext() {
   } as unknown as TuiContext;
   return { context, events };
 }
+
+describe("architecture runtime scheduling", () => {
+  it("creates and clears the card from the current scheduler decision", async () => {
+    const { context, events } = await makeSendMessageContext();
+    context.permissionMode = "full-access";
+    context.evidence.push({
+      id: "foreign-architecture-evidence",
+      kind: "file_read",
+      source: "foreign.ts",
+      summary: "foreign evidence must not enter the current architecture card",
+      supportsClaims: [],
+      createdAt: new Date().toISOString(),
+      ownerScope: {
+        ownerSessionId: "foreign-session",
+        requestTurnId: "foreign-turn",
+        cwd: context.projectPath,
+      },
+    });
+    const calls = { count: 0, requests: [] as Array<{ messages?: unknown }> };
+    type PromptMessage = { role?: string; content?: unknown };
+    const promptMessages = (request: { messages?: unknown } | undefined): PromptMessage[] =>
+      Array.isArray(request?.messages) ? request.messages as PromptMessage[] : [];
+    const currentTurnContext = (request: { messages?: unknown } | undefined) =>
+      promptMessages(request).find(
+        (message): message is PromptMessage & { content: string } =>
+          message.role === "user" &&
+          typeof message.content === "string" &&
+          message.content.startsWith("Current-turn internal context"),
+      );
+    const gateway = gatewayByTurn(
+      [
+        [
+          {
+            type: "tool_use",
+            id: "architecture-impact-write",
+            name: "Write",
+            input: { path: "architecture-impact.ts", content: "export const impact = true;\n" },
+          },
+          { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "tool_use" },
+        ],
+        [
+          { type: "assistant_text_delta", text: withClaims("已收到。", []) },
+          { type: "message_stop", chunkCount: 1, hadUsage: false },
+        ],
+        [
+          { type: "assistant_text_delta", text: withClaims("只读分析已收到。", []) },
+          { type: "message_stop", chunkCount: 1, hadUsage: false },
+        ],
+      ],
+      calls,
+    );
+
+    await __testSendMessage("修改并实现跨模块功能", context, gateway, new MemoryOutput());
+
+    expect(context.lastMetaSchedulerDecision?.policyDecision.taskKind).toBe("edit");
+    expect(context.currentArchitectureCard).toBeDefined();
+    expect(context.currentArchitectureCard?.projectFacts.join("\n")).not.toContain(
+      "foreign evidence must not enter the current architecture card",
+    );
+    expect(context.lastMetaSchedulerDecision?.policyDecision.architectureSignal).toMatchObject({
+      candidate: true,
+      cardPresent: true,
+      guardReminder: true,
+      actualImpact: { status: "confirmed", files: ["architecture-impact.ts"] },
+    });
+    expect(context.lastMetaSchedulerDecision?.policyDecision.hints.map((hint) => hint.id)).toContain(
+      "architecture-guard",
+    );
+    expect(JSON.stringify(events)).toContain("architecture runtime actual impact confirmed");
+    expect(currentTurnContext(calls.requests[0])?.content ?? "").toContain(
+      "Architecture Runtime: candidate",
+    );
+
+    await __testSendMessage("请只分析跨模块实现，不要写入，也不要运行测试。", context, gateway, new MemoryOutput());
+
+    expect(context.lastMetaSchedulerDecision?.policyDecision.permissionPlan.expectedMutating).toBe(false);
+    expect(context.currentArchitectureCard).toBeUndefined();
+    expect(context.lastMetaSchedulerDecision?.policyDecision.architectureSignal).toMatchObject({
+      candidate: false,
+      cardPresent: false,
+      guardReminder: false,
+      actualImpact: { status: "none", files: [] },
+    });
+    expect(calls.requests).toHaveLength(3);
+    expect(currentTurnContext(calls.requests[2])).toBeDefined();
+    const readonlyArchitectureMarkers =
+      currentTurnContext(calls.requests[2])?.content.match(/Architecture Runtime: (?:candidate|triggered)/g) ?? [];
+    expect(readonlyArchitectureMarkers).toHaveLength(0);
+  });
+});
 
 function isolateAutoLearningMemory(context: TuiContext): void {
   context.memory.userDir = join(context.projectPath, ".test-user-memory");

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TuiContext } from "./index.js";
+import { runArchitectureAndCompletenessFinalGate } from "./final-answer-gate.js";
 import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
 import { evaluateAggregatedFinalAnswerGate } from "./model-stream-runtime.js";
 import type { EvidenceRecord } from "./tui-data-types.js";
@@ -266,5 +267,51 @@ describe("final-answer-gate artifact freshness integration", () => {
     if (result.status === "needs_disclaimer") {
       expect(result.unsupportedKinds).toContain("engineering_missing_artifact");
     }
+  });
+});
+
+describe("architecture runtime candidate boundary", () => {
+  it("does not let a pending candidate satisfy the architecture boundary contract", () => {
+    const context = {
+      currentArchitectureCard: {
+        target: "cross-module change",
+        projectFacts: [],
+        recommendedApproach: "minimal",
+        rejectedApproaches: [],
+        stagedBreakdown: [],
+        risks: [],
+        verification: [],
+        nonGoals: [],
+      },
+      evidence: [
+        {
+          id: "architecture-candidate",
+          kind: "command_output",
+          source: "architecture-runtime:v1",
+          summary: "candidate",
+          supportsClaims: ["architecture_runtime"],
+          createdAt: new Date().toISOString(),
+        },
+      ],
+      solutionCompleteness: createSolutionCompletenessStatus(),
+      lastMetaSchedulerDecision: {
+        policyDecision: {
+          architectureSignal: {
+            candidate: true,
+            cardPresent: true,
+            guardReminder: false,
+            driftPending: false,
+            actualImpact: { status: "pending", files: [] },
+          },
+        },
+      },
+    } as unknown as TuiContext;
+
+    const result = runArchitectureAndCompletenessFinalGate(
+      context,
+      'LinghunFinalAnswerClaims: {"claims":[{"kind":"architecture_boundary","phrase":"架构已闭合"}]}',
+    );
+
+    expect(result.status).toBe("needs_disclaimer");
   });
 });

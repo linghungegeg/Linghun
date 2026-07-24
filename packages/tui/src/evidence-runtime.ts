@@ -537,6 +537,7 @@ export async function recordArchitectureRuntimeCard(
   context: TuiContext,
   sessionId: string,
   card: ArchitectureCard,
+  phase: "candidate" | "confirmed" = "confirmed",
 ): Promise<EvidenceRecord> {
   const evidence = createEvidenceRecord(
     "command_output",
@@ -554,7 +555,7 @@ export async function recordArchitectureRuntimeCard(
   await appendSystemEvent(
     context,
     sessionId,
-    `architecture runtime triggered: evidence ${evidence.id}; target ${card.target}`,
+    `architecture runtime ${phase}: evidence ${evidence.id}; target ${card.target}`,
     "info",
   );
   if (context.memory.lastHandoff) {

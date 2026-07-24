@@ -33,7 +33,11 @@ export function runArchitectureAndCompletenessFinalGate(
   if (!assistantText) {
     return { status: "passed" };
   }
-  const card = context.currentArchitectureCard;
+  const architectureSignal = context.lastMetaSchedulerDecision?.policyDecision.architectureSignal;
+  const card =
+    architectureSignal?.candidate && architectureSignal.actualImpact.status !== "confirmed"
+      ? undefined
+      : context.currentArchitectureCard;
   let driftWarnings: string[] = [];
   if (card) {
     // 用 final answer 文本作为 nextAction.summary，复用 detectArchitectureDrift 的

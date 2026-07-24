@@ -1,13 +1,23 @@
 import { describe, expect, it } from "vitest";
 import {
   type ArchitectureCard,
+  type ArchitectureRoutingSignal,
   collectArchitectureFacts,
   createArchitectureCard,
   createArchitectureRuntimeDirective,
+  collectArchitectureActualImpact,
   detectArchitectureDrift,
   formatArchitectureCard,
   shouldTriggerArchitectureRuntime,
 } from "./architecture-runtime.js";
+
+const eligibleEditRouting: ArchitectureRoutingSignal = {
+  taskKind: "edit",
+  expectedMutating: true,
+  riskLevel: "medium",
+  requireVerification: true,
+  readonly: false,
+};
 
 const baseCard: ArchitectureCard = {
   target: "实现跨模块 Architecture Runtime",
@@ -33,37 +43,37 @@ describe("architecture runtime trigger rules", () => {
   });
 
   it("triggers for cross-module and public API work", () => {
-    expect(shouldTriggerArchitectureRuntime("跨模块实现 Architecture Runtime")).toBe(true);
-    expect(shouldTriggerArchitectureRuntime("修改 public API 并同步调用方")).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("跨模块实现 Architecture Runtime", eligibleEditRouting)).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("修改 public API 并同步调用方", eligibleEditRouting)).toBe(true);
   });
 
   it("triggers for dependency, config, deployment, performance, and security work", () => {
-    expect(shouldTriggerArchitectureRuntime("调整 package.json 依赖和 tsconfig 配置")).toBe(true);
-    expect(shouldTriggerArchitectureRuntime("分析部署、性能和安全风险并实现")).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("调整 package.json 依赖和 tsconfig 配置", eligibleEditRouting)).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("分析部署、性能和安全风险并实现", eligibleEditRouting)).toBe(true);
   });
 
   it("triggers for common new feature requests", () => {
-    expect(shouldTriggerArchitectureRuntime("实现登录功能")).toBe(true);
-    expect(shouldTriggerArchitectureRuntime("加一个导出报表功能")).toBe(true);
-    expect(shouldTriggerArchitectureRuntime("add export report feature")).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("实现登录功能", eligibleEditRouting)).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("加一个导出报表功能", eligibleEditRouting)).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("add export report feature", eligibleEditRouting)).toBe(true);
   });
 
   it("triggers for ordinary page/component/UI development requests", () => {
-    expect(shouldTriggerArchitectureRuntime("做一个页面")).toBe(true);
-    expect(shouldTriggerArchitectureRuntime("做一个登录页面")).toBe(true);
-    expect(shouldTriggerArchitectureRuntime("写一个 React 组件")).toBe(true);
-    expect(shouldTriggerArchitectureRuntime("帮我做个首页")).toBe(true);
-    expect(shouldTriggerArchitectureRuntime("实现一个用户列表页面")).toBe(true);
-    expect(shouldTriggerArchitectureRuntime("加一个导航栏")).toBe(true);
-    expect(shouldTriggerArchitectureRuntime("build a landing page")).toBe(true);
-    expect(shouldTriggerArchitectureRuntime("create a dashboard page")).toBe(true);
-    expect(shouldTriggerArchitectureRuntime("make a responsive homepage")).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("做一个页面", eligibleEditRouting)).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("做一个登录页面", eligibleEditRouting)).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("写一个 React 组件", eligibleEditRouting)).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("帮我做个首页", eligibleEditRouting)).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("实现一个用户列表页面", eligibleEditRouting)).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("加一个导航栏", eligibleEditRouting)).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("build a landing page", eligibleEditRouting)).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("create a dashboard page", eligibleEditRouting)).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("make a responsive homepage", eligibleEditRouting)).toBe(true);
   });
 
   it("triggers for bug fix requests that are not trivially small", () => {
-    expect(shouldTriggerArchitectureRuntime("修复登录页面的 bug")).toBe(true);
-    expect(shouldTriggerArchitectureRuntime("fix a bug in the login form")).toBe(true);
-    expect(shouldTriggerArchitectureRuntime("debug this crash issue")).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("修复登录页面的 bug", eligibleEditRouting)).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("fix a bug in the login form", eligibleEditRouting)).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("debug this crash issue", eligibleEditRouting)).toBe(true);
   });
 
   it("does not trigger for trivially small bug fixes", () => {
@@ -73,9 +83,37 @@ describe("architecture runtime trigger rules", () => {
 
   it("triggers when the user requests mature complete reference-aligned work", () => {
     expect(
-      shouldTriggerArchitectureRuntime("请做 mature complete reference-aligned no omissions 实现"),
+      shouldTriggerArchitectureRuntime("请做 mature complete reference-aligned no omissions 实现", eligibleEditRouting),
     ).toBe(true);
-    expect(shouldTriggerArchitectureRuntime("做成熟、完整、对齐参考源、不要遗漏")).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("做成熟、完整、对齐参考源、不要遗漏", eligibleEditRouting)).toBe(true);
+  });
+
+  it.each([
+    ["missing routing signal", undefined],
+    ["readonly", { ...eligibleEditRouting, readonly: true }],
+    ["non-mutating", { ...eligibleEditRouting, expectedMutating: false }],
+    ["non-edit task", { ...eligibleEditRouting, taskKind: "code_fact" as const }],
+    ["low risk", { ...eligibleEditRouting, riskLevel: "low" as const }],
+    ["verification not required", { ...eligibleEditRouting, requireVerification: false }],
+  ] as const)("does not upgrade a keyword candidate when routing is %s", (_reason, routing) => {
+    expect(shouldTriggerArchitectureRuntime("跨模块实现 Architecture Runtime", routing)).toBe(false);
+  });
+});
+
+describe("architecture runtime actual impact", () => {
+  it("requires current successful mutation evidence to confirm changed files", () => {
+    const impact = collectArchitectureActualImpact(
+      ["src/current.ts", "src/foreign.ts"],
+      [
+        { supportsClaims: ["Write", "file_written", "file:src/current.ts"] },
+        {
+          kind: "user_provided",
+          supportsClaims: ["Edit", "file_written", "file:src/foreign.ts"],
+        },
+      ],
+    );
+
+    expect(impact.files).toEqual(["src/current.ts"]);
   });
 });
 

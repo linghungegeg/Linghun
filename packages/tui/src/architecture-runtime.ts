@@ -1,3 +1,5 @@
+import type { PolicyDecision } from "./meta-scheduler-runtime.js";
+
 export type ArchitectureCard = {
   target: string;
   projectFacts: string[];
@@ -23,6 +25,16 @@ export type ArchitectureRuntimeContext = {
   };
   activePlan?: unknown;
   planAccepted?: boolean;
+};
+
+export type ArchitectureRoutingSignal = Pick<PolicyDecision, "taskKind" | "riskLevel"> & {
+  expectedMutating: boolean;
+  requireVerification: boolean;
+  readonly: boolean;
+};
+
+export type ArchitectureActualImpact = {
+  files: string[];
 };
 
 export type ArchitectureCardSummary = Pick<
@@ -77,7 +89,7 @@ const CONTROL_PLANE_PATTERNS = [
 
 export function shouldTriggerArchitectureRuntime(
   input: string,
-  _context: ArchitectureRuntimeContext = {},
+  routing?: ArchitectureRoutingSignal,
 ): boolean {
   const text = input.trim();
   if (!text) {
@@ -89,7 +101,47 @@ export function shouldTriggerArchitectureRuntime(
   if (SMALL_TASK_PATTERNS.some((pattern) => pattern.test(text))) {
     return false;
   }
-  return SYSTEMIC_TRIGGER_PATTERNS.some((pattern) => pattern.test(text));
+  const candidate = SYSTEMIC_TRIGGER_PATTERNS.some((pattern) => pattern.test(text));
+  if (!candidate || !routing) {
+    return false;
+  }
+  return (
+    !routing.readonly &&
+    routing.taskKind === "edit" &&
+    routing.expectedMutating &&
+    routing.riskLevel !== "low" &&
+    routing.requireVerification
+  );
+}
+
+export function collectArchitectureActualImpact(
+  changedFiles: readonly string[],
+  evidence: ReadonlyArray<{
+    kind?: string;
+    supportsClaims?: readonly string[];
+    ownerScope?: { targets?: readonly string[] };
+  }>,
+): ArchitectureActualImpact {
+  const mutationTargets = evidence.flatMap((record) => {
+    const claims = record.supportsClaims ?? [];
+    if (
+      record.kind === "user_provided" ||
+      !claims.includes("file_written") ||
+      claims.includes("tool_failure") ||
+      !["Write", "Edit", "MultiEdit"].some((name) => claims.includes(name))
+    ) {
+      return [];
+    }
+    const claimTargets = claims
+      .filter((claim) => claim.startsWith("file:"))
+      .map((claim) => claim.slice("file:".length));
+    return claimTargets.length > 0 ? claimTargets : [...(record.ownerScope?.targets ?? [])];
+  });
+  const files = changedFiles.filter((file, index) =>
+    changedFiles.findIndex((candidate) => sameArchitectureImpactPath(candidate, file)) === index &&
+    mutationTargets.some((target) => sameArchitectureImpactPath(target, file)),
+  );
+  return { files };
 }
 
 export function collectArchitectureFacts(context: ArchitectureRuntimeContext): string[] {
@@ -203,14 +255,17 @@ export function summarizeArchitectureCard(card: ArchitectureCard): ArchitectureC
   };
 }
 
-export function createArchitectureRuntimeDirective(card: ArchitectureCard): string {
+export function createArchitectureRuntimeDirective(
+  card: ArchitectureCard,
+  phase: "candidate" | "confirmed" = "confirmed",
+): string {
   // D.14A-R-Fix P1-7 — AntiCodeBlob / LegacyLargeFileDebt 是 prompt-only guidance：
   // 只作为给模型的 system prompt 指令进入此 directive，不是 hard gate、不是
   // pre-write/pre-edit 拦截、不是 linter/AST 阻断、不是权限拒绝。architecture-boundary.ts
   // 的检测器是 standalone helper / 报告用，主链 Write/Edit/MultiEdit/Bash 路径不会自动
   // 调用它阻断写入。下面文案只描述工程建议，不得被理解为会阻断写入的运行时闸门。
   return [
-    "Architecture Runtime: triggered",
+    phase === "candidate" ? "Architecture Runtime: candidate" : "Architecture Runtime: triggered",
     "主屏只输出 1-2 行面向用户的行动摘要；不要把 Architecture Card、字段名或内部审计结构输出到主屏。",
     "后续动作必须保持与该 card 一致；完整 Architecture Card 仅用于内部记录、details/debug 或验证。",
     "Architecture Runtime 不授权写入、不改变权限模式、不替代 Plan approval、Freshness/Web Evidence 或 verifier。",
@@ -295,6 +350,14 @@ function truncate(value: string, max: number): string {
     return value;
   }
   return `${value.slice(0, Math.max(0, max - 1))}…`;
+}
+
+function sameArchitectureImpactPath(left: string, right: string): boolean {
+  const normalize = (value: string) =>
+    value.trim().replaceAll("\\", "/").replace(/^\.\//u, "").replace(/\/+$/u, "").toLowerCase();
+  const a = normalize(left);
+  const b = normalize(right);
+  return a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`);
 }
 
 function normalizeText(value: string): string {

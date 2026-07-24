@@ -16,7 +16,7 @@ import {
 import type { RegistryAgentDefinition } from "./agent-workflow-registry.js";
 import type { BoundaryEditPreflightResult } from "./architecture-boundary.js";
 import { checkBoundaryEditPreflight, detectBashFileWriteTargets } from "./architecture-boundary.js";
-import { detectArchitectureDrift } from "./architecture-runtime.js";
+import { collectArchitectureActualImpact, detectArchitectureDrift } from "./architecture-runtime.js";
 import {
   collectPendingAgentCompletionNotices,
   markAgentCompletionNoticeReported,
@@ -44,6 +44,7 @@ import {
   captureFailureLearning,
   createEvidenceRecord,
   createToolEndEvent,
+  evidenceMatchesRequestOwner,
   isToolOutputFailure,
   recordToolEvidence,
   recordToolFailureEvidence,
@@ -479,6 +480,7 @@ export async function executeModelToolUse(
   const architectureDrift =
     !architectureDriftConfirmed &&
     context.currentArchitectureCard &&
+    context.lastMetaSchedulerDecision?.policyDecision.architectureSignal.actualImpact.status === "confirmed" &&
     shouldConfirmArchitectureDriftForTool(toolName)
       ? detectArchitectureDrift(context.currentArchitectureCard, {
           toolName,
@@ -1078,6 +1080,10 @@ export async function executeApprovedModelToolUse(
     if (requestIsStale()) {
       return dropStaleToolResult("result");
     }
+    await confirmArchitectureActualImpact(context, sessionId, toolName, isError, () => !requestIsStale());
+    if (requestIsStale()) {
+      return dropStaleToolResult("result");
+    }
     const webFailureData =
       isError && (toolName === "WebSearch" || toolName === "WebFetch")
         ? (result.output.data as { aborted?: unknown; timedOut?: unknown } | undefined)
@@ -1243,6 +1249,58 @@ export async function executeApprovedModelToolUse(
     }
     return { ok: false, tool: toolName, text, evidenceId: evidence.id };
   }
+}
+
+async function confirmArchitectureActualImpact(
+  context: TuiContext,
+  sessionId: string,
+  toolName: ToolName,
+  isError: boolean,
+  commitGuard: () => boolean,
+): Promise<void> {
+  if (isError || !["Write", "Edit", "MultiEdit"].includes(toolName)) return;
+  const card = context.currentArchitectureCard;
+  const policyDecision = context.lastMetaSchedulerDecision?.policyDecision;
+  if (
+    !card ||
+    !policyDecision?.architectureSignal.candidate ||
+    policyDecision.architectureSignal.actualImpact.status === "confirmed"
+  ) {
+    return;
+  }
+  const actualImpact = collectArchitectureActualImpact(
+    context.currentRequestChangedFiles ?? [],
+    context.evidence.filter(
+      (record) => record.kind !== "user_provided" && evidenceMatchesRequestOwner(record, context),
+    ),
+  );
+  if (actualImpact.files.length === 0) return;
+
+  policyDecision.architectureSignal = {
+    ...policyDecision.architectureSignal,
+    guardReminder: true,
+    actualImpact: {
+      status: "confirmed",
+      files: actualImpact.files,
+    },
+  };
+  if (!policyDecision.hints.some((hint) => hint.id === "architecture-guard")) {
+    policyDecision.hints.push({
+      id: "architecture-guard",
+      severity: "warning",
+      text: {
+        "zh-CN": "策略：已确认本轮实际影响，后续写入会继续走架构边界检查。",
+        "en-US": "Strategy: actual impact is confirmed; later edits keep architecture guard checks.",
+      },
+    });
+  }
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `architecture runtime actual impact confirmed: files ${actualImpact.files.join(",")}; scope owner_scoped`,
+    "info",
+    commitGuard,
+  );
 }
 
 async function appendPolicyToolFeedback(
