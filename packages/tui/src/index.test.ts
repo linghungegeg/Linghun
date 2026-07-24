@@ -8558,12 +8558,11 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("缺少证据");
   });
 
-  // ── Phase 7: legacy fallback is a narrow final-closure safety net ──
-  // Structured LinghunFinalAnswerClaims remains the primary path. Plain natural
-  // language is only blocked when it looks like a final completion/pass claim;
-  // discussion and planning text should pass without evidence.
+  // ── Phase 7: natural-language compatibility prompt ──
+  // Structured LinghunFinalAnswerClaims remains the only fact-adjudicated path.
+  // Plain high-risk wording prompts for a contract; discussion and planning do not.
 
-  it("Phase 7: blocks bare Chinese final pass claim without evidence", async () => {
+  it("Phase 7: prompts bare Chinese final pass claims without fact-adjudicating them", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "gpt-4.1" });
@@ -8572,8 +8571,64 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/claim-check 测试通过", context, output);
 
-    expect(output.text).toContain("缺少证据");
-    expect(output.text).not.toContain("Claim Checker：通过");
+    expect(output.text).toContain("Claim Checker：通过");
+    expect(output.text).toContain("提示");
+    expect(output.text).toContain("LinghunFinalAnswerClaims");
+    expect(output.text).not.toContain("缺少证据");
+
+    const unsupported = new MemoryOutput();
+    await handleSlashCommand(
+      '/claim-check 测试通过 LinghunFinalAnswerClaims: {"claims":[{"kind":"completion_pass","phrase":"测试通过"}]}',
+      context,
+      unsupported,
+    );
+    expect(unsupported.text).toContain("缺少证据");
+    expect(unsupported.text).not.toContain("Claim Checker：通过");
+
+    const requestTurnId = "phase-7-current";
+    context.currentRequestTurnId = requestTurnId;
+    context.evidence.push({
+      id: "phase-7-test-pass-prior",
+      kind: "command_output",
+      summary: "Bash: focused tests passed",
+      source: "Bash",
+      supportsClaims: ["Bash", "command_ran", "bash_exit_0", "test_passed"],
+      createdAt: new Date().toISOString(),
+      ownerScope: {
+        ownerSessionId: session.id,
+        requestTurnId: "phase-7-prior",
+        cwd: project,
+      },
+    });
+    const foreignScope = new MemoryOutput();
+    await handleSlashCommand(
+      '/claim-check 测试通过 LinghunFinalAnswerClaims: {"claims":[{"kind":"completion_pass","phrase":"测试通过"}]}',
+      context,
+      foreignScope,
+    );
+    expect(foreignScope.text).toContain("缺少证据");
+
+    context.evidence.push({
+      id: "phase-7-test-pass-current",
+      kind: "command_output",
+      summary: "Bash: focused tests passed",
+      source: "Bash",
+      supportsClaims: ["Bash", "command_ran", "bash_exit_0", "test_passed"],
+      createdAt: new Date().toISOString(),
+      ownerScope: {
+        ownerSessionId: session.id,
+        requestTurnId,
+        cwd: project,
+      },
+    });
+    const supported = new MemoryOutput();
+    await handleSlashCommand(
+      '/claim-check 测试通过 LinghunFinalAnswerClaims: {"claims":[{"kind":"completion_pass","phrase":"测试通过"}]}',
+      context,
+      supported,
+    );
+    expect(supported.text).toContain("Claim Checker：通过");
+    expect(supported.text).not.toContain("缺少证据");
   });
 
   it("Phase 7: allows discussion text that mentions completion words", async () => {
@@ -8587,9 +8642,29 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(output.text).toContain("Claim Checker：通过");
     expect(output.text).not.toContain("缺少证据");
+    expect(output.text).not.toContain("提示");
   });
 
-  it("Phase 7: blocks explicit verified-fix closure without evidence", async () => {
+  it.each([
+    "讨论‘可以上线’这个措辞",
+    "例如“可以上线”只是示例",
+    "计划可以上线后再补验证",
+    "可以上线吗？",
+  ])("Phase 7: does not prompt non-closure readiness wording: %s", async (claim) => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand(`/claim-check ${claim}`, context, output);
+
+    expect(output.text).toContain("Claim Checker：通过");
+    expect(output.text).not.toContain("提示");
+    expect(output.text).not.toContain("缺少证据");
+  });
+
+  it("Phase 7: prompts explicit verified-fix closure without evidence", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "gpt-4.1" });
@@ -8598,11 +8673,12 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/claim-check 已修复并已验证", context, output);
 
-    expect(output.text).not.toContain("Claim Checker：通过");
-    expect(output.text).toContain("缺少证据");
+    expect(output.text).toContain("Claim Checker：通过");
+    expect(output.text).toContain("提示");
+    expect(output.text).not.toContain("缺少证据");
   });
 
-  it("Phase 7: blocks broad all-passed closure without evidence", async () => {
+  it("Phase 7: prompts broad all-passed closure without evidence", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "gpt-4.1" });
@@ -8611,11 +8687,12 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/claim-check 全部通过", context, output);
 
-    expect(output.text).not.toContain("Claim Checker：通过");
-    expect(output.text).toContain("缺少证据");
+    expect(output.text).toContain("Claim Checker：通过");
+    expect(output.text).toContain("提示");
+    expect(output.text).not.toContain("缺少证据");
   });
 
-  it("Phase 7: blocks readiness closure without evidence", async () => {
+  it("Phase 7: prompts readiness closure without evidence", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "gpt-4.1" });
@@ -8624,11 +8701,12 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/claim-check 可上线", context, output);
 
-    expect(output.text).not.toContain("Claim Checker：通过");
-    expect(output.text).toContain("缺少证据");
+    expect(output.text).toContain("Claim Checker：通过");
+    expect(output.text).toContain("提示");
+    expect(output.text).not.toContain("缺少证据");
   });
 
-  it("Phase 7: blocks smoke pass closure without evidence", async () => {
+  it("Phase 7: prompts smoke pass closure without evidence", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "gpt-4.1" });
@@ -8637,8 +8715,9 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/claim-check smoke 通过", context, output);
 
-    expect(output.text).not.toContain("Claim Checker：通过");
-    expect(output.text).toContain("缺少证据");
+    expect(output.text).toContain("Claim Checker：通过");
+    expect(output.text).toContain("提示");
+    expect(output.text).not.toContain("缺少证据");
   });
 
   it("Phase 7: low-risk Chinese text still passes", async () => {

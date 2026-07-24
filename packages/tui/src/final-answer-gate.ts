@@ -93,6 +93,7 @@ export type ClaimCheck = {
   unsupportedClaims: string[];
   missingEvidenceKinds?: string[];
   verdict?: VerdictEvidenceScope;
+  promptForStructuredClaim?: boolean;
 };
 
 export function createHandoffPendingItems(evidence: EvidenceRecord[]): string[] {
@@ -247,7 +248,7 @@ export function checkClaimSupport(claim: string, context: TuiContext): ClaimChec
     return headlessDiagnosticsCheck;
   }
 
-  // D.13U：只接受模型声明的结构化 claim 契约；不再维护自然语言短语表。
+  // 事实裁决只接受模型声明的结构化 claim 契约。
   const structuredClaims = extractStructuredFinalAnswerClaims(claim);
   if (structuredClaims.some((item) => item.kind === "beta_readiness")) {
     return {
@@ -262,14 +263,11 @@ export function checkClaimSupport(claim: string, context: TuiContext): ClaimChec
   }
 
   if (structuredClaims.length === 0) {
-    // D.14H Phase 7.5-C：纯自然语言高风险 claim 兜底识别。
-    // 无结构化 claim 时，对"测试通过 / PASS / 已完成"等无证据高风险表述
-    // 做最小匹配；普通低风险文本不误伤。
-    const nlCheck = detectNaturalLanguageHighRiskClaims(claim);
-    if (nlCheck.status !== "passed") {
-      return nlCheck;
-    }
-    return { status: "passed", unsupportedClaims: [] };
+    return {
+      status: "passed",
+      unsupportedClaims: [],
+      ...(hasNaturalLanguageHighRiskClaimHint(claim) ? { promptForStructuredClaim: true } : {}),
+    };
   }
   if (
     structuredClaims.some(
@@ -398,61 +396,27 @@ function readGenericEvidenceDataRecord(
   return readEvidenceDataRecord(evidence, key);
 }
 
-// Phase 7: legacy fallback is a narrow safety net only. Structured
-// LinghunFinalAnswerClaims remains the primary path; natural language text is
-// checked only when it looks like a final closure statement, not discussion.
-const HIGH_RISK_NL_CLAIM_PATTERNS: Array<{ regex: RegExp; label: string }> = [
-  {
-    regex: /(?:我|本轮|这次|已|已经)?(?:测试|验证|构建|typecheck|lint|smoke)\s*(?:都|全部|已经|已)?通过/iu,
-    label: "legacy fallback: verification/test pass evidence",
-  },
-  {
-    regex: /(?:我|本轮|这次|该问题|这个问题)?(?:已完成|已经完成|已修复并已验证|已修复且已验证|已经完成修复|已经修复|已修复)/iu,
-    label: "legacy fallback: task completion or fix evidence",
-  },
-  {
-    regex: /(?:全部通过|全部完成|完全通过|可上线|可以上线|达到上线标准)/iu,
-    label: "legacy fallback: completion/readiness evidence",
-  },
-  {
-    regex: /\b(?:tests?\s+passed|build\s+passed|type\s*check\s+passed|lint\s+passed|smoke\s*(?:test\s*)?pass(?:ed)?)\b/iu,
-    label: "legacy fallback: verification/test pass evidence",
-  },
-  {
-    regex: /\b(?:fixed|completed|verified|beta\s*ready|ready\s*for\s*beta|production\s*ready)\b/iu,
-    label: "legacy fallback: task completion or readiness evidence",
-  },
+// Compatibility-only prompt patterns. They never decide facts or evidence sufficiency.
+const HIGH_RISK_NL_CLAIM_PATTERNS: RegExp[] = [
+  /(?:我|本轮|这次|已|已经)?(?:测试|验证|构建|typecheck|lint|smoke)\s*(?:都|全部|已经|已)?通过/iu,
+  /(?:我|本轮|这次|该问题|这个问题)?(?:已完成|已经完成|已修复并已验证|已修复且已验证|已经完成修复|已经修复|已修复)/iu,
+  /(?:全部通过|全部完成|完全通过|可上线|可以上线|达到上线标准)/iu,
+  /\b(?:tests?\s+passed|build\s+passed|type\s*check\s+passed|lint\s+passed|smoke\s*(?:test\s*)?pass(?:ed)?)\b/iu,
+  /\b(?:fixed|completed|verified|beta\s*ready|ready\s*for\s*beta|production\s*ready)\b/iu,
 ];
 
-function detectNaturalLanguageHighRiskClaims(text: string): ClaimCheck {
-  if (!looksLikeFinalClosureStatement(text)) {
-    return { status: "passed", unsupportedClaims: [] };
-  }
-  const hitLabels = new Set<string>();
-  for (const { regex, label } of HIGH_RISK_NL_CLAIM_PATTERNS) {
-    if (regex.test(text)) {
-      hitLabels.add(label);
-    }
-  }
-  if (hitLabels.size > 0) {
-    return {
-      status: "needs_disclaimer",
-      unsupportedClaims: Array.from(hitLabels),
-      missingEvidenceKinds: Array.from(hitLabels),
-    };
-  }
-  return { status: "passed", unsupportedClaims: [] };
+function hasNaturalLanguageHighRiskClaimHint(text: string): boolean {
+  return looksLikeFinalClosureStatement(text) &&
+    HIGH_RISK_NL_CLAIM_PATTERNS.some((regex) => regex.test(text));
 }
 
 function looksLikeFinalClosureStatement(text: string): boolean {
   const normalized = text.trim();
   if (!normalized) return false;
-  if (/(?:可以上线|达到上线标准)/iu.test(normalized)) {
-    return true;
-  }
-  if (/(?:如果|计划|方案|建议|可以|应该|需要|讨论|解释|例如|比如|怎么|如何|\?)|(?:if|plan|proposal|should|could|would|example|explain|how\b)/iu.test(normalized)) {
+  if (/(?:如果|计划|方案|建议|应该|需要|讨论|解释|例如|比如|怎么|如何|吗|[?？])|(?:if|plan|proposal|should|could|would|example|explain|how\b)/iu.test(normalized)) {
     return false;
   }
+  if (/(?:可以上线|达到上线标准)/iu.test(normalized)) return true;
   return /(?:我|本轮|这次|已|已经|完成|修复|验证|测试|构建|通过|上线|ready|passed|fixed|completed|verified)/iu.test(
     normalized,
   );
@@ -483,6 +447,11 @@ export function formatClaimCheck(result: ClaimCheck, language: Language): string
         ].join("\n");
   }
   if (result.status === "passed") {
+    if (result.promptForStructuredClaim) {
+      return language === "en-US"
+        ? "Claim check passed. Hint: this natural-language result was not fact-adjudicated; add LinghunFinalAnswerClaims and matching evidence to verify it."
+        : "Claim Checker：通过。提示：该自然语言结论未进入事实裁决；如需核查，请补充 LinghunFinalAnswerClaims 结构化声明和对应 evidence。";
+    }
     return language === "en-US" ? "Claim check passed." : "Claim Checker：通过。";
   }
   const claims = result.unsupportedClaims.join(", ");
