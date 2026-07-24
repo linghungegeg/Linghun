@@ -11,21 +11,10 @@ import {
   evaluateArchitectureAndCompletenessClaims,
   evaluateFinalAnswerClaims,
   extractStructuredFinalAnswerClaims,
-  finalAnswerHasCompletenessClassification,
   hasArchitectureEvidenceForClaims,
   type FinalAnswerClaimVerdict,
 } from "./model-loop-runtime.js";
 import type { EvidenceRecord, VerdictEvidenceScope } from "./tui-data-types.js";
-
-export function needsSolutionCompletenessReportClosure(
-  context: TuiContext,
-  assistantText: string,
-): boolean {
-  if (!context.solutionCompleteness.classificationRequired) {
-    return false;
-  }
-  return !/single_issue|systemic_gap/u.test(assistantText);
-}
 
 // D.13V-B：在 final answer push 之前对 architecture / completeness 做一次额外 gate。
 // 与 D.13U evaluateFinalAnswerClaims 平行，不重写它。共享 finalAnswerClaimRetried 一次重试预算。
@@ -63,29 +52,12 @@ export function runArchitectureAndCompletenessFinalGate(
     {
       classificationRequired: context.solutionCompleteness.classificationRequired,
       classification: context.solutionCompleteness.classification,
-      textHasClassification: finalAnswerHasCompletenessClassification(assistantText),
     },
   );
   if (verdict.status === "needs_disclaimer") {
     return { status: "needs_disclaimer", verdict };
   }
   return { status: "passed" };
-}
-
-export function formatSolutionCompletenessReportBlock(context: TuiContext): string {
-  const status = context.solutionCompleteness;
-  const classification =
-    status.classification === "unknown" ? "systemic_gap" : status.classification;
-  const impact = status.impactAreas.length > 0 ? status.impactAreas.join(", ") : "unknown";
-  const severity = status.severity === "unknown" ? "blocking_P1" : status.severity;
-  return [
-    "Solution Completeness Gate report",
-    `- classification: ${classification}`,
-    `- impactAreas: ${impact}`,
-    `- severity: ${severity}`,
-    "- phaseBoundary: stay in the current approved scope; do not enter Beta or later roadmap stages automatically.",
-    "- validation: list focused tests/check/typecheck/build/diff-check before claiming closure.",
-  ].join("\n");
 }
 
 export type ClaimCheck = {

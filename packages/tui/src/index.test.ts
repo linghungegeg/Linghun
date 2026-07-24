@@ -41,8 +41,7 @@ import {
 import {
   checkClaimSupport,
   createPhase15BetaVerdictScope,
-  formatSolutionCompletenessReportBlock,
-  needsSolutionCompletenessReportClosure,
+  runArchitectureAndCompletenessFinalGate,
 } from "./final-answer-gate.js";
 import { createHandoffPacket, hydrateResumeContext } from "./handoff-session-runtime.js";
 import {
@@ -33405,18 +33404,15 @@ describe("D.13V-B/C source invariants", () => {
     expect(gate).toContain("evaluateArchitectureAndCompletenessClaims");
   });
 
-  it("source: continueModelAfterToolResults does not append keyword-driven closure blocks", async () => {
+  it("source: continueModelAfterToolResults does not append completeness closure blocks", async () => {
     const text = await readSrc("model-stream-runtime.ts");
     const start = text.indexOf("async function continueModelAfterToolResults");
     expect(start).toBeGreaterThan(-1);
     const body = text.slice(start, start + 30000);
-    expect(body).not.toContain("needsSolutionCompletenessReportClosure");
-    expect(body).not.toContain("formatSolutionCompletenessReportBlock");
+    expect(body).not.toContain("Solution Completeness Gate report");
   });
 
-  // D.14A-R-Fix P1-1 — closure helper 行为锁定：classification 已给出时不追加，
-  // classificationRequired 且缺 classification 时才追加；block 文案不含违规原文。
-  it("closure helper: 缺 classification 才追加，已分类不追加", async () => {
+  it("completeness final gate reads runtime classification instead of answer tokens", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-closure-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -33428,19 +33424,15 @@ describe("D.13V-B/C source invariants", () => {
       classification: "unknown",
       impactAreas: ["runtime_behavior"],
     };
-    // 最终答复未给 single_issue/systemic_gap → 需要 closure
-    expect(needsSolutionCompletenessReportClosure(context, "我做了一些改动。")).toBe(true);
-    const block = formatSolutionCompletenessReportBlock(context);
-    expect(block).toContain("Solution Completeness Gate report");
-    expect(block).toContain("classification:");
-    expect(block).not.toContain("我做了一些改动。");
-    // 最终答复已显式给出分类 → 不需要 closure
-    expect(
-      needsSolutionCompletenessReportClosure(context, "结论：这是 systemic_gap，影响面如下。"),
-    ).toBe(false);
-    // classificationRequired=false → 永不追加
-    context.solutionCompleteness = createSolutionCompletenessStatus();
-    expect(needsSolutionCompletenessReportClosure(context, "随便一句话")).toBe(false);
+    const answer = [
+      "当前结论已整理，没有遗漏。",
+      'LinghunFinalAnswerClaims: {"claims":[{"kind":"completeness","phrase":"没有遗漏"}]}',
+    ].join("\n");
+
+    expect(runArchitectureAndCompletenessFinalGate(context, answer).status).toBe("needs_disclaimer");
+
+    context.solutionCompleteness.classification = "systemic_gap";
+    expect(runArchitectureAndCompletenessFinalGate(context, answer).status).toBe("passed");
   });
 
   it("source: createModelSystemPrompt 用 projectRuntimeStatusForPrompt 投影 runtimeStatus", async () => {

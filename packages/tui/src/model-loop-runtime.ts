@@ -2189,7 +2189,6 @@ export type FinalAnswerArchitectureCheckInput = {
 export type FinalAnswerCompletenessCheckInput = {
   classificationRequired: boolean;
   classification: SolutionCompletenessClassification;
-  textHasClassification: boolean;
 };
 
 export type FinalAnswerExtendedClaimKind = "architecture_boundary" | "completeness";
@@ -2236,10 +2235,10 @@ export function evaluateArchitectureAndCompletenessClaims(
     }
   }
   if (matchedKinds.has("completeness")) {
-    // \u6709\u58f0\u660e\u4f46\u672a\u505a single_issue/systemic_gap \u5206\u7c7b \u2192 \u4e0d\u653e\u884c\u3002
+    // Completeness \u58f0\u660e\u53ea\u8bfb\u53d6\u8fd0\u884c\u65f6\u5df2\u4fdd\u5b58\u7684\u5206\u7c7b\uff0c\u56de\u7b54\u6b63\u6587\u4e0d\u53c2\u4e0e\u4e8b\u5b9e\u88c1\u51b3\u3002
     const supported =
       !completeness.classificationRequired ||
-      (completeness.classification !== "unknown" && completeness.textHasClassification);
+      completeness.classification !== "unknown";
     if (!supported) {
       unsupported.push("completeness");
       missing.push("Solution Completeness classification (single_issue / systemic_gap)");
@@ -2293,10 +2292,6 @@ export function buildExtendedDowngradedFinalAnswer(
         `需要补齐：${needed}。`,
         "我可以继续补齐支撑，或只给出不包含闭合性声明的有限结论。",
       ].join("\n");
-}
-
-export function finalAnswerHasCompletenessClassification(text: string): boolean {
-  return /\b(single_issue|systemic_gap)\b/u.test(text);
 }
 
 export function hasArchitectureEvidenceForClaims(

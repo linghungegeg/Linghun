@@ -2957,7 +2957,7 @@ describe("model-loop-runtime", () => {
       const v = evaluateArchitectureAndCompletenessClaims(
         "你好，今天我们继续修一些 bug。",
         { hasActiveCard: false },
-        { classificationRequired: false, classification: "unknown", textHasClassification: false },
+        { classificationRequired: false, classification: "unknown" },
       );
       expect(v.status).toBe("passed");
       expect(v.matchedClaims).toHaveLength(0);
@@ -2970,7 +2970,7 @@ describe("model-loop-runtime", () => {
           { kind: "architecture_boundary", phrase: "符合架构边界" },
         ]),
         { hasActiveCard: false },
-        { classificationRequired: false, classification: "unknown", textHasClassification: false },
+        { classificationRequired: false, classification: "unknown" },
       );
       expect(v.status).toBe("needs_disclaimer");
       expect(v.unsupportedKinds).toContain("architecture_boundary");
@@ -2985,7 +2985,7 @@ describe("model-loop-runtime", () => {
           driftWarnings: ["Architecture drift: scope expanded (foo.ts)."],
           hasArchitectureEvidence: true,
         },
-        { classificationRequired: false, classification: "unknown", textHasClassification: false },
+        { classificationRequired: false, classification: "unknown" },
       );
       expect(v.status).toBe("needs_disclaimer");
       expect(v.unsupportedKinds).toContain("architecture_boundary");
@@ -3000,7 +3000,7 @@ describe("model-loop-runtime", () => {
           driftWarnings: [],
           hasArchitectureEvidence: true,
         },
-        { classificationRequired: false, classification: "unknown", textHasClassification: false },
+        { classificationRequired: false, classification: "unknown" },
       );
       expect(v.status).toBe("passed");
     });
@@ -3010,7 +3010,7 @@ describe("model-loop-runtime", () => {
       const v = evaluateArchitectureAndCompletenessClaims(
         "There is no architecture drift in this change.",
         { hasActiveCard: false },
-        { classificationRequired: false, classification: "unknown", textHasClassification: false },
+        { classificationRequired: false, classification: "unknown" },
       );
       expect(v.status).toBe("passed");
       expect(v.matchedClaims).toHaveLength(0);
@@ -3024,34 +3024,25 @@ describe("model-loop-runtime", () => {
         {
           classificationRequired: true,
           classification: "unknown",
-          textHasClassification: false,
         },
       );
       expect(v.status).toBe("needs_disclaimer");
       expect(v.unsupportedKinds).toContain("completeness");
     });
 
-    it("结构化声称没有遗漏 + 已给 classification + textHasClassification → passed", async () => {
+    it("结构化声称没有遗漏 + 已给 classification + 任意自然语言正文 → passed", async () => {
       const { evaluateArchitectureAndCompletenessClaims } = await import("./model-loop-runtime.js");
       const v = evaluateArchitectureAndCompletenessClaims(
-        withClaims("本次属于 single_issue，没有遗漏。", [
+        withClaims("当前结论已整理，没有遗漏。", [
           { kind: "completeness", phrase: "没有遗漏" },
         ]),
         { hasActiveCard: false },
         {
           classificationRequired: true,
           classification: "single_issue",
-          textHasClassification: true,
         },
       );
       expect(v.status).toBe("passed");
-    });
-
-    it("finalAnswerHasCompletenessClassification 识别 single_issue / systemic_gap", async () => {
-      const { finalAnswerHasCompletenessClassification } = await import("./model-loop-runtime.js");
-      expect(finalAnswerHasCompletenessClassification("属于 single_issue")).toBe(true);
-      expect(finalAnswerHasCompletenessClassification("It is a systemic_gap")).toBe(true);
-      expect(finalAnswerHasCompletenessClassification("已修复")).toBe(false);
     });
 
     it("hasArchitectureEvidenceForClaims 识别 architecture_boundary_check 与 architecture-* file_read", async () => {
