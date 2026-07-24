@@ -85,16 +85,16 @@ export function StructuredDiff({
 
         const lineColor =
           line.kind === "add"
-            ? (theme.diffAddedWord ?? theme.success ?? "green")
+            ? (theme.diffAddedWord ?? theme.diffAdded ?? theme.success ?? "green")
             : line.kind === "remove"
-              ? (theme.diffRemovedWord ?? theme.error ?? "red")
+              ? (theme.diffRemovedWord ?? theme.diffRemoved ?? theme.error ?? "red")
               : undefined;
 
         const lineBg =
           line.kind === "add"
-            ? (theme.diffAdded ?? undefined)
+            ? (theme.diffAddedBackground ?? "#1a3d1a")
             : line.kind === "remove"
-              ? (theme.diffRemoved ?? undefined)
+              ? (theme.diffRemovedBackground ?? "#3d1a1a")
               : undefined;
 
         const wrapped = wrapText(line.text || " ", contentWidth);

@@ -98,9 +98,10 @@ function codeBlockTopLine(frame: CodeBlockFrame, width: number, label?: string):
   )}${frame.topRight}`;
 }
 
-function codeBlockHeader(lang: string | undefined, width: number): string {
-  const language = lang?.trim() || "text";
-  const header = `${language} · copy · details`;
+function codeBlockHeader(lang: string | undefined, lineCount: number, width: number): string {
+  const language = lang?.trim() || "code";
+  const countStr = lineCount > 1 ? `${lineCount} lines` : "1 line";
+  const header = ` ${language} · ${countStr}`;
   return fitText(header, Math.max(4, width));
 }
 
@@ -697,22 +698,25 @@ function renderCodeBlock({
   const rawLines = code.split("\n");
   const highlighted = getCachedHighlightedCodeLines(code, lang);
   const lineCount = rawLines.length;
-  const gutterWidth = String(lineCount).length;
-  const frame = codeBlockFrame(useAsciiBorders);
-  const frameWidth = Math.max(8, wrapWidth - 1);
-  const codeWrapWidth = Math.max(8, frameWidth - gutterWidth - 5);
+  const gutterWidth = Math.max(2, String(lineCount).length);
+  const codeWrapWidth = Math.max(8, wrapWidth - gutterWidth - 5);
   const borderColor = theme.dim ?? theme.muted;
+  const gutterSep = useAsciiBorders ? "|" : "│";
+  const headerText = codeBlockHeader(lang, lineCount, wrapWidth);
+
   return (
     <Box key={blockKey} flexDirection="column" marginLeft={1} marginY={1}>
-      <Text color={borderColor} dimColor={dim}>
-        {codeBlockTopLine(frame, frameWidth, codeBlockHeader(lang, frameWidth - 4))}
-      </Text>
+      <Box flexDirection="row" marginBottom={0}>
+        <Text color={theme.subtle ?? theme.muted} dimColor={dim} bold>
+          {headerText}
+        </Text>
+      </Box>
       {rawLines.map((line, lineIndex) => {
         const num = String(lineIndex + 1).padStart(gutterWidth, " ");
         return (
           <Box key={`${blockKey}-line-${lineIndex}-${line}`} flexDirection="row">
             <Text color={borderColor} dimColor={dim}>
-              {`${frame.vertical} ${num} ${frame.gutter} `}
+              {`${num} ${gutterSep} `}
             </Text>
             <CodeLine
               line={line}
@@ -725,9 +729,6 @@ function renderCodeBlock({
           </Box>
         );
       })}
-      <Text color={borderColor} dimColor={dim}>
-        {codeBlockBottomLine(frame, frameWidth)}
-      </Text>
     </Box>
   );
 }
@@ -821,7 +822,9 @@ function renderToken({
                 ? item.checked
                   ? "☑"
                   : "☐"
-                : "-";
+                : useAsciiBorders
+                  ? "-"
+                  : "•";
             return (
               <Box key={`${keyPrefix}-item-${index}`} flexDirection="row">
                 <Text color={dim ? theme.dim : theme.muted} dimColor={dim}>
@@ -1229,16 +1232,22 @@ function renderStreamingInlineMarkdown(
   tone: MessageMarkdownProps["tone"],
   wrapWidth: number,
 ): React.ReactNode[] {
-  return text.split("\n").map((line, i) => (
-    <InlineRow
-      key={`streaming-inline-${i}-${line}`}
-      value={line.length === 0 ? " " : line}
-      theme={theme}
-      dim={dim}
-      tone={tone}
-      wrapWidth={wrapWidth}
-    />
-  ));
+  const lines = text.split("\n");
+  const total = lines.length;
+  return lines.map((line, i) => {
+    const isLast = i === total - 1;
+    const value = line.length === 0 ? (isLast ? "▋" : " ") : isLast ? `${line}▋` : line;
+    return (
+      <InlineRow
+        key={`streaming-inline-${i}-${line}`}
+        value={value}
+        theme={theme}
+        dim={dim}
+        tone={tone}
+        wrapWidth={wrapWidth}
+      />
+    );
+  });
 }
 
 export function findOpenStreamingCodeFence(
