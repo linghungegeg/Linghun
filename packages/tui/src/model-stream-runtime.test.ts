@@ -7388,6 +7388,28 @@ describe("final answer gate aggregation", () => {
     expect(context.lastFullOutput).toBe(cleaned);
   });
 
+  it("keeps raw final-answer deltas off the preview sink until final commit", async () => {
+    const { context } = await makeSendMessageContext();
+    const blocks: Parameters<typeof createShellBlockOutputForTest>[1] = [];
+    const output = createShellBlockOutputForTest(context, blocks);
+    const appendPreview = vi.spyOn(output, "appendAssistantDelta");
+    const gateway = gatewayByTurn(
+      [
+        [
+          { type: "assistant_text_delta", text: "这是尚未通过最终事实校验的模型草稿。" },
+          { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" },
+        ],
+      ],
+      { count: 0 },
+    );
+
+    await __testSendMessage("给出最终回答", context, gateway, output);
+
+    expect(appendPreview).not.toHaveBeenCalled();
+    expect(context.streamingAssistant).toBeUndefined();
+    expect(blocks.some((block) => block.messageKind === "assistant_text")).toBe(true);
+  });
+
   it("sanitizes standalone final no-tools output at the final outlet", async () => {
     const { context } = await makeSendMessageContext();
     const output = new MemoryOutput();

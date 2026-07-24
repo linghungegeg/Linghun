@@ -238,7 +238,6 @@ import {
   discardAssistantBlock,
   endAssistantStream,
   replaceAssistantBlockContent,
-  writeAssistantDelta,
   writeDiagnosticLine,
   writeErrorLine,
 } from "./tui-output-surface.js";
@@ -305,8 +304,6 @@ export type FinalGateEvidenceGapActionPlan = {
   };
 };
 
-const ASSISTANT_PREVIEW_FLUSH_MIN_CHARS = 16;
-const ASSISTANT_PREVIEW_FLUSH_MAX_INTERVAL_MS = 24;
 const MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES = 0;
 const MAX_FINAL_GATE_CONTRACT_RETRY_ROUNDS = 2;
 const MAIN_CHAIN_VISIBLE_CLAIM_INFERENCE = "none" satisfies NonNullable<
@@ -4292,8 +4289,8 @@ export async function sendMessage(
   if (await stopStaleRequest()) return;
   // 当 output 是 ShellBlockOutput（Ink task shell）时，每轮 request 用一个稳定的
   // streaming block id，让 assistant_text_delta 累计写入同一条 keep:true block，
-  // 避免被 _write 的 ephemeral splice 淘汰为最后一片 chunk。plain TUI / 测试
-  // MemoryOutput 上没有 beginAssistantStream，writeAssistantDelta 会回退到 write。
+  // 避免被 _write 的 ephemeral splice 淘汰为最后一片 chunk。最终文本只会在
+  // final gate 后 replace 到该 block；plain TUI / 测试则走最终 write 路径。
   beginAssistantStream(output, assistantStreamBlockId, { holdStableCommit: true });
   assistantStreamStarted = true;
   const perfEvents: string[] = [];
@@ -4561,8 +4558,6 @@ export async function sendMessage(
       }
       const toolCalls: ModelToolCall[] = [];
       let roundAssistantText = "";
-      let pendingAssistantPreviewText = "";
-      let lastAssistantPreviewFlushAt = 0;
       let textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
       let roundChunkCount = 0;
       let roundHadUsage = false;
@@ -4693,8 +4688,6 @@ export async function sendMessage(
         assistantText = committedIntermediateAssistantText;
         roundAssistantText = "";
         runtimeBoundaryFinalized = false;
-        pendingAssistantPreviewText = "";
-        lastAssistantPreviewFlushAt = 0;
         textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
       };
       let providerAttemptGeneration = 0;
@@ -4767,16 +4760,6 @@ export async function sendMessage(
             visibleText,
           );
           roundAssistantText += visibleText;
-          pendingAssistantPreviewText += visibleText;
-          if (shouldFlushAssistantPreview(pendingAssistantPreviewText, lastAssistantPreviewFlushAt)) {
-            const result = flushAssistantPreviewDelta(
-              output,
-              assistantStreamBlockId,
-              pendingAssistantPreviewText,
-            );
-            pendingAssistantPreviewText = result.text;
-            if (result.flushed) lastAssistantPreviewFlushAt = Date.now();
-          }
           continue;
         }
         if (event.type === "tool_use") {
@@ -4796,14 +4779,6 @@ export async function sendMessage(
             visibleText,
           );
           roundAssistantText += visibleText;
-          pendingAssistantPreviewText += visibleText;
-          const result = flushAssistantPreviewDelta(
-            output,
-            assistantStreamBlockId,
-            pendingAssistantPreviewText,
-          );
-          pendingAssistantPreviewText = result.text;
-          if (result.flushed) lastAssistantPreviewFlushAt = Date.now();
           clearRequestActivity(context, { kind: "foreground", requestTurnId });
           const toolCall = { id: event.id, name: event.name, input: event.input };
           toolCalls.push(toolCall);
@@ -5047,16 +5022,6 @@ export async function sendMessage(
         finalVisibleText,
       );
       roundAssistantText += finalVisibleText;
-      pendingAssistantPreviewText += finalVisibleText;
-      if (pendingAssistantPreviewText) {
-        const result = flushAssistantPreviewDelta(
-          output,
-          assistantStreamBlockId,
-          pendingAssistantPreviewText,
-        );
-        pendingAssistantPreviewText = result.text;
-        if (result.flushed) lastAssistantPreviewFlushAt = Date.now();
-      }
       if (earlyToolExecution && earlyToolContinuation) {
         earlyToolBatchResult = await earlyToolExecution;
         finalGapProgressState = earlyToolContinuation.finalGapProgressState;
@@ -6125,30 +6090,6 @@ function detectShellFamily(
   if (shell.includes("zsh")) return "zsh";
   if (shell.includes("/sh") || shell.endsWith(" sh")) return "sh";
   return process.platform === "win32" ? "powershell" : "unknown";
-}
-
-function writeAssistantPreviewDelta(output: Writable, id: string, text: string): void {
-  if (output instanceof ShellBlockOutput) {
-    writeAssistantDelta(output, id, text);
-  }
-}
-
-function shouldFlushAssistantPreview(text: string, lastFlushAt: number, now = Date.now()): boolean {
-  return (
-    text.length >= ASSISTANT_PREVIEW_FLUSH_MIN_CHARS ||
-    text.includes("\n") ||
-    now - lastFlushAt >= ASSISTANT_PREVIEW_FLUSH_MAX_INTERVAL_MS
-  );
-}
-
-function flushAssistantPreviewDelta(
-  output: Writable,
-  id: string,
-  text: string,
-): { text: string; flushed: boolean } {
-  if (!text) return { text, flushed: false };
-  writeAssistantPreviewDelta(output, id, text);
-  return { text: "", flushed: true };
 }
 
 function writeFinalAssistantText(output: Writable, text: string): void {
@@ -7543,8 +7484,6 @@ export async function continueModelAfterToolResults(
       }
       const toolCalls: ModelToolCall[] = [];
       let roundAssistantText = "";
-      let pendingAssistantPreviewText = "";
-      let lastAssistantPreviewFlushAt = 0;
       let roundChunkCount = 0;
       let roundHadUsage = false;
       let pendingRoundUsage: ModelUsage | undefined;
@@ -7649,8 +7588,6 @@ export async function continueModelAfterToolResults(
         assistantText = committedIntermediateAssistantText;
         roundAssistantText = "";
         runtimeBoundaryFinalized = false;
-        pendingAssistantPreviewText = "";
-        lastAssistantPreviewFlushAt = 0;
         textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
       };
       let providerAttemptGeneration = 0;
@@ -7736,16 +7673,6 @@ export async function continueModelAfterToolResults(
             visibleText,
           );
           roundAssistantText += visibleText;
-          pendingAssistantPreviewText += visibleText;
-          if (shouldFlushAssistantPreview(pendingAssistantPreviewText, lastAssistantPreviewFlushAt)) {
-            const result = flushAssistantPreviewDelta(
-              output,
-              assistantStreamBlockId,
-              pendingAssistantPreviewText,
-            );
-            pendingAssistantPreviewText = result.text;
-            if (result.flushed) lastAssistantPreviewFlushAt = Date.now();
-          }
           continue;
         }
         if (event.type === "tool_use") {
@@ -7765,14 +7692,6 @@ export async function continueModelAfterToolResults(
             visibleText,
           );
           roundAssistantText += visibleText;
-          pendingAssistantPreviewText += visibleText;
-          const result = flushAssistantPreviewDelta(
-            output,
-            assistantStreamBlockId,
-            pendingAssistantPreviewText,
-          );
-          pendingAssistantPreviewText = result.text;
-          if (result.flushed) lastAssistantPreviewFlushAt = Date.now();
           clearRequestActivity(context);
           const toolCall = { id: event.id, name: event.name, input: event.input };
           pendingContinuationToolUses.push(toolCall);
@@ -8002,16 +7921,6 @@ export async function continueModelAfterToolResults(
         finalVisibleText,
       );
       roundAssistantText += finalVisibleText;
-      pendingAssistantPreviewText += finalVisibleText;
-      if (pendingAssistantPreviewText) {
-        const result = flushAssistantPreviewDelta(
-          output,
-          assistantStreamBlockId,
-          pendingAssistantPreviewText,
-        );
-        pendingAssistantPreviewText = result.text;
-        if (result.flushed) lastAssistantPreviewFlushAt = Date.now();
-      }
       if (earlyToolExecution && earlyToolContinuation) {
         earlyToolBatchResult = await earlyToolExecution;
         finalGapProgressState = earlyToolContinuation.finalGapProgressState;
