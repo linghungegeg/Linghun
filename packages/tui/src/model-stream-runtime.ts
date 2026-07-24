@@ -119,11 +119,13 @@ import {
 } from "./model-loop-runtime.js";
 import type {
   FinalAnswerClaimEvaluationOptions,
+  FinalAnswerClaimMatch,
   FinalAnswerClaimVerdict,
   FinalAnswerExtendedVerdict,
 } from "./model-loop-runtime.js";
 import {
   evaluateFinalAnswerClaims,
+  extractStructuredFinalAnswerClaims,
   hasStructuredFinalAnswerClaimContract,
   isEvidenceStaleForClaim,
   stripStructuredFinalAnswerClaims,
@@ -418,32 +420,6 @@ function shouldRequireStructuredFinalAnswerClaimContract(context: TuiContext): b
 
 function shouldRunExtendedFinalAnswerGate(context: Pick<TuiContext, "lastMetaSchedulerDecision">): boolean {
   return context.lastMetaSchedulerDecision?.shouldRunFinalAnswerGate === true;
-}
-
-function hasReadonlyAuditBoundaryContext(text: string): boolean {
-  return /(?:只读|审计|检查|核对|覆盖|源码|代码片段|读取|读到|audit|review|inspect(?:ion)?|check(?:ed)?|coverage|source\s+(?:read|inspection|review))/iu.test(
-    text,
-  );
-}
-
-function hasExplicitEngineeringResultClaim(text: string): boolean {
-  return text.split(/[\r\n。！？!?；;，,]+/u).some(
-    (clause) => {
-      const negated = /(?:未|没有|无|不|不要|别|禁止|未运行|没有运行|不运行|did\s+not|didn't|not\s+|no\s+|without\s+(?:running|modifying|editing|writing))/iu.test(
-        clause,
-      );
-      return !negated &&
-        /(?:修复|修改|改动|实现|写入|创建|删除|提交|发布|生成|产物存在|测试通过|验证通过|构建通过|已通过|fixed|repaired|modified|implemented|written|created|deleted|committed|published|generated|artifact exists|tests?\s+passed|verified|build\s+passed)/iu.test(
-          clause,
-        ) &&
-        !(
-        hasReadonlyAuditBoundaryContext(clause) &&
-        /(?:示例|例子|正则|关键词|claim|声明|误判|误触|扫描|讨论|提到|提及|覆盖|链路|未运行|没有运行|不运行|example|regex|keyword|false positive|fallback|did not run|no tests? (?:ran|run))/iu.test(
-          clause,
-        )
-      );
-    },
-  );
 }
 
 function isFallbackRequiredToolResult(result: Pick<ModelToolExecutionResult, "data">): boolean {
@@ -1401,7 +1377,11 @@ export function evaluateAggregatedFinalAnswerGate(
   const extended = runExtendedGate
     ? runArchitectureAndCompletenessFinalGate(context, assistantText, scopedEvidence)
     : { status: "passed" as const };
-  const engineeringVerdict = evaluateEngineeringFinalBoundary(context, assistantText, scopedEvidence);
+  const engineeringVerdict = evaluateEngineeringFinalBoundary(
+    context,
+    extractStructuredFinalAnswerClaims(assistantText),
+    scopedEvidence,
+  );
   const blockedWorkflowClaim =
     context.lastMetaSchedulerDecision?.shouldStopForBlockedRuntime === true &&
     claimVerdict.matchedClaims.some((claim) => claim.kind === "workflow_status_claim");
@@ -2330,34 +2310,45 @@ export function __testSetFinalGateContinuationBridgeHint(
 
 function evaluateEngineeringFinalBoundary(
   context: TuiContext,
-  assistantText: string,
+  claims: FinalAnswerClaimMatch[],
   evidence: TuiContext["evidence"] = context.evidence,
 ): { status: "passed" } | { status: "needs_disclaimer"; unsupportedKinds: string[]; message: string } {
   const signal = context.lastMetaSchedulerDecision?.policyDecision.engineeringSignal;
   if (!signal) return { status: "passed" };
-  const currentConstraints = currentRequestUserActionConstraints(context);
-  const readonlyRequest = Boolean(currentConstraints && hasReadOnlyUserConstraint(currentConstraints));
-  const explicitEngineeringResult = hasExplicitEngineeringResultClaim(assistantText);
+  const hasResultClaim = claims.some((claim) =>
+    [
+      "completion_claim",
+      "test_claim",
+      "file_change_claim",
+      "verification_claim",
+      "completion_pass",
+      "action_executed",
+    ].includes(claim.kind)
+  );
+  if (!hasResultClaim) return { status: "passed" };
+  const hasArtifactResultClaim = claims.some((claim) =>
+    ["completion_claim", "file_change_claim", "completion_pass", "action_executed"].includes(
+      claim.kind,
+    )
+  );
+  const hasVerificationResultClaim = claims.some((claim) =>
+    ["test_claim", "verification_claim", "completion_pass"].includes(claim.kind)
+  );
   if (
-    readonlyRequest &&
-    hasReadonlyAuditBoundaryContext(assistantText) &&
-    !explicitEngineeringResult
+    signal.failureCategory === "missing_artifact" &&
+    hasArtifactResultClaim &&
+    !hasArtifactEvidence(context, evidence)
   ) {
-    return { status: "passed" };
-  }
-  const highRiskFinal =
-    /(?:已完成|已修复|已生成|产物存在|测试通过|全部通过|验证通过|pass(?:ed)?|completed|fixed|generated|verified|tests? passed)/iu.test(
-      assistantText,
-    );
-  if (!highRiskFinal && !signal.failureCategory) return { status: "passed" };
-  if (signal.failureCategory === "missing_artifact" && !hasArtifactEvidence(context, evidence)) {
     return {
       status: "needs_disclaimer",
       unsupportedKinds: ["engineering_missing_artifact"],
       message: signal.finalBoundaryHint ?? "missing artifact is not verified",
     };
   }
-  if (signal.failureCategory === "test_timeout" || signal.failureCategory === "verifier_timeout") {
+  if (
+    hasResultClaim &&
+    (signal.failureCategory === "test_timeout" || signal.failureCategory === "verifier_timeout")
+  ) {
     return {
       status: "needs_disclaimer",
       unsupportedKinds: ["engineering_test_timeout"],
@@ -2372,7 +2363,11 @@ function evaluateEngineeringFinalBoundary(
       message: signal.finalBoundaryHint ?? "provider output was interrupted",
     };
   }
-  if (signal.profile === "binary_or_artifact" && highRiskFinal && !hasArtifactEvidence(context, evidence)) {
+  if (
+    signal.profile === "binary_or_artifact" &&
+    hasArtifactResultClaim &&
+    !hasArtifactEvidence(context, evidence)
+  ) {
     return {
       status: "needs_disclaimer",
       unsupportedKinds: ["engineering_artifact_unverified"],
@@ -2381,7 +2376,7 @@ function evaluateEngineeringFinalBoundary(
   }
   if (
     (signal.profile === "swe_python" || signal.profile === "large_python_project") &&
-    /\b(?:all|full|entire)\s+(?:tests?|suite)\s+pass(?:ed)?|全部测试|所有测试/iu.test(assistantText) &&
+    hasVerificationResultClaim &&
     !hasFullVerificationEvidence(context, evidence)
   ) {
     return {
@@ -2392,9 +2387,7 @@ function evaluateEngineeringFinalBoundary(
   }
   if (
     (signal.profile === "qemu_or_service" || signal.profile === "security_or_network") &&
-    /(?:service|server|port|health|daemon|服务|端口|健康检查).{0,80}(?:verified|pass(?:ed)?|正常|通过)/iu.test(
-      assistantText,
-    ) &&
+    hasVerificationResultClaim &&
     !hasServiceVerificationEvidence({ evidence })
   ) {
     return {

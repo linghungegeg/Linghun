@@ -5391,6 +5391,60 @@ describe("final answer gate aggregation", () => {
     );
 
     expect(result.status).toBe("passed");
+
+    const neutralResult = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      "当前进度仅覆盖 final gate、verification evidence 和源码证据链路；本轮没有运行测试。",
+      true,
+      { visibleClaimInference: "result_only" },
+    );
+
+    expect(neutralResult).toEqual(result);
+  });
+
+  it("uses structured result claims, not final wording, for timeout boundaries", () => {
+    const context = {
+      ...makeGateContext(),
+      evidence: [makeEvidence({ supportsClaims: ["verification_passed"] })],
+      lastMetaSchedulerDecision: {
+        policyDecision: {
+          engineeringSignal: {
+            profile: "generic",
+            strategyHint: "source-first",
+            artifactTargets: [],
+            failureCategory: "test_timeout",
+            finalBoundaryHint: "verification timed out",
+          },
+        },
+      },
+    };
+    const claims = [{ kind: "completion_claim", phrase: "completed" }];
+    const auditVerdict = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      withClaims("只读审计报告已整理。", claims),
+      false,
+      { visibleClaimInference: "none" },
+    );
+    const neutralVerdict = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      withClaims("当前结果已整理。", claims),
+      false,
+      { visibleClaimInference: "none" },
+    );
+    const plainTextVerdict = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      "全部测试通过，当前服务健康。",
+      false,
+      { visibleClaimInference: "none" },
+    );
+
+    expect(auditVerdict).toMatchObject({
+      status: "needs_disclaimer",
+    });
+    if (auditVerdict.status !== "needs_disclaimer") return;
+    expect(auditVerdict.unsupportedKinds).toContain("engineering_test_timeout");
+    expect(neutralVerdict).toEqual(auditVerdict);
+    expect(plainTextVerdict.status).toBe("passed");
   });
 
   it("gates the same structured claim contract regardless of readonly audit wording", () => {
@@ -6924,6 +6978,7 @@ describe("final answer gate aggregation", () => {
     const activeFailure = evaluateAggregatedFinalAnswerGate(
       {
         ...context,
+        evidence: [makeEvidence({ supportsClaims: ["verification_passed"] })],
         lastProviderFailure: {
           code: "PROVIDER_STREAM_ERROR",
           kind: "transit",
@@ -6935,7 +6990,9 @@ describe("final answer gate aggregation", () => {
           createdAt: new Date().toISOString(),
         },
       } as never,
-      "已完成并验证通过。",
+      withClaims("当前结论已整理。", [
+        { kind: "verification_claim", phrase: "verification completed" },
+      ]),
       false,
     );
     expect(activeFailure.status).toBe("needs_disclaimer");
@@ -6943,7 +7000,7 @@ describe("final answer gate aggregation", () => {
     expect(activeFailure.unsupportedKinds).toContain("engineering_provider_error");
   });
 
-  it("accepts binary preflight artifact evidence for the requested target", () => {
+  it("uses current-owner artifact evidence for structured artifact-result claims", () => {
     const context = {
       ...makeGateContext(),
       projectPath: "C:/repo",
@@ -6959,23 +7016,82 @@ describe("final answer gate aggregation", () => {
       },
       evidence: [
         makeEvidence({
-          data: { binaryPreflight: { path: "dist/app.bin" } },
+          supportsClaims: ["file_written"],
           ownerScope: {
-            ownerSessionId: "session-binary",
-            requestTurnId: "request-binary",
-            cwd: "C:/repo",
-          },
+          ownerSessionId: "session-binary",
+          requestTurnId: "request-binary",
+          cwd: "C:/repo",
+          targets: ["dist/app.bin"],
+        },
         }),
       ],
     };
+    const claims = [{ kind: "file_change_claim", phrase: "dist/app.bin created" }];
 
+    const auditVerdict = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      withClaims("只读审计结论已整理。", claims),
+      false,
+      { visibleClaimInference: "none" },
+    );
+    const neutralVerdict = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      withClaims("当前结论已整理。", claims),
+      false,
+      { visibleClaimInference: "none" },
+    );
+
+    expect(auditVerdict).toMatchObject({
+      status: "needs_disclaimer",
+      unsupportedKinds: ["engineering_artifact_unverified"],
+    });
+    expect(neutralVerdict).toEqual(auditVerdict);
+
+    context.evidence[0]!.data = { artifactHint: { path: "dist/app.bin", exists: true } };
     const result = evaluateAggregatedFinalAnswerGate(
       context as never,
-      "dist/app.bin 产物存在。",
+      withClaims("任意展示文字。", claims),
       false,
+      { visibleClaimInference: "none" },
     );
 
     expect(result.status).toBe("passed");
+  });
+
+  it.each([
+    ["large_python_project", "engineering_full_suite_unverified"],
+    ["qemu_or_service", "engineering_service_unverified"],
+  ] as const)("uses structured verification claims for the %s profile boundary", (profile, kind) => {
+    const context = {
+      ...makeGateContext(),
+      evidence: [makeEvidence({ supportsClaims: ["verification_passed"] })],
+      lastMetaSchedulerDecision: {
+        policyDecision: {
+          engineeringSignal: { profile, strategyHint: "focused", artifactTargets: [] },
+        },
+      },
+    };
+
+    const plainTextVerdict = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      "全部测试通过，服务健康。",
+      false,
+      { visibleClaimInference: "none" },
+    );
+    const structuredVerdict = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      withClaims("当前结论已整理。", [
+        { kind: "verification_claim", phrase: "verification completed" },
+      ]),
+      false,
+      { visibleClaimInference: "none" },
+    );
+
+    expect(plainTextVerdict.status).toBe("passed");
+    expect(structuredVerdict).toMatchObject({
+      status: "needs_disclaimer",
+      unsupportedKinds: [kind],
+    });
   });
 
   it("does not turn an ordinary code-fact question into a verification retry", async () => {

@@ -31593,7 +31593,13 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
       engineeringFailureCategory: "missing_artifact",
     });
 
-    const result = evaluateAggregatedFinalAnswerGate(context, "已完成，/app/out.txt 已生成。");
+    const plainResult = evaluateAggregatedFinalAnswerGate(context, "已完成，/app/out.txt 已生成。");
+    expect(plainResult.status).toBe("passed");
+
+    const result = evaluateAggregatedFinalAnswerGate(
+      context,
+      '已完成，/app/out.txt 已生成。 LinghunFinalAnswerClaims: {"claims":[{"kind":"completion_claim","phrase":"已完成"}]}',
+    );
 
     expect(result.status).toBe("needs_disclaimer");
     if (result.status === "needs_disclaimer") {
@@ -31615,16 +31621,26 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
       backgroundTasks: [],
       engineeringProfile: "binary_or_artifact",
     });
+    const requestTurnId = "policy-artifact-bound";
+    context.currentRequestTurnId = requestTurnId;
     context.evidence.push({
       id: "e-write-other",
       kind: "command_output",
       summary: "Write created docs/report.md",
       source: "Write",
-      supportsClaims: ["file_change_claim"],
+      supportsClaims: ["file_written"],
+      ownerScope: {
+        ownerSessionId: session.id,
+        requestTurnId,
+        cwd: project,
+        targets: ["docs/report.md"],
+      },
       createdAt: new Date().toISOString(),
     });
 
-    const unrelated = evaluateAggregatedFinalAnswerGate(context, "/app/out.txt 产物存在。");
+    const artifactAnswer =
+      '/app/out.txt 产物存在。 LinghunFinalAnswerClaims: {"claims":[{"kind":"file_change_claim","phrase":"/app/out.txt written"}]}';
+    const unrelated = evaluateAggregatedFinalAnswerGate(context, artifactAnswer);
     expect(unrelated.status).toBe("needs_disclaimer");
 
     context.evidence.push({
@@ -31633,11 +31649,17 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
       summary: "Write completed",
       source: "Write",
       outputPath: "/app/out.txt",
-      supportsClaims: ["file_change_claim"],
+      supportsClaims: ["file_written"],
       data: { artifactHint: { path: "/app/out.txt", exists: true } },
+      ownerScope: {
+        ownerSessionId: session.id,
+        requestTurnId,
+        cwd: project,
+        targets: ["/app/out.txt"],
+      },
       createdAt: new Date().toISOString(),
     });
-    const matched = evaluateAggregatedFinalAnswerGate(context, "/app/out.txt 产物存在。");
+    const matched = evaluateAggregatedFinalAnswerGate(context, artifactAnswer);
     expect(matched.status).toBe("passed");
   });
 
@@ -31655,17 +31677,27 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
       backgroundTasks: [],
       engineeringProfile: "binary_or_artifact",
     });
+    const requestTurnId = "policy-artifact-request-target";
+    context.currentRequestTurnId = requestTurnId;
     context.evidence.push({
       id: "e-write-other",
       kind: "command_output",
       summary: "Write created non-empty artifact docs/report.md",
       source: "Write",
       outputPath: "docs/report.md",
-      supportsClaims: ["file_change_claim"],
+      supportsClaims: ["file_written"],
+      ownerScope: {
+        ownerSessionId: session.id,
+        requestTurnId,
+        cwd: project,
+        targets: ["docs/report.md"],
+      },
       createdAt: new Date().toISOString(),
     });
 
-    const unrelated = evaluateAggregatedFinalAnswerGate(context, "请求的产物存在。");
+    const artifactAnswer =
+      '请求的产物存在。 LinghunFinalAnswerClaims: {"claims":[{"kind":"file_change_claim","phrase":"output written"}]}';
+    const unrelated = evaluateAggregatedFinalAnswerGate(context, artifactAnswer);
     expect(unrelated.status).toBe("needs_disclaimer");
 
     context.evidence.push({
@@ -31674,11 +31706,17 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
       summary: "Write completed",
       source: "Write",
       outputPath: "/app/out.txt",
-      supportsClaims: ["file_change_claim"],
+      supportsClaims: ["file_written"],
       data: { artifactHint: { path: "/app/out.txt", exists: true } },
+      ownerScope: {
+        ownerSessionId: session.id,
+        requestTurnId,
+        cwd: project,
+        targets: ["/app/out.txt"],
+      },
       createdAt: new Date().toISOString(),
     });
-    const matched = evaluateAggregatedFinalAnswerGate(context, "请求的产物存在。");
+    const matched = evaluateAggregatedFinalAnswerGate(context, artifactAnswer);
     expect(matched.status).toBe("passed");
   });
 
@@ -31698,7 +31736,13 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
       engineeringFailureCategory: "test_timeout",
     });
 
-    const timeout = evaluateAggregatedFinalAnswerGate(context, "全部测试通过，已经完成。");
+    const plainTimeout = evaluateAggregatedFinalAnswerGate(context, "全部测试通过，已经完成。");
+    expect(plainTimeout.status).toBe("passed");
+
+    const timeout = evaluateAggregatedFinalAnswerGate(
+      context,
+      '全部测试通过，已经完成。 LinghunFinalAnswerClaims: {"claims":[{"kind":"completion_claim","phrase":"已经完成"}]}',
+    );
     expect(timeout.status).toBe("needs_disclaimer");
     if (timeout.status === "needs_disclaimer") {
       expect(timeout.unsupportedKinds).toContain("engineering_test_timeout");
@@ -31725,7 +31769,13 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
       evidenceId: "provider-failure",
       createdAt: new Date().toISOString(),
     };
-    const provider = evaluateAggregatedFinalAnswerGate(context, "已修复并验证通过。");
+    const plainProvider = evaluateAggregatedFinalAnswerGate(context, "已修复并验证通过。");
+    expect(plainProvider.status).toBe("passed");
+
+    const provider = evaluateAggregatedFinalAnswerGate(
+      context,
+      '已修复并验证通过。 LinghunFinalAnswerClaims: {"claims":[{"kind":"completion_claim","phrase":"已修复"}]}',
+    );
     expect(provider.status).toBe("needs_disclaimer");
     if (provider.status === "needs_disclaimer") {
       expect(provider.unsupportedKinds).toContain("engineering_provider_error");
@@ -31746,27 +31796,77 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
       backgroundTasks: [],
       engineeringProfile: "qemu_or_service",
     });
+    const requestTurnId = "policy-service-current";
+    context.currentRequestTurnId = requestTurnId;
     context.evidence.push({
       id: "e-service-generic",
       kind: "command_output",
       summary: "server service exists in config",
       source: "Read",
       supportsClaims: ["code_fact"],
+      ownerScope: {
+        ownerSessionId: session.id,
+        requestTurnId,
+        cwd: project,
+      },
       createdAt: new Date().toISOString(),
     });
 
-    const generic = evaluateAggregatedFinalAnswerGate(context, "服务端口已验证通过。");
+    const plain = evaluateAggregatedFinalAnswerGate(context, "服务端口已验证通过。");
+    expect(plain.status).toBe("passed");
+
+    const serviceAnswer =
+      '服务端口已验证通过。 LinghunFinalAnswerClaims: {"claims":[{"kind":"verification_claim","phrase":"service verification"}]}';
+    const generic = evaluateAggregatedFinalAnswerGate(context, serviceAnswer);
     expect(generic.status).toBe("needs_disclaimer");
 
     context.evidence.push({
-      id: "e-service-health",
+      id: "e-service-foreign",
+      kind: "command_output",
+      summary: "curl localhost:8080/health status 200 ok from a prior request",
+      source: "Bash",
+      supportsClaims: ["verification_passed"],
+      createdAt: new Date().toISOString(),
+      ownerScope: {
+        ownerSessionId: session.id,
+        requestTurnId: "policy-service-prior",
+        cwd: project,
+      },
+      data: {
+        verificationScope: {
+          requestTurnId: "policy-service-prior",
+          ownerSessionId: session.id,
+          cwd: project,
+          changedFiles: [],
+        },
+        serviceHint: { target: "127.0.0.1:8080", ready: true },
+      },
+    });
+    const foreignScope = evaluateAggregatedFinalAnswerGate(context, serviceAnswer);
+    expect(foreignScope.status).toBe("needs_disclaimer");
+
+    context.evidence.push({
+      id: "e-service-current-summary",
       kind: "command_output",
       summary: "curl localhost:8080/health status 200 ok",
       source: "Bash",
       supportsClaims: ["verification_passed"],
       createdAt: new Date().toISOString(),
+      ownerScope: {
+        ownerSessionId: session.id,
+        requestTurnId,
+        cwd: project,
+      },
+      data: {
+        verificationScope: {
+          requestTurnId,
+          ownerSessionId: session.id,
+          cwd: project,
+          changedFiles: [],
+        },
+      },
     });
-    const summaryOnly = evaluateAggregatedFinalAnswerGate(context, "服务端口已验证通过。");
+    const summaryOnly = evaluateAggregatedFinalAnswerGate(context, serviceAnswer);
     expect(summaryOnly.status).toBe("needs_disclaimer");
 
     context.evidence.push({
@@ -31776,9 +31876,22 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
       source: "Bash",
       supportsClaims: ["verification_passed"],
       createdAt: new Date().toISOString(),
-      data: { serviceHint: { target: "127.0.0.1:8080", ready: true } },
+      ownerScope: {
+        ownerSessionId: session.id,
+        requestTurnId,
+        cwd: project,
+      },
+      data: {
+        verificationScope: {
+          requestTurnId,
+          ownerSessionId: session.id,
+          cwd: project,
+          changedFiles: [],
+        },
+        serviceHint: { target: "127.0.0.1:8080", ready: true },
+      },
     });
-    const verified = evaluateAggregatedFinalAnswerGate(context, "服务端口已验证通过。");
+    const verified = evaluateAggregatedFinalAnswerGate(context, serviceAnswer);
     expect(verified.status).toBe("passed");
   });
 
