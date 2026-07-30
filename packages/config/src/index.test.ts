@@ -342,6 +342,25 @@ describe("config directories", () => {
     );
   });
 
+  it("registers MiniMax as a first-class OpenAI-compatible provider and resolves its default model", () => {
+    const minimax = defaultConfig.providers.minimax;
+
+    expect(minimax?.type).toBe("openai-compatible");
+    expect(minimax?.baseUrl).toBe("https://api.minimax.io/v1");
+    expect(minimax?.model).toBe("MiniMax-M3");
+    expect(minimax?.endpointProfile).toBe("chat_completions");
+
+    expect(resolveModelSelection("MiniMax-M3", defaultConfig.providers)).toMatchObject({
+      model: "MiniMax-M3",
+      provider: "minimax",
+      legacyAlias: false,
+    });
+    expect(resolveModelSelection("minimax:MiniMax-M3", defaultConfig.providers)).toMatchObject({
+      model: "MiniMax-M3",
+      provider: "minimax",
+    });
+  });
+
   it("requires provider qualification when model names collide", () => {
     const providers = {
       ...defaultConfig.providers,
