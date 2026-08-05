@@ -22,6 +22,21 @@ export function isDeepSeekApiModel(model: string): model is DeepSeekApiModel {
   return (DEEPSEEK_API_MODELS as readonly string[]).includes(model);
 }
 
+// MiniMax exposes OpenAI-compatible and Anthropic-compatible endpoints, each with a
+// global (minimax.io) and a mainland-China (minimaxi.com) host. A provider keeps a single
+// active base URL, so these named constants back the config defaults and env template.
+export const DEFAULT_MINIMAX_BASE_URL = "https://api.minimax.io/v1";
+export const DEFAULT_MINIMAX_ANTHROPIC_BASE_URL = "https://api.minimax.io/anthropic";
+export const DEFAULT_MINIMAX_CN_BASE_URL = "https://api.minimaxi.com/v1";
+export const DEFAULT_MINIMAX_CN_ANTHROPIC_BASE_URL = "https://api.minimaxi.com/anthropic";
+
+export const MINIMAX_API_MODELS = ["MiniMax-M3", "MiniMax-M2.7"] as const;
+export type MiniMaxApiModel = (typeof MINIMAX_API_MODELS)[number];
+
+export function isMiniMaxApiModel(model: string): model is MiniMaxApiModel {
+  return (MINIMAX_API_MODELS as readonly string[]).includes(model);
+}
+
 export type Language = "zh-CN" | "en-US";
 
 export type PermissionMode = "default" | "auto-review" | "plan" | "full-access";

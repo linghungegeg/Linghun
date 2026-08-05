@@ -524,9 +524,41 @@ export const deepSeekModels: ModelInfo[] = [
   },
 ];
 
+export const minimaxModels: ModelInfo[] = [
+  {
+    id: "MiniMax-M3",
+    displayName: "MiniMax M3",
+    providerId: "minimax",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 8_192,
+    supportsTools: true,
+    supportsVision: true,
+    supportsThinking: true,
+    supportsPromptCache: true,
+    inputPricePerMTok: 0.6,
+    outputPricePerMTok: 2.4,
+  },
+  {
+    id: "MiniMax-M2.7",
+    displayName: "MiniMax M2.7",
+    providerId: "minimax",
+    contextWindow: 204_800,
+    maxOutputTokens: 8_192,
+    supportsTools: true,
+    supportsVision: false,
+    supportsThinking: true,
+    supportsPromptCache: true,
+    inputPricePerMTok: 0.3,
+    outputPricePerMTok: 1.2,
+  },
+];
+
 export function findKnownModel(modelId: string): ModelInfo | undefined {
   const normalized = normalizeDeepSeekModelName(modelId);
-  return deepSeekModels.find((model) => model.id === normalized);
+  return (
+    deepSeekModels.find((model) => model.id === normalized) ??
+    minimaxModels.find((model) => model.id === normalized)
+  );
 }
 
 export class ModelGateway {

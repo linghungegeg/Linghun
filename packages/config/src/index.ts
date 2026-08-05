@@ -8,7 +8,9 @@ import {
   CODEBASE_MEMORY_ENV,
   DEEPSEEK_API_MODELS,
   DEFAULT_DEEPSEEK_BASE_URL,
+  DEFAULT_MINIMAX_BASE_URL,
   type Language,
+  MINIMAX_API_MODELS,
   type PermissionMode,
   canonicalPathForCompare,
   formatDiagnosticError,
@@ -506,6 +508,9 @@ const providerEnvKeys = new Set([
   "LINGHUN_DEEPSEEK_API_KEY",
   "LINGHUN_DEEPSEEK_MODEL",
   "LINGHUN_DEEPSEEK_ENDPOINT_PROFILE",
+  "LINGHUN_MINIMAX_BASE_URL",
+  "LINGHUN_MINIMAX_API_KEY",
+  "LINGHUN_MINIMAX_MODEL",
   "LINGHUN_GEMINI_BASE_URL",
   "LINGHUN_GEMINI_API_KEY",
   "LINGHUN_GEMINI_MODEL",
@@ -538,6 +543,13 @@ LINGHUN_OPENAI_INCLUDE_USAGE=false
 # LINGHUN_DEEPSEEK_MODEL=deepseek-chat
 # Optional: use anthropic_messages for DeepSeek Anthropic-compatible search.
 # LINGHUN_DEEPSEEK_ENDPOINT_PROFILE=anthropic_messages
+
+# Optional MiniMax provider (OpenAI-compatible; Anthropic-compatible also available).
+# Global hosts: https://api.minimax.io/v1 (OpenAI) / https://api.minimax.io/anthropic (Anthropic).
+# Mainland China hosts: https://api.minimaxi.com/v1 / https://api.minimaxi.com/anthropic.
+# LINGHUN_MINIMAX_BASE_URL=https://api.minimax.io/v1
+# LINGHUN_MINIMAX_API_KEY=
+# LINGHUN_MINIMAX_MODEL=MiniMax-M3
 
 # Optional Gemini native provider (chat-completions SSE + native web search).
 # LINGHUN_GEMINI_BASE_URL=https://api.example.com/v1
@@ -652,6 +664,14 @@ export const defaultConfig: LinghunConfig = {
       baseUrl: process.env.LINGHUN_DEEPSEEK_BASE_URL ?? DEFAULT_DEEPSEEK_BASE_URL,
       apiKey: process.env.LINGHUN_DEEPSEEK_API_KEY,
       model: defaultDeepSeekModel,
+    },
+    minimax: {
+      type: "openai-compatible",
+      baseUrl: process.env.LINGHUN_MINIMAX_BASE_URL ?? DEFAULT_MINIMAX_BASE_URL,
+      apiKey: process.env.LINGHUN_MINIMAX_API_KEY,
+      model: process.env.LINGHUN_MINIMAX_MODEL ?? MINIMAX_API_MODELS[0],
+      endpointProfile: "chat_completions",
+      compatibilityProfile: "strict_openai_compatible",
     },
     "openai-compatible": {
       type: "openai-compatible",

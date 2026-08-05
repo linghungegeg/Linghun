@@ -13,7 +13,9 @@ import {
   OpenAiCompatibleProvider,
   type Provider,
   deepSeekModels,
+  findKnownModel,
   joinBaseUrlAndEndpoint,
+  minimaxModels,
   normalizeProviderError,
   parseAnthropicMessagesStream,
   parseOpenAiStream,
@@ -199,6 +201,32 @@ describe("DeepSeek model capabilities", () => {
     });
 
     expect(request.model).toBe("deepseek-reasoner");
+  });
+});
+
+describe("MiniMax model capabilities", () => {
+  it("records MiniMax model context, pricing, modality, and thinking metadata", () => {
+    const m3 = minimaxModels.find((model) => model.id === "MiniMax-M3");
+    const m27 = minimaxModels.find((model) => model.id === "MiniMax-M2.7");
+
+    expect(m3?.providerId).toBe("minimax");
+    expect(m3?.contextWindow).toBe(1_000_000);
+    expect(m3?.inputPricePerMTok).toBe(0.6);
+    expect(m3?.outputPricePerMTok).toBe(2.4);
+    expect(m3?.supportsVision).toBe(true);
+    expect(m3?.supportsThinking).toBe(true);
+
+    expect(m27?.contextWindow).toBe(204_800);
+    expect(m27?.inputPricePerMTok).toBe(0.3);
+    expect(m27?.outputPricePerMTok).toBe(1.2);
+    expect(m27?.supportsVision).toBe(false);
+    expect(m27?.supportsThinking).toBe(true);
+  });
+
+  it("resolves MiniMax models through the shared known-model lookup", () => {
+    expect(findKnownModel("MiniMax-M3")?.displayName).toBe("MiniMax M3");
+    expect(findKnownModel("MiniMax-M2.7")?.displayName).toBe("MiniMax M2.7");
+    expect(findKnownModel("deepseek-chat")?.providerId).toBe("deepseek");
   });
 });
 
