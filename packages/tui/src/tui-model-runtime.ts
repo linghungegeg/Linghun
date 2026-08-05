@@ -260,19 +260,27 @@ function resolveFirstProviderModel(config: LinghunConfig): string {
   return "unknown";
 }
 
-export function createModelGateway(config: LinghunConfig): ModelGateway {
+export function createModelGateway(config: LinghunConfig, clientVersion?: string): ModelGateway {
+  const requestIdentity = clientVersion
+    ? { requestUserAgentVersion: clientVersion }
+    : {};
   return new ModelGateway(
     Object.entries(config.providers).map(([id, provider]) => {
       if (provider.type === "deepseek") {
-        return new DeepSeekProvider({ ...provider, id, displayName: "DeepSeek" });
+        return new DeepSeekProvider({ ...provider, id, displayName: "DeepSeek", ...requestIdentity });
       }
       if (provider.type === "gemini") {
-        return new GeminiProvider({ ...provider, id, displayName: "Gemini" });
+        return new GeminiProvider({ ...provider, id, displayName: "Gemini", ...requestIdentity });
       }
       if (provider.type === "grok") {
-        return new GrokProvider({ ...provider, id, displayName: "Grok" });
+        return new GrokProvider({ ...provider, id, displayName: "Grok", ...requestIdentity });
       }
-      return new OpenAiCompatibleProvider({ ...provider, id, displayName: "OpenAI compatible" });
+      return new OpenAiCompatibleProvider({
+        ...provider,
+        id,
+        displayName: "OpenAI compatible",
+        ...requestIdentity,
+      });
     }),
   );
 }

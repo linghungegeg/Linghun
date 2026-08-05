@@ -1677,6 +1677,7 @@ describe("OpenAI compatible provider", () => {
     const provider = new OpenAiCompatibleProvider({
       id: "openai-compatible",
       type: "openai-compatible",
+      requestUserAgentVersion: "0.1.51",
       baseUrl: privateBaseUrl,
       apiKey: "sk-test-openai-compatible-secret",
       model: "gpt-5.5",
@@ -1692,7 +1693,7 @@ describe("OpenAI compatible provider", () => {
     const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
     expect(init).toBeDefined();
     expect(init?.headers).toMatchObject({
-      "User-Agent": EXPECTED_REQUEST_USER_AGENT,
+      "User-Agent": `${LINGHUN_NAME}/0.1.51 (@linghun/${LINGHUN_CLI_NAME})`,
       "X-Title": LINGHUN_NAME,
       "X-OpenRouter-Title": LINGHUN_NAME,
     });

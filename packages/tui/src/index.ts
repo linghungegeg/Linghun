@@ -794,6 +794,7 @@ export type RunTuiOptions = {
   stdout?: Writable;
   stderr?: Writable;
   projectPath?: string;
+  clientVersion?: string;
   signal?: AbortSignal;
 };
 
@@ -821,6 +822,7 @@ export type RunHeadlessOptions = {
   deadlineMs?: number;
   deadlineAtMs?: number;
   bench?: HeadlessBenchOptions;
+  clientVersion?: string;
   onEvent?: (event: TranscriptEvent) => void;
   signal?: AbortSignal;
   // 桌面端双向审批接缝：当引擎在 headless run 中停在权限确认（decidePermission → "ask"，
@@ -1767,7 +1769,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       return 130;
     }
     if (options.signal?.aborted) return 130;
-    const gateway = createModelGateway(context.config);
+    const gateway = createModelGateway(context.config, options.clientVersion);
     if (shouldWarmProviderDnsForStreams(input, output)) {
       warmConfiguredProviderDns(context.config);
     }
@@ -1873,7 +1875,8 @@ export async function runHeadlessTask(options: RunHeadlessOptions): Promise<numb
     }
   }
   if (options.signal?.aborted) return 130;
-  const gateway = options.__testGateway ?? createModelGateway(context.config);
+  const gateway =
+    options.__testGateway ?? createModelGateway(context.config, options.clientVersion);
   const sendHeadlessMessage = options.__testSendMessage ?? sendMessage;
   context.modelGateway = gateway;
   attachRuntimeCallbacks(context);

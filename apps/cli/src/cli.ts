@@ -74,7 +74,7 @@ export async function runCli(argv: string[], signal?: AbortSignal): Promise<CliR
   if (!command) {
     configureCliBundledRoot();
     const { runTui } = await import("@linghun/tui");
-    const exitCode = await runTui({ signal });
+    const exitCode = await runTui({ signal, clientVersion: LINGHUN_CLI_VERSION });
     return { stdout: "", stderr: "", exitCode };
   }
 
@@ -446,6 +446,7 @@ async function runHeadlessCommand(argv: string[], signal?: AbortSignal): Promise
   const { runHeadlessTask } = await import("@linghun/tui");
   const exitCode = await runHeadlessTask({
     prompt,
+    clientVersion: LINGHUN_CLI_VERSION,
     mode: mode as "default" | "auto-review" | "plan" | "full-access",
     autoApprove: !argv.includes("--no-auto-approve"),
     ...(maxApprovals !== undefined ? { maxApprovals } : {}),

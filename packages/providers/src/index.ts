@@ -103,6 +103,7 @@ export type ProviderConfig = {
   id: string;
   type: "openai-compatible" | "deepseek" | "gemini" | "grok";
   displayName?: string;
+  requestUserAgentVersion?: string;
   baseUrl?: string;
   apiKey?: string;
   model: string;
@@ -481,11 +482,13 @@ const PROVIDER_STREAM_IDLE_TIMEOUT_MS = readPositiveIntEnv(
 );
 const PROVIDER_REQUEST_TIMEOUT_MS = readPositiveIntEnv("LINGHUN_PROVIDER_TIMEOUT_MS", 120_000);
 const LINGHUN_REQUEST_PACKAGE_NAME = `@linghun/${LINGHUN_CLI_NAME}`;
-const LINGHUN_REQUEST_IDENTITY_HEADERS = {
-  "User-Agent": `${LINGHUN_NAME}/${LINGHUN_VERSION} (${LINGHUN_REQUEST_PACKAGE_NAME})`,
-  "X-Title": LINGHUN_NAME,
-  "X-OpenRouter-Title": LINGHUN_NAME,
-};
+function createLinghunRequestIdentityHeaders(version?: string): Record<string, string> {
+  return {
+    "User-Agent": `${LINGHUN_NAME}/${version || LINGHUN_VERSION} (${LINGHUN_REQUEST_PACKAGE_NAME})`,
+    "X-Title": LINGHUN_NAME,
+    "X-OpenRouter-Title": LINGHUN_NAME,
+  };
+}
 
 type OpenAiToolCall = {
   id: string;
@@ -855,7 +858,7 @@ export class OpenAiCompatibleProvider implements Provider {
         const contextEditing = resolveAnthropicContextEditingDiagnostic(this.config, contract);
         const headers: Record<string, string> = {
           "content-type": "application/json",
-          ...LINGHUN_REQUEST_IDENTITY_HEADERS,
+          ...createLinghunRequestIdentityHeaders(this.config.requestUserAgentVersion),
           // Anthropic Messages 鉴权头：x-api-key + anthropic-version。
           // 部分中转网关沿用 OpenAI 风格 Authorization: Bearer，因此并发发送两套头，
           // Anthropic 官方接口忽略 Authorization，OpenAI 风格中转忽略 x-api-key/version。
@@ -976,7 +979,7 @@ export class OpenAiCompatibleProvider implements Provider {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          ...LINGHUN_REQUEST_IDENTITY_HEADERS,
+          ...createLinghunRequestIdentityHeaders(this.config.requestUserAgentVersion),
           authorization: `Bearer ${this.config.apiKey}`,
         },
         body: JSON.stringify(body),
@@ -1664,7 +1667,7 @@ function createProviderRequestHeaders(
   if (contract.endpointProfile === "anthropic_messages") {
     return {
       "content-type": "application/json",
-      ...LINGHUN_REQUEST_IDENTITY_HEADERS,
+      ...createLinghunRequestIdentityHeaders(config.requestUserAgentVersion),
       "x-api-key": config.apiKey ?? "",
       "anthropic-version": "2023-06-01",
       authorization: `Bearer ${config.apiKey ?? ""}`,
@@ -1672,7 +1675,7 @@ function createProviderRequestHeaders(
   }
   return {
     "content-type": "application/json",
-    ...LINGHUN_REQUEST_IDENTITY_HEADERS,
+    ...createLinghunRequestIdentityHeaders(config.requestUserAgentVersion),
     authorization: `Bearer ${config.apiKey}`,
   };
 }
