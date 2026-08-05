@@ -23,7 +23,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
-    "typecheck": "tsc -b tsconfig.json"
+    "typecheck": "tsc -b tsconfig.json",
+    "release:verify": "node scripts/verify-publish-packages.mjs"
   },
   "dependencies": {
     "@linghun/cli": "workspace:*"

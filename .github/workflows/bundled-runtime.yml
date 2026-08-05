@@ -11,6 +11,7 @@ on:
       - "prototypes/native-runner/**"
       - "prototypes/pre-engine/**"
       - "scripts/bundle-cli-binaries.mjs"
+      - "scripts/verify-publish-packages.mjs"
 
 jobs:
   native-runner:
@@ -289,6 +290,8 @@ jobs:
       - run: corepack pnpm --filter @linghun/tui build
       - run: corepack pnpm --filter @linghun/cli build
       - run: corepack pnpm --filter @linghun/cli typecheck
+      - name: Verify publishable package metadata
+        run: corepack pnpm release:verify
       - shell: bash
         run: |
           mkdir -p "$GITHUB_WORKSPACE/dist-pack"

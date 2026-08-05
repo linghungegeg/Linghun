@@ -52,6 +52,25 @@ corepack pnpm --filter @linghun/cli pack
 Bundled runtime files are prepared by `scripts/bundle-cli-binaries.mjs` during
 CLI prepack.
 
+Release safety rules:
+
+- `workspace:*` is allowed in source package manifests, but must never appear
+  in packed npm metadata.
+- Do not run `npm publish` from a workspace package directory. It can publish
+  `workspace:*` unchanged. Use `pnpm pack` or `pnpm publish` so workspace
+  ranges are resolved before publishing.
+- Before publishing any package, run `corepack pnpm release:verify`. It packs
+  every publishable workspace package and fails if the tarball metadata still
+  contains a `workspace:` reference or has a name/version mismatch.
+- Publish packages in dependency order, then install the new CLI version in a
+  fresh temporary npm prefix and run `linghun --version`. Do not rely on an
+  existing `node_modules` tree.
+- Published npm versions cannot be overwritten. If a bad version is already
+  public, bump the affected package and its dependents, update `pnpm-lock.yaml`,
+  and publish the corrected versions in dependency order.
+- Keep npm auth in an external userconfig or environment; never commit tokens
+  or local npmrc files.
+
 ## Public Documentation
 
 Public entry points:
