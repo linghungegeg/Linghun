@@ -1,6 +1,6 @@
 {
   "name": "@linghun/providers",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -21,6 +21,6 @@
   },
   "dependencies": {
     "@linghun/core": "0.1.8",
-    "@linghun/shared": "0.1.11"
+    "@linghun/shared": "0.1.12"
   }
 }

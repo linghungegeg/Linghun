@@ -1,6 +1,6 @@
 {
   "name": "@linghun/cli",
-  "version": "0.1.51",
+  "version": "0.1.52",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
@@ -29,10 +29,10 @@
     "@linghun/pre-engine-darwin-x64": "0.1.2"
   },
   "dependencies": {
-    "@linghun/config": "0.1.8",
+    "@linghun/config": "0.1.9",
     "@linghun/core": "0.1.8",
-    "@linghun/providers": "0.1.19",
-    "@linghun/shared": "0.1.11",
-    "@linghun/tui": "0.1.44"
+    "@linghun/providers": "0.1.20",
+    "@linghun/shared": "0.1.12",
+    "@linghun/tui": "0.1.45"
   }
 }

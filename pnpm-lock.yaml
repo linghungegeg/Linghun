@@ -31,20 +31,20 @@ importers:
   apps/cli:
     dependencies:
       '@linghun/config':
-        specifier: 0.1.8
-        version: 0.1.8
+        specifier: 0.1.9
+        version: 0.1.9
       '@linghun/core':
         specifier: 0.1.8
         version: 0.1.8
       '@linghun/providers':
-        specifier: 0.1.19
-        version: 0.1.19
+        specifier: 0.1.20
+        version: 0.1.20
       '@linghun/shared':
-        specifier: 0.1.11
-        version: 0.1.11
+        specifier: 0.1.12
+        version: 0.1.12
       '@linghun/tui':
-        specifier: 0.1.44
-        version: 0.1.44
+        specifier: 0.1.45
+        version: 0.1.45
     optionalDependencies:
       '@linghun/codebase-memory-darwin-arm64':
         specifier: 0.1.0
@@ -151,8 +151,8 @@ importers:
         specifier: 0.1.8
         version: 0.1.8
       '@linghun/shared':
-        specifier: 0.1.11
-        version: 0.1.11
+        specifier: 0.1.12
+        version: 0.1.12
 
   packages/shared: {}
 
@@ -168,8 +168,8 @@ importers:
         specifier: 1.59.0
         version: 1.59.0
       '@linghun/config':
-        specifier: 0.1.8
-        version: 0.1.8
+        specifier: 0.1.9
+        version: 0.1.9
       '@linghun/core':
         specifier: 0.1.8
         version: 0.1.8
@@ -177,11 +177,11 @@ importers:
         specifier: 0.1.1
         version: 0.1.1(@types/react@19.2.15)(react@19.2.7)
       '@linghun/providers':
-        specifier: 0.1.19
-        version: 0.1.19
+        specifier: 0.1.20
+        version: 0.1.20
       '@linghun/shared':
-        specifier: 0.1.11
-        version: 0.1.11
+        specifier: 0.1.12
+        version: 0.1.12
       '@linghun/tools':
         specifier: 0.1.11
         version: 0.1.11
@@ -619,8 +619,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@linghun/config@0.1.8':
-    resolution: {integrity: sha512-ViWvHf7S0EUkZhBZ7xUfQ7e0kmujtgnCYb1CcWHsiaov8BaBXdK61nKfg7UeRJY1RFSUcUK+C6Fup0HfOfnJCQ==}
+  '@linghun/config@0.1.9':
+    resolution: {integrity: sha512-gUqnIOV2WBVaN5x6Ly8oLAnP1JPegacqHdJ9qqX360M/XxohLN6CI3tmRMZ9KnH3DrbQvEiE858W3xWzLxsotQ==}
 
   '@linghun/core@0.1.8':
     resolution: {integrity: sha512-0Dh/vsDIIMNmFT5/G4vsqRwQ2Lq2KUsakyBw6QGrqy81L07Vwh1ijK33QHUo1tSrQUGgnKdlbp0thyXyRduYRw==}
@@ -655,17 +655,20 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@linghun/providers@0.1.19':
-    resolution: {integrity: sha512-WRX+y9xxtpYSbA3zAfzVioSQTRe02NytyLNZJ4kpAcLltMaFyuxmVL4bagKUyvSM8RzdwSwA7CfFr0pB9eoXng==}
+  '@linghun/providers@0.1.20':
+    resolution: {integrity: sha512-5VntmOn9ANyAHrkBXdsdnj4tW8PEnCjFcnaEolV1HRCB/yOgg4a62veSlvYy432rTZJK6guhv3zyxg08Ngkn/w==}
 
   '@linghun/shared@0.1.11':
     resolution: {integrity: sha512-OXwt3R6Iig82tML9F4wDQBlb47Tfqbh0YTlXcGurwtawkVrcB0L/mrZr0JZh3nsUy1LZeST7RPKQjt0zM24qJQ==}
 
+  '@linghun/shared@0.1.12':
+    resolution: {integrity: sha512-W6sPUNiUBVa07zEXB/32qSTj/R1Lz5qkGWTb19vnkpFTk6H5Tk8FGxq31B+rywYgIQAfkBIYB2K5OkkptUnmqA==}
+
   '@linghun/tools@0.1.11':
     resolution: {integrity: sha512-axcR5Ly1ElxxRF0KGZy8j04FbTOETbzEsPhr7uJSzg9GNNHNClBGCd2aepit8/QP83YC/XNCFpJ+k4fP8Qay1Q==}
 
-  '@linghun/tui@0.1.44':
-    resolution: {integrity: sha512-AhgkP2aZcxJhNIKFEBcQOEcP22h26dvmANoGJr9PbbrkI7u4R5K5USECedtWKGWwQDwToZGtpJpvgqbx5nwfrQ==}
+  '@linghun/tui@0.1.45':
+    resolution: {integrity: sha512-vqWd0fQdbegteG+ooaRnKDr7JOIxQBcM15Q8AZqI8LXCjkQ6uQM1l7cy96XIbjzgo4belyyJiE6jpkRqkzdVqA==}
 
   '@protobufjs/aspromise@1.1.2':
     resolution: {integrity: sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ==}
@@ -1926,9 +1929,9 @@ snapshots:
   '@linghun/codebase-memory-win32-x64@0.1.0':
     optional: true
 
-  '@linghun/config@0.1.8':
+  '@linghun/config@0.1.9':
     dependencies:
-      '@linghun/shared': 0.1.11
+      '@linghun/shared': link:packages/shared
 
   '@linghun/core@0.1.8':
     dependencies:
@@ -1971,25 +1974,27 @@ snapshots:
       typescript: 5.9.3
     optional: true
 
-  '@linghun/providers@0.1.19':
+  '@linghun/providers@0.1.20':
     dependencies:
       '@linghun/core': 0.1.8
-      '@linghun/shared': 0.1.11
+      '@linghun/shared': 0.1.12
 
   '@linghun/shared@0.1.11': {}
+
+  '@linghun/shared@0.1.12': {}
 
   '@linghun/tools@0.1.11':
     dependencies:
       parse5: 8.0.1
 
-  '@linghun/tui@0.1.44':
+  '@linghun/tui@0.1.45':
     dependencies:
       '@larksuiteoapi/node-sdk': 1.59.0
-      '@linghun/config': 0.1.8
+      '@linghun/config': 0.1.9
       '@linghun/core': 0.1.8
       '@linghun/ink-runtime': 0.1.1(@types/react@19.2.15)(react@19.2.7)
-      '@linghun/providers': 0.1.19
-      '@linghun/shared': 0.1.11
+      '@linghun/providers': 0.1.20
+      '@linghun/shared': 0.1.12
       '@linghun/tools': 0.1.11
       cli-highlight: 2.1.11
       marked: 18.0.5
