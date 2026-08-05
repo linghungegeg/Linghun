@@ -2432,6 +2432,11 @@ function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
     normalizedProviders?.["openai-compatible"],
     process.env.LINGHUN_OPENAI_MODEL ? openAiCompatibleModelPlaceholder : undefined,
   );
+  const hasOpenAiCompatibleEnv = Boolean(
+    process.env.LINGHUN_OPENAI_BASE_URL ||
+      process.env.LINGHUN_OPENAI_API_KEY ||
+      process.env.LINGHUN_OPENAI_MODEL,
+  );
   const geminiProvider = cleanProviderOverride(normalizedProviders?.gemini);
 
   return {
@@ -2478,9 +2483,10 @@ function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
             openAiCompatibleProvider?.endpointProfile ??
             defaultConfig.providers["openai-compatible"].endpointProfile,
         ),
-        reasoningLevel: openAiCompatibleProvider && process.env.LINGHUN_INFERENCE_LEVEL
-          ? normalizeReasoningLevel(process.env.LINGHUN_INFERENCE_LEVEL)
-          : (openAiCompatibleProvider?.reasoningLevel ??
+        reasoningLevel:
+          (openAiCompatibleProvider || hasOpenAiCompatibleEnv) && process.env.LINGHUN_INFERENCE_LEVEL
+            ? normalizeReasoningLevel(process.env.LINGHUN_INFERENCE_LEVEL)
+            : (openAiCompatibleProvider?.reasoningLevel ??
             defaultConfig.providers["openai-compatible"].reasoningLevel),
         includeUsage:
           process.env.LINGHUN_OPENAI_INCLUDE_USAGE !== undefined
