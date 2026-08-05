@@ -17,16 +17,11 @@ That is the value of Linghun's anti-hallucination system. It is not merely about
 
 Full design: [Chinese Whitepaper](./WHITEPAPER.md) / [English Whitepaper](./WHITEPAPER.en.md) / [Updates](./docs/updates.en.md).
 
-## Novita x Harbor Benchmark Records
+## Terminal-Bench 2.1 Leaderboard
 
-Linghun has completed and submitted runs for the four public TB2.1 tracks in the Novita x Harbor Agent Benchmark:
+Linghun's Terminal-Bench 2.1 submission PR is currently awaiting merge: [View pending PR #165](https://github.com/harbor-framework/terminal-bench-2-1/pull/165).
 
-| Track | Rank at submission | Harbor record |
-| --- | --- | --- |
-| File & Recovery | #2 | [f77879ac-b30f-47bb-8fb1-650108364fc0](https://hub.harborframework.com/jobs/f77879ac-b30f-47bb-8fb1-650108364fc0) |
-| Systems & Security | #1 | [151a5351-bbf9-45c9-ae2f-1f8db1cd0619](https://hub.harborframework.com/jobs/151a5351-bbf9-45c9-ae2f-1f8db1cd0619) |
-| Data & Science | #1 | [dc4a720b-79a5-49dd-b083-6fc40acd1079](https://hub.harborframework.com/jobs/dc4a720b-79a5-49dd-b083-6fc40acd1079) |
-| Code & Debug | #3 | [23a26b7f-f1c0-4653-b0c2-4ecc4acae4de](https://hub.harborframework.com/jobs/23a26b7f-f1c0-4653-b0c2-4ecc4acae4de) |
+With a current score of 78.43%, it is expected to rank #6 on the current official TB2.1 leaderboard. The official rank will be finalized after the PR is merged.
 
 ## Special Thanks
 
@@ -34,14 +29,12 @@ Linghun has completed and submitted runs for the four public TB2.1 tracks in the
   <table>
     <tr>
       <td>
-        Thanks to <a href="https://www.geek2api.com/">geek2api</a> for supporting Linghun during development. geek2api provides one-stop access to mainstream AI services such as Claude, GPT, and Gemini without requiring users to manage multiple subscription accounts.<br /><br />
-        Thanks also to the geek2api community members for their ideas and thoughtful support. Community group: <code>1104150634</code>.
+        Thanks to <a href="https://www.geek2api.com/">geek2api</a> for supporting Linghun during development; geek2api provides one-stop access to mainstream AI services such as Claude, GPT, and Gemini without requiring users to manage multiple subscription accounts, and its community group is <code>1104150634</code>.
       </td>
     </tr>
     <tr>
       <td>
-        Thanks to <a href="https://core2api.com/">Core2API</a> for supporting Linghun during development. Core2API supports Claude/GPT/Grok/Gemini/DeepSeek, with global large-model access from the 0.001x price tier at core2api.com for paper revision, code programming, app development, reverse engineering, and more.<br /><br />
-        Thanks also to the Core2API community members for their ideas and thoughtful support. Community group: <code>684281579</code>.
+        Thanks to <a href="https://core2api.com/">Core2API</a> for supporting Linghun during development; Core2API supports Claude/GPT/Grok/Gemini/DeepSeek, with global large-model access from the 0.001x price tier at core2api.com for paper revision, code programming, app development, reverse engineering, and more, and its community group is <code>684281579</code>.
       </td>
     </tr>
   </table>

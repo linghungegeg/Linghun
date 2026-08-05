@@ -31,8 +31,8 @@ importers:
   apps/cli:
     dependencies:
       '@linghun/config':
-        specifier: 0.1.9
-        version: 0.1.9
+        specifier: 0.1.10
+        version: 0.1.10
       '@linghun/core':
         specifier: 0.1.8
         version: 0.1.8
@@ -43,8 +43,8 @@ importers:
         specifier: 0.1.12
         version: 0.1.12
       '@linghun/tui':
-        specifier: 0.1.45
-        version: 0.1.45
+        specifier: 0.1.46
+        version: 0.1.46
     optionalDependencies:
       '@linghun/codebase-memory-darwin-arm64':
         specifier: 0.1.0
@@ -168,8 +168,8 @@ importers:
         specifier: 1.59.0
         version: 1.59.0
       '@linghun/config':
-        specifier: 0.1.9
-        version: 0.1.9
+        specifier: 0.1.10
+        version: 0.1.10
       '@linghun/core':
         specifier: 0.1.8
         version: 0.1.8
@@ -619,8 +619,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@linghun/config@0.1.9':
-    resolution: {integrity: sha512-gUqnIOV2WBVaN5x6Ly8oLAnP1JPegacqHdJ9qqX360M/XxohLN6CI3tmRMZ9KnH3DrbQvEiE858W3xWzLxsotQ==}
+  '@linghun/config@0.1.10':
+    resolution: {integrity: sha512-8wggk1rrPBrS9dKMhPEdqQJJtCs8tYt6+bpwdnPxFk5pjBUFQeVlGfkn7S2U/7I9hdwHza9ypypeLZDKpTEhww==}
 
   '@linghun/core@0.1.8':
     resolution: {integrity: sha512-0Dh/vsDIIMNmFT5/G4vsqRwQ2Lq2KUsakyBw6QGrqy81L07Vwh1ijK33QHUo1tSrQUGgnKdlbp0thyXyRduYRw==}
@@ -667,8 +667,8 @@ packages:
   '@linghun/tools@0.1.11':
     resolution: {integrity: sha512-axcR5Ly1ElxxRF0KGZy8j04FbTOETbzEsPhr7uJSzg9GNNHNClBGCd2aepit8/QP83YC/XNCFpJ+k4fP8Qay1Q==}
 
-  '@linghun/tui@0.1.45':
-    resolution: {integrity: sha512-vqWd0fQdbegteG+ooaRnKDr7JOIxQBcM15Q8AZqI8LXCjkQ6uQM1l7cy96XIbjzgo4belyyJiE6jpkRqkzdVqA==}
+  '@linghun/tui@0.1.46':
+    resolution: {integrity: sha512-T0dP1TMtDMSJQbXfBlH/4HC8uc4OW6EpPrA0NZ9/AawQSt/LvrK0QXdUL2adIqF2b0pGxUrYxQC1+XF3ZmVRLg==}
 
   '@protobufjs/aspromise@1.1.2':
     resolution: {integrity: sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ==}
@@ -1929,9 +1929,9 @@ snapshots:
   '@linghun/codebase-memory-win32-x64@0.1.0':
     optional: true
 
-  '@linghun/config@0.1.9':
+  '@linghun/config@0.1.10':
     dependencies:
-      '@linghun/shared': link:packages/shared
+      '@linghun/shared': 0.1.12
 
   '@linghun/core@0.1.8':
     dependencies:
@@ -1987,10 +1987,10 @@ snapshots:
     dependencies:
       parse5: 8.0.1
 
-  '@linghun/tui@0.1.45':
+  '@linghun/tui@0.1.46':
     dependencies:
       '@larksuiteoapi/node-sdk': 1.59.0
-      '@linghun/config': 0.1.9
+      '@linghun/config': 0.1.10
       '@linghun/core': 0.1.8
       '@linghun/ink-runtime': 0.1.1(@types/react@19.2.15)(react@19.2.7)
       '@linghun/providers': 0.1.20

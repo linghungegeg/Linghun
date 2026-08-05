@@ -30,16 +30,11 @@ Linghun 可以理解成：给大模型装上一套工程化外骨骼。模型负
 
 这就是 Linghun 反幻觉系统的价值：不是让模型少说错话那么简单，而是把“读事实、看证据、区分验证范围、拒绝空口完成、说明不确定性”变成运行时约束。模型仍然会推理和生成，但关键工程结论不能只靠模型自信。
 
-## Novita x Harbor 榜单记录
+## Terminal-Bench 2.1 榜单记录
 
-Linghun 已完成 Novita x Harbor Agent Benchmark 四个公开 TB2.1 榜单的运行与提交：
+Linghun 的 Terminal-Bench 2.1 提交 PR 正在等待合并：[查看待合并 PR #165](https://github.com/harbor-framework/terminal-bench-2-1/pull/165)。
 
-| 榜单 | 提交时名次 | Harbor 记录 |
-| --- | --- | --- |
-| File & Recovery | 第 2 名 | [f77879ac-b30f-47bb-8fb1-650108364fc0](https://hub.harborframework.com/jobs/f77879ac-b30f-47bb-8fb1-650108364fc0) |
-| Systems & Security | 第 1 名 | [151a5351-bbf9-45c9-ae2f-1f8db1cd0619](https://hub.harborframework.com/jobs/151a5351-bbf9-45c9-ae2f-1f8db1cd0619) |
-| Data & Science | 第 1 名 | [dc4a720b-79a5-49dd-b083-6fc40acd1079](https://hub.harborframework.com/jobs/dc4a720b-79a5-49dd-b083-6fc40acd1079) |
-| Code & Debug | 第 3 名 | [23a26b7f-f1c0-4653-b0c2-4ecc4acae4de](https://hub.harborframework.com/jobs/23a26b7f-f1c0-4653-b0c2-4ecc4acae4de) |
+当前成绩为 78.43%，按官方当前 TB2.1 榜单预计排名第 6 名；正式排名以 PR 合并后的榜单为准。
 
 ## 特别感谢
 
@@ -47,14 +42,12 @@ Linghun 已完成 Novita x Harbor Agent Benchmark 四个公开 TB2.1 榜单的�
   <table>
     <tr>
       <td>
-        感谢 <a href="https://www.geek2api.com/">geek2api 中转站</a> 对 Linghun 开发过程中的支持。geek2api 提供一站式 AI 服务接入能力，无需管理多个订阅账号，即可接入 Claude、GPT、Gemini 等主流 AI 服务。<br /><br />
-        也感谢 geek2api 中转站各位群友提供的相关思路和思想支持。交流群号：<code>1104150634</code>。
+        感谢 <a href="https://www.geek2api.com/">geek2api 中转站</a> 对 Linghun 开发过程中的支持；geek2api 提供一站式 AI 服务接入能力，无需管理多个订阅账号，即可接入 Claude、GPT、Gemini 等主流 AI 服务，交流群号：<code>1104150634</code>。
       </td>
     </tr>
     <tr>
       <td>
-        感谢 <a href="https://core2api.com/">Core2API</a> 对 Linghun 开发过程中的支持。Core2API 支持 Claude/GPT/Grok/Gemini/DeepSeek 等模型，全球大模型最低价 0.001 倍率就在 core2api.com，可用于论文修改、代码编程、开发 app、逆向工程等场景。<br /><br />
-        也感谢 Core2API 各位群友提供的相关思路和思想支持。交流群号：<code>684281579</code>。
+        感谢 <a href="https://core2api.com/">Core2API</a> 对 Linghun 开发过程中的支持；Core2API 支持 Claude/GPT/Grok/Gemini/DeepSeek 等模型，全球大模型最低价 0.001 倍率就在 core2api.com，可用于论文修改、代码编程、开发 app、逆向工程等场景，交流群号：<code>684281579</code>。
       </td>
     </tr>
   </table>
