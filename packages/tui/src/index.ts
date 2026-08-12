@@ -527,6 +527,10 @@ import {
   createUserTextBlock,
 } from "./shell/models/command-transcript-presenter.js";
 import {
+  AGENT_TRANSCRIPT_EVENT_LIMIT,
+  transcriptEventsToAgentBlocks,
+} from "./shell/models/agent-transcript-view.js";
+import {
   QueuedInputQueue,
 } from "./shell/models/queued-input-state.js";
 import {
@@ -3529,6 +3533,16 @@ function isSameTranscriptViewportGeometry(
   );
 }
 
+function isAgentTreeSelectable(agent: AgentRun): boolean {
+  return (
+    agent.status === "running" ||
+    agent.status === "blocked" ||
+    agent.status === "failed" ||
+    agent.status === "stale" ||
+    (agent.status === "idle" && agent.lastTerminalStatus === "completed")
+  );
+}
+
 function closeCommandPanelState(
   context: Pick<TuiContext, "commandPanelState" | "transcriptViewportGeometry">,
 ): void {
@@ -3970,7 +3984,7 @@ async function runInkShell(
       // ─── Agent tree keyboard navigation (Phase 3 visual alignment) ──────────────
       if (event.type === "agent-tree-move") {
         const agents = context.agents ?? [];
-        const running = agents.filter((a) => a.status === "running");
+        const running = agents.filter(isAgentTreeSelectable);
         const cursor = context.agentTreeState?.cursor ?? -1;
         const next =
           cursor < 0 ? 0 : Math.max(0, Math.min(cursor + event.delta, running.length - 1));
@@ -3981,13 +3995,59 @@ async function runInkShell(
       }
       if (event.type === "agent-tree-enter") {
         const agents = context.agents ?? [];
-        const running = agents.filter((a) => a.status === "running");
+        const selectableAgents = agents.filter(isAgentTreeSelectable);
         const cursor = context.agentTreeState?.cursor ?? -1;
-        if (cursor >= 0 && cursor < running.length) {
-          const agent = running[cursor];
-          const expandedId =
-            context.agentTreeState?.expandedId === agent?.id ? undefined : agent?.id;
-          context.agentTreeState = { cursor, expandedId };
+        if (cursor >= 0 && cursor < selectableAgents.length) {
+          const agent = selectableAgents[cursor];
+          if (agent) {
+            const label =
+              agent.displayName?.trim() ||
+              agent.addressableName?.trim() ||
+              (agent.type === "planner"
+                ? context.language === "en-US" ? "Planner" : "规划"
+                : agent.type === "explorer"
+                  ? context.language === "en-US" ? "Explorer" : "探索"
+                  : agent.type === "verifier"
+                    ? context.language === "en-US" ? "Verifier" : "验证"
+                    : "Agent");
+            context.agentTranscriptViewState = {
+              agentId: agent.id,
+              sessionId: agent.transcriptSessionId,
+              label,
+              status: "loading",
+            };
+            context.agentTreeState = { cursor, expandedId: agent.id };
+            context.transcriptScrollState = { scrollOffset: 0, stickToBottom: true };
+            shell?.rerender();
+            await shell?.waitUntilRenderFlush();
+            try {
+              const recent = await context.store.readRecentTranscriptEvents(agent.transcriptSessionId, {
+                limit: AGENT_TRANSCRIPT_EVENT_LIMIT,
+                predicate: (item: TranscriptEvent) =>
+                  item.type === "user_message" ||
+                  item.type === "assistant_text_delta" ||
+                  item.type === "tool_call_start" ||
+                  item.type === "tool_result",
+              });
+              if (context.agentTranscriptViewState?.agentId !== agent.id) return;
+              context.agentTranscriptViewState = {
+                agentId: agent.id,
+                sessionId: agent.transcriptSessionId,
+                label,
+                status: "ready",
+                blocks: transcriptEventsToAgentBlocks(recent.events, context.language),
+              };
+            } catch (error) {
+              if (context.agentTranscriptViewState?.agentId !== agent.id) return;
+              context.agentTranscriptViewState = {
+                agentId: agent.id,
+                sessionId: agent.transcriptSessionId,
+                label,
+                status: "error",
+                error: error instanceof Error ? error.message : String(error),
+              };
+            }
+          }
         }
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
@@ -4009,6 +4069,13 @@ async function runInkShell(
         return;
       }
       if (event.type === "agent-tree-escape") {
+        if (context.agentTranscriptViewState) {
+          context.agentTranscriptViewState = undefined;
+          context.transcriptScrollState = { scrollOffset: 0, stickToBottom: true };
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+          return;
+        }
         context.agentTreeState = { cursor: -1 };
         shell?.rerender();
         await shell?.waitUntilRenderFlush();

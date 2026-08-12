@@ -1342,7 +1342,11 @@ export function Composer({
           setSlashSelection(-1);
           return;
         }
-        if (text.length === 0 && view.agentProgressTree && view.agentProgressTree.cursor >= 0) {
+        if (
+          text.length === 0 &&
+          (view.agentTranscriptView ||
+            (view.agentProgressTree && view.agentProgressTree.cursor >= 0))
+        ) {
           emitInput({ type: "agent-tree-escape" });
           return;
         }

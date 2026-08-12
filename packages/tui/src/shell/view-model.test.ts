@@ -8513,6 +8513,57 @@ describe("deriveBackgroundActivityFallback — request activity cleared but work
     expect(view.activity?.text).not.toContain("team:");
   });
 
+  it("agent transcript view replaces main transcript blocks without changing main session", () => {
+    const ctx = createContext({
+      sessionId: "main-session",
+      agentTranscriptViewState: {
+        agentId: "agent-a",
+        sessionId: "child-session",
+        label: "探索",
+        status: "ready",
+        blocks: [
+          {
+            id: "agent-view:assistant:a1",
+            kind: "details",
+            status: "info",
+            title: "",
+            summary: "child answer",
+            fullText: "child answer",
+            messageKind: "assistant_text",
+            keep: true,
+          },
+        ],
+      },
+    } as unknown as Partial<TuiContext>);
+
+    const view = createShellViewModel(ctx, {
+      width: 80,
+      outputBlocks: [
+        {
+          id: "main-answer",
+          kind: "details",
+          status: "info",
+          title: "",
+          summary: "main answer",
+          fullText: "main answer",
+          messageKind: "assistant_text",
+        },
+      ],
+    });
+
+    expect(view.agentTranscriptView).toMatchObject({
+      agentId: "agent-a",
+      sessionId: "child-session",
+      label: "探索",
+      status: "ready",
+    });
+    expect(view.blocks.map((block) => block.id)).toEqual(["agent-view:assistant:a1"]);
+    expect(view.blocks[0]?.fullText).toBe("child answer");
+    expect(view.blocks.some((block) => block.id === "main-answer")).toBe(false);
+    expect(view.staticHistoryBlocks).toBeUndefined();
+    expect(ctx.sessionId).toBe("main-session");
+  });
+
   it("multiple running agents → activity shows count", () => {
     const ctx = createContext({
       agents: [

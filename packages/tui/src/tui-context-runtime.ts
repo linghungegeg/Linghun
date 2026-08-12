@@ -636,6 +636,15 @@ export type TuiContext = {
   backgroundOverlayState?: { open: boolean; cursor: number; expanded?: boolean };
   /** Agent tree keyboard selection state (Phase 3 visual alignment). */
   agentTreeState?: { cursor: number; expandedId?: string };
+  /** Visible-only child transcript viewer state; does not change parent/child execution ownership. */
+  agentTranscriptViewState?: {
+    agentId: string;
+    sessionId: string;
+    label: string;
+    status: "loading" | "ready" | "error";
+    blocks?: ProductBlockViewModel[];
+    error?: string;
+  };
   /** Agent completion timestamps for eviction delay (Phase 5). Cleared on next render cycle. */
   agentCompletedAt?: Record<string, number>;
   /** Workflow completion timestamps for eviction delay. Completed workflows stay visible briefly then auto-dismiss. */

@@ -86,7 +86,7 @@ export function AgentProgressTree({
                 {fitText(rowText, innerWidth - 2)}
               </Text>
             </Box>
-            {/* Expanded detail row; transcript switching is handled separately. */}
+            {/* Expanded detail row for fallback metadata; Enter opens the child transcript. */}
             {expanded ? (
               <Box paddingLeft={4}>
                 <Text color={theme.muted} dimColor>
@@ -113,8 +113,8 @@ export function AgentProgressTree({
           <Text color={theme.muted} dimColor>
             {fitText(
               language === "en-US"
-                ? "↑↓ select · Enter details · x close · Esc cancel"
-                : "↑↓ 选择 · Enter 详情 · x 关闭 · Esc 取消",
+                ? "↑↓ select · Enter transcript · x close · Esc cancel"
+                : "↑↓ 选择 · Enter transcript · x 关闭 · Esc 取消",
               innerWidth - 3,
             )}
           </Text>

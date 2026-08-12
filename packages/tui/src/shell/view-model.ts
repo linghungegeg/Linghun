@@ -259,7 +259,7 @@ export function createShellViewModel(
       : transcriptSourceToBlocks(options.transcriptSource)
     : undefined;
   const liveOutputBlocks = options.outputBlocks ?? [];
-  const staticHistoryBlocks = nativeScrollback
+  const mainStaticHistoryBlocks = nativeScrollback
     ? sourceOutputBlocks?.length
       ? [
           ...liveOutputBlocks,
@@ -475,14 +475,20 @@ export function createShellViewModel(
   }
 
   const fittedBlocks = blocks.map((block) => fitBlockToWidth(block, width));
+  const agentTranscriptViewState = context.agentTranscriptViewState;
+  const agentTranscriptBlocks = buildAgentTranscriptViewBlocks(
+    agentTranscriptViewState,
+    language,
+  ).map((block) => fitBlockToWidth(block, width));
+  const visibleFittedBlocks = agentTranscriptViewState ? agentTranscriptBlocks : fittedBlocks;
   const transcriptSelectionState = (
     context as { transcriptSelectionState?: TranscriptSelectionState }
   ).transcriptSelectionState;
   const transcriptRows = transcriptSelectionState
-    ? buildTranscriptScreenBuffer(fittedBlocks, Math.max(8, width - 4)).rows
+    ? buildTranscriptScreenBuffer(visibleFittedBlocks, Math.max(8, width - 4)).rows
     : [];
   const fullFittedBlocks = transcriptSelectionState
-    ? fittedBlocks.map((block) => {
+    ? visibleFittedBlocks.map((block) => {
         const selectionLineIndexes = selectionLineIndexesForBlock(
           transcriptSelectionState,
           transcriptRows,
@@ -497,7 +503,7 @@ export function createShellViewModel(
           ? { ...block, selectionLineIndexes, selectionLineRanges }
           : block;
       })
-    : fittedBlocks;
+    : visibleFittedBlocks;
 
   const viewMode = effectiveViewMode;
 
@@ -641,7 +647,7 @@ export function createShellViewModel(
     permission: permissionView,
     visibleWorkState,
   });
-  const streamingAssistantText = permissionView
+  const streamingAssistantText = permissionView || agentTranscriptViewState
     ? undefined
     : selectStreamingAssistantText(context, fullFittedBlocks);
   const bottomPaneStatus = mapBottomPaneStatusToView(context, {
@@ -720,11 +726,20 @@ export function createShellViewModel(
     queuedInputs: options.queuedInputs,
     sessionFork,
     blocks: fullFittedBlocks,
-    staticHistoryBlocks,
+    staticHistoryBlocks: agentTranscriptViewState ? undefined : mainStaticHistoryBlocks,
     staticHistoryReplayGeneration: (context as { transcriptStaticReplayGeneration?: number })
       .transcriptStaticReplayGeneration,
     transcriptVirtualRange: undefined,
     streamingAssistantText,
+    agentTranscriptView: agentTranscriptViewState
+      ? {
+          agentId: agentTranscriptViewState.agentId,
+          sessionId: agentTranscriptViewState.sessionId,
+          label: agentTranscriptViewState.label,
+          status: agentTranscriptViewState.status,
+          ...(agentTranscriptViewState.error ? { error: agentTranscriptViewState.error } : {}),
+        }
+      : undefined,
     ctrlOExpand: ctrlOExpandState?.active
       ? { active: true, ...(ctrlOExpandState.blockId ? { blockId: ctrlOExpandState.blockId } : {}) }
       : { active: false },
@@ -2023,6 +2038,54 @@ function formatAgentActivityIdentity(
   if (agent.type === "explorer") return "探索";
   if (agent.type === "verifier") return "验证";
   return "Agent";
+}
+
+function buildAgentTranscriptViewBlocks(
+  state: TuiContext["agentTranscriptViewState"],
+  language: Language,
+): ProductBlockViewModel[] {
+  if (!state) return [];
+  if (state.status === "ready") {
+    return state.blocks && state.blocks.length > 0
+      ? state.blocks
+      : [createAgentTranscriptStatusBlock(state, language, "empty")];
+  }
+  return [createAgentTranscriptStatusBlock(state, language, state.status)];
+}
+
+function createAgentTranscriptStatusBlock(
+  state: NonNullable<TuiContext["agentTranscriptViewState"]>,
+  language: Language,
+  status: "loading" | "ready" | "error" | "empty",
+): ProductBlockViewModel {
+  const isEn = language === "en-US";
+  const title = isEn
+    ? `Viewing agent ${state.label}`
+    : `正在查看智能体 ${state.label}`;
+  const summary =
+    status === "loading"
+      ? isEn
+        ? "Loading transcript..."
+        : "正在加载 transcript..."
+      : status === "error"
+        ? isEn
+          ? `Transcript unavailable: ${state.error ?? "unknown error"}`
+          : `无法读取 transcript：${state.error ?? "未知错误"}`
+        : status === "empty"
+          ? isEn
+            ? "No transcript messages yet."
+            : "暂无 transcript 消息。"
+          : title;
+  return {
+    id: `agent-transcript:${state.agentId}:${status}`,
+    kind: status === "error" ? "error" : "details",
+    status: status === "error" ? "fail" : "info",
+    title,
+    summary,
+    fullText: summary,
+    messageKind: status === "error" ? "tool_result_error" : "diagnostic",
+    keep: true,
+  };
 }
 
 function deriveVisibleWorkState(context: TuiContext): VisibleWorkState {

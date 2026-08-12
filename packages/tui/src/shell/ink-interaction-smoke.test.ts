@@ -2477,7 +2477,7 @@ describe("Ink TTY interaction smoke", () => {
     shell.unmount();
   });
 
-  it("labels selected agent Enter action as details instead of transcript view", async () => {
+  it("labels selected agent Enter action as transcript view", async () => {
     const view = {
       ...baseTaskView(),
       blocks: [],
@@ -2500,9 +2500,51 @@ describe("Ink TTY interaction smoke", () => {
     };
     const { output, shell } = await renderWithEvents(() => view);
 
-    expect(output.text).toContain("Enter 详情");
+    expect(output.text).toContain("Enter transcript");
     expect(output.text).not.toContain("Enter 查看");
-    expect(output.text).not.toContain("enter view");
+    expect(output.text).not.toContain("Enter 详情");
+
+    shell.unmount();
+  });
+
+  it("renders agent transcript header and lets Esc return to main", async () => {
+    let view: ReturnType<typeof baseTaskView> & {
+      blocks: NonNullable<ReturnType<typeof baseTaskView>["blocks"]>;
+      commandPanel: undefined;
+      agentTranscriptView?: NonNullable<ReturnType<typeof baseTaskView>["agentTranscriptView"]>;
+    } = {
+      ...baseTaskView(),
+      blocks: [
+        {
+          id: "agent-view:assistant:a1",
+          kind: "details" as const,
+          status: "info" as const,
+          title: "",
+          summary: "child transcript body",
+          fullText: "child transcript body",
+          messageKind: "assistant_text" as const,
+        },
+      ],
+      commandPanel: undefined,
+      agentTranscriptView: {
+        agentId: "agent-running",
+        sessionId: "child-session",
+        label: "探索",
+        status: "ready" as const,
+      },
+    };
+    const { output, shell } = await renderWithEvents(() => view);
+
+    expect(output.text).toContain("Agent transcript");
+    expect(output.text).toContain("Esc 返回 main");
+    expect(output.text).toContain("child transcript body");
+
+    output.chunks.length = 0;
+    view = { ...view, agentTranscriptView: undefined };
+    shell.rerender();
+    await shell.waitUntilRenderFlush();
+
+    expect(output.text).not.toContain("Agent transcript");
 
     shell.unmount();
   });

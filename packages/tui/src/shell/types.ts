@@ -585,6 +585,13 @@ export type ShellViewModel = {
   transcriptVirtualRange?: TranscriptVirtualRangeView;
   /** Live assistant preview rendered outside the historical ProductBlock list. */
   streamingAssistantText?: string;
+  agentTranscriptView?: {
+    agentId: string;
+    sessionId: string;
+    label: string;
+    status: "loading" | "ready" | "error";
+    error?: string;
+  };
   ctrlOExpand?: CtrlOExpandView;
   limitations: string[];
   /** Compact task-mode footer. Runtime normalizes legacy home requests to task. */

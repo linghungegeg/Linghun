@@ -181,6 +181,7 @@ function TaskLayout({
               viewWidth={view.width}
               contentWidth={contentWidth}
               capability={capability}
+              agentTranscriptView={view.agentTranscriptView}
             />
           </Box>
         ) : (
@@ -217,6 +218,7 @@ function TaskLayout({
                 viewWidth={view.width}
                 contentWidth={contentWidth}
                 capability={capability}
+                agentTranscriptView={view.agentTranscriptView}
               />
             </Box>
           </TranscriptViewport>
@@ -266,6 +268,7 @@ function TaskActivityRegion({
   theme,
   transcriptBlocks,
   viewWidth,
+  agentTranscriptView,
 }: {
   activity: ShellViewModel["activity"];
   bottomStatusActive: boolean;
@@ -282,12 +285,23 @@ function TaskActivityRegion({
   theme: ReturnType<typeof createShellTheme>;
   transcriptBlocks: ShellViewModel["blocks"];
   viewWidth: number;
+  agentTranscriptView: ShellViewModel["agentTranscriptView"];
 }): React.ReactNode {
   const hasTranscript = Boolean(expandedTranscriptBlock || transcriptBlocks.length > 0);
   const hasStreaming = Boolean(streamingAssistantText);
 
   return (
     <>
+      {agentTranscriptView ? (
+        <Box marginBottom={1}>
+          <Text color={theme.muted} dimColor>
+            {language === "en-US"
+              ? `Agent transcript: ${agentTranscriptView.label} · Esc main`
+              : `Agent transcript：${agentTranscriptView.label} · Esc 返回 main`}
+          </Text>
+        </Box>
+      ) : null}
+
       {expandedTranscriptBlock ? (
         <Box flexDirection="column" marginBottom={1}>
           <ProductBlock
