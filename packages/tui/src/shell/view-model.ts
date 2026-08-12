@@ -1348,7 +1348,7 @@ export function createOutputBlock(
     summary,
     body: normalized,
     collapsible: hasMore,
-    bordered: toolCallLike || toolResultLike,
+    bordered: toolResultErrorLike,
   } as const;
   return {
     id,
@@ -1377,13 +1377,13 @@ function isToolCallLike(text: string): boolean {
 }
 
 function isToolResultLike(text: string): boolean {
-  return /^(?:工具\s+\w+\s+已完成|Tool\s+\w+\s+completed|(?:Bash|Read|ReadSnippets|SourcePack|Grep|Glob|Write|Edit|MultiEdit)\(|Bash\s+(?:✓|✗)|找到\s+\*\*?\d+\*\*?\s+(?:处匹配|个文件)|读取\s+\*\*?\d+\*\*?\s+行|(?:Found|Read|ReadSnippets|SourcePack)\s+\*\*?\d+\*\*?|(?:Bash|Read|ReadSnippets|SourcePack|Grep|Glob|Write|Edit|MultiEdit|Todo|Diff)\s+(?:摘要|summary)|Todo[:：]|搜索摘要|文件搜索摘要|读取摘要|Bash 已结束|Search summary|File search summary|Read summary|Bash finished)/u.test(
+  return /^(?:工具\s+\w+\s+已完成|Tool\s+\w+\s+completed|(?:Bash|Read|ReadSnippets|SourcePack|Grep|Glob|Write|Edit|MultiEdit)\(|(?:Bash|Read|ReadSnippets|SourcePack|Grep|Glob|Write|Edit|MultiEdit|Todo|Diff)\s*[·:：]\s*(?:命令|已读取|已准备|找到|改动|已修改|Command|Found|Read|Prepared|Changes|Updated)|Bash\s+(?:✓|✗)|找到\s+\*\*?\d+\*\*?\s+(?:处匹配|个文件)|读取\s+\*\*?\d+\*\*?\s+行|(?:Found|Read|ReadSnippets|SourcePack)\s+\*\*?\d+\*\*?|(?:Bash|Read|ReadSnippets|SourcePack|Grep|Glob|Write|Edit|MultiEdit|Todo|Diff)\s+(?:摘要|summary)|Todo[:：]|搜索摘要|文件搜索摘要|读取摘要|Bash 已结束|Search summary|File search summary|Read summary|Bash finished)/u.test(
     text.trim(),
   );
 }
 
 function isToolResultErrorLike(text: string): boolean {
-  return /^(?:Bash\s+✗|.*(?:退出|exit)\s+\d+)/iu.test(text.trim());
+  return /^(?:Bash\s+✗|Bash\s*[·:：]\s*(?:命令失败|Command failed)|.*(?:退出|exit)\s+\d+)/iu.test(text.trim());
 }
 
 function summarizeExplicitFold(text: string): string {

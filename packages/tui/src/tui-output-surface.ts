@@ -259,7 +259,7 @@ export class ShellBlockOutput extends Writable {
         summary: toolLabel,
         body,
         collapsible: false,
-        bordered: true,
+        bordered: false,
       },
     };
     this.appendTranscriptSourceBlock(block);

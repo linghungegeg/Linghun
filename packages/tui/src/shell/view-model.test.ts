@@ -325,7 +325,7 @@ describe("shell view model", () => {
     expect(block.messageKind).toBe("tool_call");
     expect(block.displayBlock?.kind).toBe("tool_call");
     expect(block.displayBlock?.status).toBe("running");
-    expect(block.displayBlock?.bordered).toBe(true);
+    expect(block.displayBlock?.bordered).toBe(false);
     expect(block.nextAction).toBeUndefined();
   });
 
@@ -542,7 +542,7 @@ describe("shell view model", () => {
     expect(successStructured.block).toMatchObject({
       kind: "tool_result_success",
       status: "success",
-      bordered: true,
+      bordered: false,
       collapsible: true,
       detailsPath: ".linghun/session/tool-results/bash-long.txt",
       evidenceId: "ev-bash-long",
@@ -550,7 +550,7 @@ describe("shell view model", () => {
     expect(success.displayBlock).toMatchObject({
       kind: "tool_result_success",
       status: "success",
-      bordered: true,
+      bordered: false,
     });
     expect(failure.displayBlock).toMatchObject({ kind: "tool_result_error", status: "error" });
     expect(workspace.displayBlock).toMatchObject({ kind: "workspace_status", bordered: true });
@@ -568,8 +568,8 @@ describe("shell view model", () => {
     expect(rendered).toContain("English markdown keeps bold text");
     expect(rendered).toContain("+ ts");
     expect(rendered).toContain("--- a/file.ts");
-    expect(rendered).toContain("Bash(pnpm test) ✓");
-    expect(rendered).toContain("Bash(pnpm test) ✗ exit 1");
+    expect(rendered).toContain("Bash · Command completed · pnpm test");
+    expect(rendered).toContain("Bash · Command failed · exit 1 · pnpm test");
     expect(rendered).toContain("Press Ctrl+O for details");
     expect(rendered).toContain("main · clean/ahead · index ready");
     expect(rendered).toContain("Diagnostic: cache warming after compact");
@@ -7109,7 +7109,9 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     output.writeStructuredToolOutput(structured);
 
     expect(blocks).toHaveLength(1);
-    expect(blocks[0]?.summary).toContain("- 范围:\n  1. src/a.ts:1-4\n  2. src/b.ts:8-12");
+    expect(blocks[0]?.summary).toContain("已读取2个范围");
+    expect(blocks[0]?.summary).toContain("1. src/a.ts:1-4");
+    expect(blocks[0]?.summary).toContain("2. src/b.ts:8-12");
     expect(blocks[0]?.summary).not.toContain("DETAIL_SENTINEL");
     expect(blocks[0]?.fullText).toContain(details);
     expect(blocks[0]?.displayBlock?.detailsPath).toBe(
@@ -7256,7 +7258,13 @@ describe("ShellBlockOutput — assistant streaming block", () => {
       createStructuredToolOutput("Glob", { text: dangerous, details: dangerous }, "en-US"),
     );
 
-    expect(blocks).toHaveLength(6);
+    expect(blocks.map((block) => block.messageKind)).toEqual([
+      "assistant_text",
+      "tool_result_success",
+      "diagnostic",
+      "tool_result_error",
+      "local_command_output",
+    ]);
     for (const block of blocks) {
       expect(block.fullText).toContain("safetail");
       expect(block.fullText).not.toContain("clipboard-secret");
@@ -8003,7 +8011,7 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     );
 
     // user_text: plain text, no Markdown, dim separator + wrapText + background fill
-    expect(userBranch).toContain("marginBottom={1}");
+    expect(userBranch).toContain("marginBottom={0}");
     expect(userBranch).toContain("│ ");
     expect(userBranch).toContain("const bodyWidth = Math.max(8, width - 2)");
     expect(userBranch).toContain("width={bodyWidth}");
@@ -8014,7 +8022,7 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     // assistant_text (via unified isMessageKind path): MessageMarkdown, compact margins
     expect(messageBranch).toContain("marginTop={0}");
     expect(messageBranch).toContain("marginBottom={1}");
-    expect(messageBranch).toContain("MessageMarkdown");
+    expect(messageBranch).toContain("renderMessageBody");
   });
 
   it("Ink task layout keeps transcript, notices, composer, footer, and light hints separated", async () => {
@@ -10567,7 +10575,7 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
     expect(source).toContain("theme?: ShellTheme");
     expect(source).toContain("theme?.diffAddedWord ?? theme?.success");
     expect(source).toContain("theme?.diffRemovedWord ?? theme?.error");
-    expect(source).toContain("ansiColorCode(color)");
+    expect(source).toContain("ansiColorCode(color, \"foreground\")");
     expect(plainSource).toContain("createShellTheme(noColor)");
     expect(plainSource).toContain("theme: options.theme");
   });
@@ -10810,7 +10818,7 @@ describe("D.14D explicit details summary-first panel", () => {
     const block = createOutputBlock(presenterBody, "zh-CN", "out-e2e");
     expect(block.messageKind).toBe("tool_result_success");
     expect(block.displayBlock?.kind).toBe("tool_result_success");
-    expect(block.displayBlock?.bordered).toBe(true);
+    expect(block.displayBlock?.bordered).toBe(false);
     expect(block.displayBlock?.collapsible).toBe(true);
     expect(block.fullText).not.toContain("输出已折叠");
     expect(block.nextAction).toContain("Ctrl+O");
@@ -10832,7 +10840,7 @@ describe("D.14D explicit details summary-first panel", () => {
       const block = createOutputBlock(presenterBody, "zh-CN", `phase1-tool-${index}`);
       expect(block.messageKind).toBe("tool_result_success");
       expect(block.displayBlock?.kind).toBe("tool_result_success");
-      expect(block.displayBlock?.bordered).toBe(true);
+      expect(block.displayBlock?.bordered).toBe(false);
     }
   });
 

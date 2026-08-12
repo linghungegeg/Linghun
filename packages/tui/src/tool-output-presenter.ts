@@ -161,7 +161,7 @@ export function createStructuredToolOutput(
       detailsPath: layered.fullOutputPath,
       evidenceId: layered.evidenceId,
       collapsible: Boolean(layered.truncated || layered.details || layered.fullOutputPath),
-      bordered: true,
+      bordered: isError,
     },
     text,
   };
@@ -527,7 +527,7 @@ export function createStructuredToolCall(name: ToolName, input: unknown): Struct
       summary: text,
       body: text,
       collapsible: false,
-      bordered: true,
+      bordered: false,
     },
     text,
   };

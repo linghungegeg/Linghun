@@ -27,6 +27,7 @@ describe("tui-output-surface", () => {
     expect(blocks).toHaveLength(1);
     expect(blocks[0]?.messageKind).toBe("tool_call");
     expect(blocks[0]?.status).toBe("running");
+    expect(blocks[0]?.displayBlock?.bordered).toBe(false);
 
     const structured = createStructuredToolOutput(
       "Bash",
@@ -39,6 +40,7 @@ describe("tui-output-surface", () => {
     expect(blocks[0]?.id).toBe("tool:Bash:call-1");
     expect(blocks[0]?.messageKind).toBe("tool_result_success");
     expect(blocks[0]?.status).toBe("info");
+    expect(blocks[0]?.displayBlock?.bordered).toBe(false);
     expect(blocks[0]?.summary).toContain("命令已完成");
   });
 
@@ -56,6 +58,7 @@ describe("tui-output-surface", () => {
     expect(blocks[0]?.fullText).toBe("second chunk");
     expect(blocks[0]?.displayBlock?.title).toBe("正在处理");
     expect(blocks[0]?.displayBlock?.body).toBe("second chunk");
+    expect(blocks[0]?.displayBlock?.bordered).toBe(false);
   });
 
   it("keeps running tool helper silent for plain writable fallback", () => {

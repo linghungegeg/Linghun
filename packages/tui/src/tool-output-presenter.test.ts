@@ -231,7 +231,7 @@ describe("tool-output-presenter", () => {
       expect(structured?.block.status).toBe("running");
       expect(structured?.block.summary).toBe("Bash(git status)");
       expect(structured?.block.collapsible).toBe(false);
-      expect(structured?.block.bordered).toBe(true);
+      expect(structured?.block.bordered).toBe(false);
     });
   });
 
@@ -256,7 +256,7 @@ describe("tool-output-presenter", () => {
       expect(structured.block.toolName).toBe("Bash");
       expect(structured.block.status).toBe("success");
       expect(structured.block.evidenceId).toBe("ev-1");
-      expect(structured.block.bordered).toBe(true);
+      expect(structured.block.bordered).toBe(false);
       expect(structured.block.collapsible).toBe(false);
     });
 
