@@ -1161,12 +1161,17 @@ export async function appendRouteDecisionEvent(
   );
 }
 
-export function createToolEndEvent(id: string, output: ToolOutput): TranscriptEvent {
+export function createToolEndEvent(
+  id: string,
+  output: ToolOutput,
+  requestTurnId?: string,
+): TranscriptEvent {
   return {
     type: "tool_call_end",
     id,
     output: summarizeToolEndOutputForTranscript(compactToolOutputForTranscript(output)),
     createdAt: new Date().toISOString(),
+    ...(requestTurnId ? { requestTurnId } : {}),
   };
 }
 
@@ -1390,6 +1395,7 @@ export async function appendDeferredToolResultEvent(
   isError: boolean,
   evidenceId?: string,
   commitGuard?: () => boolean,
+  requestTurnId?: string,
 ): Promise<void> {
   if (commitGuard && !commitGuard()) return;
   const budgetedContent = await budgetToolResultTranscriptContent(
@@ -1409,6 +1415,7 @@ export async function appendDeferredToolResultEvent(
     isError,
     evidenceId,
     createdAt: new Date().toISOString(),
+    ...(requestTurnId ? { requestTurnId } : {}),
   }, commitGuard);
 }
 
@@ -1421,6 +1428,7 @@ export async function appendToolResultEvent(
   isError: boolean,
   evidenceId?: string,
   commitGuard?: () => boolean,
+  requestTurnId?: string,
 ): Promise<unknown> {
   if (commitGuard && !commitGuard()) return content;
   const contentWithDiagnostics = appendToolResultContentDiagnostics(content);
@@ -1442,6 +1450,7 @@ export async function appendToolResultEvent(
     isError,
     evidenceId,
     createdAt: new Date().toISOString(),
+    ...(requestTurnId ? { requestTurnId } : {}),
   }, commitGuard);
   if (commitGuard && !commitGuard()) return budgetedContent;
   rememberRecentDiagnostics(context, toolName, content, toolUseId, evidenceId);

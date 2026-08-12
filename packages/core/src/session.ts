@@ -233,8 +233,15 @@ export type TranscriptEvent =
       unsupportedClaims: string[];
       createdAt: string;
     }
-  | { type: "tool_call_start"; id: string; name: string; input: unknown; createdAt: string }
-  | { type: "tool_call_delta"; id: string; message: string; createdAt: string }
+  | {
+      type: "tool_call_start";
+      id: string;
+      name: string;
+      input: unknown;
+      createdAt: string;
+      requestTurnId?: string;
+    }
+  | { type: "tool_call_delta"; id: string; message: string; createdAt: string; requestTurnId?: string }
   | {
       type: "tool_call_end";
       id: string;
@@ -246,6 +253,7 @@ export type TranscriptEvent =
         changedFiles?: string[];
       };
       createdAt: string;
+      requestTurnId?: string;
     }
   | {
       type: "tool_result";
@@ -255,6 +263,7 @@ export type TranscriptEvent =
       isError?: boolean;
       evidenceId?: string;
       createdAt: string;
+      requestTurnId?: string;
     }
   | {
       type: "permission_request";

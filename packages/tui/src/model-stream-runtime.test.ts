@@ -8576,6 +8576,58 @@ describe("final answer gate aggregation", () => {
     await runCase("continuation");
   }, 30_000);
 
+  it.each(["main", "continuation"] as const)(
+    "ignores duplicate tool_use ids within one %s stream round",
+    async (entry) => {
+      const { context, events } = await makeSendMessageContext();
+      await writeFile(join(context.projectPath, "dedupe.txt"), "deduped result\n", "utf8");
+      let rounds = 0;
+      const gateway = {
+        async *stream() {
+          rounds += 1;
+          if (rounds === 1) {
+            yield { type: "tool_use", id: `${entry}-duplicate-read`, name: "Read", input: { path: "dedupe.txt" } } as const;
+            yield { type: "tool_use", id: `${entry}-duplicate-read`, name: "Read", input: { path: "dedupe.txt" } } as const;
+            yield { type: "message_stop", chunkCount: 2, hadUsage: false, finishReason: "tool_use" } as const;
+            return;
+          }
+          yield { type: "assistant_text_delta", text: "已读取去重结果。" } as const;
+          yield { type: "message_stop", chunkCount: 1, hadUsage: false, finishReason: "stop" } as const;
+        },
+        async countMessagesTokensWithAPI() {
+          return { source: "unavailable", reason: "test" } as const;
+        },
+      } as unknown as ModelGateway;
+      const output = new MemoryOutput();
+
+      if (entry === "main") {
+        await __testSendMessage("读取 dedupe.txt", context, gateway, output);
+      } else {
+        await continueModelAfterToolResults(
+          {
+            messages: [{ role: "user", content: "读取 dedupe.txt" }],
+            provider: "deepseek",
+            model: "deepseek-chat",
+            endpointProfile: "chat_completions",
+            reasoningSent: false,
+            originalUserText: "读取 dedupe.txt",
+          },
+          context,
+          gateway,
+          output,
+        );
+      }
+
+      const duplicateId = `${entry}-duplicate-read`;
+      expect(rounds).toBe(2);
+      expect(events.filter((event) => (event as { type?: string; id?: string }).type === "tool_call_start" && (event as { id?: string }).id === duplicateId)).toHaveLength(1);
+      expect(events.filter((event) => (event as { type?: string; id?: string }).type === "tool_call_end" && (event as { id?: string }).id === duplicateId)).toHaveLength(1);
+      expect(events.filter((event) => (event as { type?: string; toolUseId?: string }).type === "tool_result" && (event as { toolUseId?: string }).toolUseId === duplicateId)).toHaveLength(1);
+      expect(JSON.stringify(events)).toContain("duplicate_tool_use_ignored");
+    },
+    30_000,
+  );
+
   it("keeps claim-alignment rewrite reachable after evidence_recorded and in continuation", async () => {
     const source = await readFile(new URL("./model-stream-runtime.ts", import.meta.url), "utf8");
     expect(source).not.toContain("if (!finalAnswerClaimRetried && assistantText)");

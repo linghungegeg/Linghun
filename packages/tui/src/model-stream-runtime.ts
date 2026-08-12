@@ -4564,6 +4564,7 @@ export async function sendMessage(
       let pendingRoundUsage: ModelUsage | undefined;
       let roundFinishReason: string | undefined;
       let roundHadThinking = false;
+      const seenRoundToolUseIds = new Set<string>();
       const modelSupportsTools = selectedTools;
       let earlyToolExecution:
         | Promise<Awaited<ReturnType<typeof executeToolCallsWithReadonlyParallelism>>>
@@ -4712,6 +4713,7 @@ export async function sendMessage(
         pendingRoundUsage = undefined;
         roundFinishReason = undefined;
         roundHadThinking = false;
+        seenRoundToolUseIds.clear();
         markContextUsageStale(context, "disconnected_mid_stream");
       };
       let providerStreamDrained = false;
@@ -4763,6 +4765,16 @@ export async function sendMessage(
           continue;
         }
         if (event.type === "tool_use") {
+          if (seenRoundToolUseIds.has(event.id)) {
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `duplicate_tool_use_ignored: toolUseId=${event.id}; tool=${event.name}; requestTurnId=${requestTurnId}`,
+              "warning",
+            );
+            continue;
+          }
+          seenRoundToolUseIds.add(event.id);
           runtimeBoundaryFinalized = false;
           await clearActiveProviderFailureAfterRecovery(
             context,
@@ -7511,6 +7523,7 @@ export async function continueModelAfterToolResults(
       const requestMessages = preflight.messages;
       const promptCacheFields = await buildPromptCacheRequestFields(context);
       const pendingContinuationToolUses: Array<{ id: string; name: string; input: unknown }> = [];
+      const seenRoundToolUseIds = new Set<string>();
       let earlyToolExecution:
         | Promise<Awaited<ReturnType<typeof executeToolCallsWithReadonlyParallelism>>>
         | undefined;
@@ -7612,6 +7625,7 @@ export async function continueModelAfterToolResults(
         pendingRoundUsage = undefined;
         roundFinishReason = undefined;
         roundHadThinking = false;
+        seenRoundToolUseIds.clear();
         markContextUsageStale(context, "disconnected_mid_stream");
       };
       let providerStreamDrained = false;
@@ -7676,6 +7690,16 @@ export async function continueModelAfterToolResults(
           continue;
         }
         if (event.type === "tool_use") {
+          if (seenRoundToolUseIds.has(event.id)) {
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `duplicate_tool_use_ignored: toolUseId=${event.id}; tool=${event.name}; requestTurnId=${requestTurnId}; continuation=yes`,
+              "warning",
+            );
+            continue;
+          }
+          seenRoundToolUseIds.add(event.id);
           runtimeBoundaryFinalized = false;
           await clearActiveProviderFailureAfterRecovery(
             context,

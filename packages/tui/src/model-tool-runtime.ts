@@ -625,6 +625,7 @@ export async function executeModelToolUse(
       true,
       evidence.id,
       () => !requestIsStale(),
+      requestOwner?.requestTurnId,
     );
     if (requestIsStale()) return staleResult();
     return { ok: false, tool: toolName, text, evidenceId: evidence.id };
@@ -850,6 +851,7 @@ export async function executeApprovedModelToolUse(
         true,
         evidence.id,
         () => !requestIsStale(),
+        requestOwner?.requestTurnId,
       );
       if (requestIsStale()) {
         return { ok: false, tool: toolName, text: "cancelled: stale foreground tool request discarded" };
@@ -982,7 +984,7 @@ export async function executeApprovedModelToolUse(
     clearToolRequestActivity();
     await context.store.appendEvent(
       sessionId,
-      createToolEndEvent(toolCall.id, result.output),
+      createToolEndEvent(toolCall.id, result.output, requestOwner?.requestTurnId),
       () => !requestIsStale(),
     );
     if (requestIsStale()) {
@@ -1076,6 +1078,7 @@ export async function executeApprovedModelToolUse(
       isError,
       evidence?.id,
       () => !requestIsStale(),
+      requestOwner?.requestTurnId,
     );
     if (requestIsStale()) {
       return dropStaleToolResult("result");
@@ -1224,6 +1227,7 @@ export async function executeApprovedModelToolUse(
       true,
       evidence.id,
       () => !requestIsStale(),
+      requestOwner?.requestTurnId,
     );
     if (requestIsStale()) {
       return dropStaleToolResult("error");
@@ -1428,6 +1432,7 @@ export async function executeDeferredDispatchToolUse(
       name: dispatchName,
       input: toolCall.input,
       createdAt: new Date().toISOString(),
+      ...(requestTurnId ? { requestTurnId } : {}),
     },
     commitGuard,
   );
@@ -1461,6 +1466,7 @@ export async function executeDeferredDispatchToolUse(
           true,
           evidence.id,
           commitGuard,
+          requestTurnId,
         );
         if (requestIsStale()) return dropStaleResult();
         clearDeferredActivity();
@@ -1485,8 +1491,9 @@ export async function executeDeferredDispatchToolUse(
         dispatchName,
         { text: result.text, data: result.data },
         false,
-          evidence.id,
+        evidence.id,
         commitGuard,
+        requestTurnId,
       );
       if (requestIsStale()) return dropStaleResult();
       clearDeferredActivity();
@@ -1527,6 +1534,7 @@ export async function executeDeferredDispatchToolUse(
           true,
           undefined,
           commitGuard,
+          requestTurnId,
         );
         if (requestIsStale()) return dropStaleResult();
         clearDeferredActivity();
@@ -1547,6 +1555,7 @@ export async function executeDeferredDispatchToolUse(
           true,
           undefined,
           commitGuard,
+          requestTurnId,
         );
         if (requestIsStale()) return dropStaleResult();
         clearDeferredActivity();
@@ -1565,6 +1574,7 @@ export async function executeDeferredDispatchToolUse(
         false,
         undefined,
         commitGuard,
+        requestTurnId,
       );
       if (requestIsStale()) return dropStaleResult();
       clearDeferredActivity();
@@ -1632,6 +1642,7 @@ export async function executeDeferredDispatchToolUse(
         true,
         evidence.id,
         () => !requestIsStale(),
+        requestTurnId,
       );
       if (requestIsStale()) return dropStaleResult();
       clearDeferredActivity();
@@ -1683,6 +1694,7 @@ export async function executeDeferredDispatchToolUse(
       false,
       evidenceId,
       () => !requestIsStale(),
+      requestTurnId,
     );
     if (requestIsStale()) return dropStaleResult();
     clearDeferredActivity();
@@ -1728,6 +1740,7 @@ export async function executeDeferredDispatchToolUse(
       true,
       evidence.id,
       () => !requestIsStale(),
+      requestTurnId,
     );
     if (requestIsStale()) return dropStaleResult();
     return { ok: false, tool: dispatchName, text, evidenceId: evidence.id };
@@ -1789,6 +1802,7 @@ export async function executePreEngineToolUse(
       name: toolName,
       input: toolCall.input,
       createdAt: new Date().toISOString(),
+      ...(requestTurnId ? { requestTurnId } : {}),
     },
     commitGuard,
   );
@@ -1820,6 +1834,7 @@ export async function executePreEngineToolUse(
         true,
         evidence.id,
         commitGuard,
+        requestTurnId,
       );
       if (requestIsStale()) return dropStaleResult();
       clearPreEngineActivity();
@@ -1847,6 +1862,7 @@ export async function executePreEngineToolUse(
         false,
         evidence.id,
         commitGuard,
+        requestTurnId,
       );
       if (requestIsStale()) return dropStaleResult();
       clearPreEngineActivity();
@@ -1878,6 +1894,7 @@ export async function executePreEngineToolUse(
       false,
       evidence.id,
       commitGuard,
+      requestTurnId,
     );
     if (requestIsStale()) return dropStaleResult();
     rememberSourcePackCandidatesFromToolData(context, toolName, result.data);
@@ -1913,6 +1930,7 @@ export async function executePreEngineToolUse(
       true,
       evidence.id,
       commitGuard,
+      requestTurnId,
     );
     if (requestIsStale()) return dropStaleResult();
     return { ok: false, tool: toolName, text, evidenceId: evidence.id };
@@ -2060,9 +2078,19 @@ export async function executeLinghunControlToolUse(
     ? { ...currentRequestUserActionConstraints(context)! }
     : undefined;
   const finishFailure = (text: string) =>
-    finishControlToolFailure(toolCall, context, sessionId, output, text, commitGuard);
+    finishControlToolFailure(toolCall, context, sessionId, output, text, commitGuard, requestTurnId);
   const finishResult = (text: string, isError: boolean, data?: unknown) =>
-    finishControlToolResult(toolCall, context, sessionId, output, text, isError, data, commitGuard);
+    finishControlToolResult(
+      toolCall,
+      context,
+      sessionId,
+      output,
+      text,
+      isError,
+      data,
+      commitGuard,
+      requestTurnId,
+    );
   startRequestActivity(output, context, "tool_running", {
     toolName: toolCall.name,
     toolTarget: extractToolTarget(toolCall.name, toolCall.input),
@@ -2926,8 +2954,19 @@ async function finishControlToolFailure(
   output: Writable,
   text: string,
   commitGuard?: () => boolean,
+  requestTurnId?: string,
 ) {
-  return finishControlToolResult(toolCall, context, sessionId, output, text, true, undefined, commitGuard);
+  return finishControlToolResult(
+    toolCall,
+    context,
+    sessionId,
+    output,
+    text,
+    true,
+    undefined,
+    commitGuard,
+    requestTurnId,
+  );
 }
 
 function controlToolEvidenceSpec(
@@ -3061,6 +3100,7 @@ async function finishControlToolResult(
   isError: boolean,
   data?: unknown,
   commitGuard?: () => boolean,
+  requestTurnId?: string,
 ) {
   if (commitGuard && !commitGuard()) {
     return { ok: false, tool: toolCall.name, text: "cancelled: stale control tool result discarded" };
@@ -3090,6 +3130,7 @@ async function finishControlToolResult(
     isError,
     evidence?.id,
     commitGuard,
+    requestTurnId,
   );
   if (commitGuard && !commitGuard()) {
     return { ok: false, tool: toolCall.name, text: "cancelled: stale control tool result discarded" };
@@ -3270,7 +3311,17 @@ async function executeWriteReportToolUse(
   if (permission.decision !== "allow") {
     const text = `${permission.decision}: ${permission.reason}`;
     const evidence = await recordToolFailureEvidence(context, sessionId, "Write", text);
-    await appendToolResultEvent(context, sessionId, toolCall.id, "Write", text, true, evidence.id);
+    await appendToolResultEvent(
+      context,
+      sessionId,
+      toolCall.id,
+      "Write",
+      text,
+      true,
+      evidence.id,
+      undefined,
+      context.currentRequestTurnId,
+    );
     return { ok: false, tool: WRITE_REPORT_TOOL_NAME, text, evidenceId: evidence.id };
   }
   return executeApprovedModelToolUse(
@@ -3389,6 +3440,7 @@ export async function executeIndexToolUse(
       false,
       evidence.id,
       commitGuard,
+      requestTurnId,
     );
     if (!commitGuard()) return staleResult();
     writeLine(output, text);
@@ -3475,6 +3527,7 @@ export async function executeIndexToolUse(
       true,
       evidence.id,
       commitGuard,
+      requestTurnId,
     );
     return { ok: false, tool: name, text, evidenceId: evidence.id };
   }
@@ -3571,6 +3624,7 @@ export async function executeApprovedIndexToolUse(
         true,
         evidence.id,
         commitGuard,
+        requestTurnId,
       );
       writeLine(output, guard);
       return { ok: false, tool: name, text: guard, evidenceId: evidence.id };
@@ -3654,6 +3708,7 @@ export async function executeApprovedIndexToolUse(
       false,
       evidence.id,
       commitGuard,
+      requestTurnId,
     );
     if (!context.isInkSession) {
       writeLine(output, primaryText);
@@ -3679,6 +3734,7 @@ export async function executeApprovedIndexToolUse(
     true,
     evidence.id,
     commitGuard,
+    requestTurnId,
   );
   if (!context.isInkSession) {
     writeLine(output, text);
@@ -4192,7 +4248,11 @@ export async function handleToolCommand(
       await appendBackgroundTaskEvent(context, sessionId, task, commitGuard);
     }
     if (!ownerIsCurrent()) return undefined;
-    await context.store.appendEvent(sessionId, createToolEndEvent(callId, result.output), commitGuard);
+    await context.store.appendEvent(
+      sessionId,
+      createToolEndEvent(callId, result.output, owner.requestTurnId),
+      commitGuard,
+    );
     if (!ownerIsCurrent()) return undefined;
     await appendDerivedToolEvents(context, sessionId, name, result.output, commitGuard);
     if (!ownerIsCurrent()) return undefined;
@@ -4222,6 +4282,7 @@ export async function handleToolCommand(
       isToolOutputFailure(name, result.output),
       evidence?.id,
       commitGuard,
+      owner.requestTurnId,
     );
     if (!ownerIsCurrent()) return undefined;
     if (isToolOutputFailure(name, result.output)) {
@@ -4509,6 +4570,7 @@ function installToolProgressHandler(
         id: callId,
         message: truncateDisplay(message.replace(/\s+/g, " "), 500),
         createdAt: new Date().toISOString(),
+        ...(requestOwner?.requestTurnId ? { requestTurnId: requestOwner.requestTurnId } : {}),
       }, requestOwner),
     );
     const lines = displayText.split(/\r?\n/u).filter(Boolean);

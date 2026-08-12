@@ -4621,7 +4621,7 @@ async function appendAgentToolEvents(
   if (commitGuard && !commitGuard()) return;
   await context.store.appendEvent(
     agent.transcriptSessionId,
-    createToolEndEvent(callId, output),
+    createToolEndEvent(callId, output, agent.invokingRequestTurnId),
     commitGuard,
   );
   if (commitGuard && !commitGuard()) return;
@@ -4646,6 +4646,7 @@ async function appendAgentToolResultEvent(
     isError,
     undefined,
     commitGuard,
+    agent.invokingRequestTurnId,
   );
 }
 
