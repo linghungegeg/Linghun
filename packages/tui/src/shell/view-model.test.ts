@@ -8490,6 +8490,29 @@ describe("deriveBackgroundActivityFallback — request activity cleared but work
     expect(view.activity!.elapsed).toBeDefined();
   });
 
+  it("running agent fallback activity uses public identity instead of internal id or slug", () => {
+    const ctx = createContext({
+      agents: [
+        {
+          id: "agent_01K2RAWID",
+          type: "explorer",
+          displayName: "",
+          addressableName: "",
+          status: "running",
+          mailbox: [],
+          startedAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      backgroundTasks: [],
+      lastModelRequest: fakeLastModelRequest,
+    } as unknown as Partial<TuiContext>);
+    const view = createShellViewModel(ctx, { width: 80 });
+
+    expect(view.activity?.text).toContain("等待子智能体 探索");
+    expect(view.activity?.text).not.toContain("agent_01K2RAWID");
+    expect(view.activity?.text).not.toContain("team:");
+  });
+
   it("multiple running agents → activity shows count", () => {
     const ctx = createContext({
       agents: [

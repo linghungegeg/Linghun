@@ -1958,13 +1958,16 @@ function deriveBackgroundActivityFallback(
 
   if (runningAgents.length > 0) {
     const elapsed = formatElapsedForFirstTimestamp(runningAgents.map((agent) => agent.startedAt));
+    const singleAgentLabel = runningAgents.length === 1
+      ? formatAgentActivityIdentity(runningAgents[0], language)
+      : undefined;
     const text =
       language === "en-US"
         ? runningAgents.length === 1
-          ? `Waiting for agent ${runningAgents[0].displayName ?? runningAgents[0].addressableName ?? ""}…`
+          ? `Waiting for agent ${singleAgentLabel}…`
           : `${runningAgents.length} agents still working…`
         : runningAgents.length === 1
-          ? `等待子智能体 ${runningAgents[0].displayName ?? runningAgents[0].addressableName ?? ""}…`
+          ? `等待子智能体 ${singleAgentLabel}…`
           : `${runningAgents.length} 个智能体仍在工作…`;
     return { phase: "continuing", text, language, elapsed };
   }
@@ -2002,6 +2005,24 @@ function formatElapsedForFirstTimestamp(values: Array<string | undefined>): stri
     .filter((value) => Number.isFinite(value));
   if (timestamps.length === 0) return undefined;
   return formatElapsedSince(new Date(Math.min(...timestamps)).toISOString());
+}
+
+function formatAgentActivityIdentity(
+  agent: NonNullable<TuiContext["agents"]>[number],
+  language: Language,
+): string {
+  const explicit = agent.displayName?.trim() || agent.addressableName?.trim();
+  if (explicit) return explicit;
+  if (language === "en-US") {
+    if (agent.type === "planner") return "Planner";
+    if (agent.type === "explorer") return "Explorer";
+    if (agent.type === "verifier") return "Verifier";
+    return "Agent";
+  }
+  if (agent.type === "planner") return "规划";
+  if (agent.type === "explorer") return "探索";
+  if (agent.type === "verifier") return "验证";
+  return "Agent";
 }
 
 function deriveVisibleWorkState(context: TuiContext): VisibleWorkState {
