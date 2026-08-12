@@ -476,8 +476,10 @@ export function createShellViewModel(
 
   const fittedBlocks = blocks.map((block) => fitBlockToWidth(block, width));
   const agentTranscriptViewState = context.agentTranscriptViewState;
-  const agentTranscriptBlocks = buildAgentTranscriptViewBlocks(
-    agentTranscriptViewState,
+  const agentTranscriptBlocks = groupTranscriptToolBlocks(
+    buildAgentTranscriptViewBlocks(agentTranscriptViewState, language).map((block) =>
+      withAgentToolActivityOwner(block, agentTranscriptViewState),
+    ),
     language,
   ).map((block) => fitBlockToWidth(block, width));
   const visibleFittedBlocks = agentTranscriptViewState ? agentTranscriptBlocks : fittedBlocks;
@@ -829,19 +831,27 @@ function groupTranscriptToolBlocks(
 ): ProductBlockViewModel[] {
   const result: ProductBlockViewModel[] = [];
   let group: ProductBlockViewModel[] = [];
+  let groupKey: string | undefined;
+  let groupKind: ToolGroupingKind | undefined;
 
   const flush = () => {
-    if (group.length >= 3) {
+    if (group.length >= 2) {
       result.push(createGroupedToolBlock(group, language));
     } else {
       result.push(...group);
     }
     group = [];
+    groupKey = undefined;
+    groupKind = undefined;
   };
 
   for (const block of blocks) {
-    if (classifyToolGroupingBlock(block)) {
+    const kind = classifyToolGroupingBlock(block);
+    const key = kind ? toolGroupingKey(block) : undefined;
+    if (kind && key && canAppendToolGroupingBlock(group, groupKey, groupKind, block, key, kind)) {
       group.push(block);
+      groupKey = key;
+      groupKind = kind;
       continue;
     }
     flush();
@@ -851,38 +861,74 @@ function groupTranscriptToolBlocks(
   return result;
 }
 
-type ToolGroupingKind = "read" | "search" | "extension" | "agent" | "workflow" | "verification";
+function withAgentToolActivityOwner(
+  block: ProductBlockViewModel,
+  state: TuiContext["agentTranscriptViewState"],
+): ProductBlockViewModel {
+  if (!state || !block.toolActivity) return block;
+  return {
+    ...block,
+    toolActivity: {
+      ...block.toolActivity,
+      agentId: state.agentId,
+      sessionId: state.sessionId,
+    },
+  };
+}
+
+type ToolGroupingKind = "read" | "search";
 
 function classifyToolGroupingBlock(block: ProductBlockViewModel): ToolGroupingKind | undefined {
   if (block.status === "fail" || block.status === "blocked") return undefined;
-  const text = `${block.title}\n${block.summary}\n${block.fullText ?? ""}`.trim();
-  if (/^(?:Read\(|读取摘要|Read summary)/iu.test(text)) return "read";
-  if (/^(?:Grep\(|Glob\(|搜索摘要|文件搜索摘要|Search summary|File search summary)/iu.test(text)) {
-    return "search";
+  if (block.messageKind !== "tool_call" && !block.messageKind?.startsWith("tool_result")) {
+    return undefined;
   }
-  if (
-    /(?:已发现\s+\d+\s+个扩展工具|扩展工具调用(?:完成|失败)|Found\s+\d+\s+extension tool|Extension tool (?:finished|call failed))/iu.test(
-      text,
-    )
-  ) {
-    return "extension";
-  }
-  if (
-    /(?:已(?:启动|停止|检查|更新)后台智能体|智能体已完成|background agent|agent completed|Checked background agents|Stopped \d+ background agent)/iu.test(
-      text,
-    )
-  ) {
-    return "agent";
-  }
-  if (
-    /(?:工作流已完成|已启动后台工作流|工作流结果已记录|Workflow completed|Started a background workflow|Recorded the workflow result|多智能体协作|Multi-agent collaboration)/iu.test(
-      text,
-    )
-  ) {
-    return "workflow";
-  }
-  if (/(?:验证已结束|Verification finished)/iu.test(text)) return "verification";
+  if (block.toolActivity?.kind === "read") return "read";
+  if (block.toolActivity?.kind === "search") return "search";
   return undefined;
+}
+
+function canAppendToolGroupingBlock(
+  group: ProductBlockViewModel[],
+  groupKey: string | undefined,
+  groupKind: ToolGroupingKind | undefined,
+  block: ProductBlockViewModel,
+  key: string,
+  kind: ToolGroupingKind,
+): boolean {
+  if (group.length === 0) return true;
+  if (!groupKey || key !== groupKey) return false;
+  if (!isMergeableReadSearchPair(groupKind, kind)) return false;
+  const previous = group[group.length - 1];
+  if (previous?.toolActivity?.toolUseId && block.toolActivity?.toolUseId) {
+    return previous.toolActivity.toolUseId !== block.toolActivity.toolUseId;
+  }
+  return true;
+}
+
+function isMergeableReadSearchPair(
+  previous: ToolGroupingKind | undefined,
+  next: ToolGroupingKind,
+): boolean {
+  void next;
+  return previous === undefined || previous === "read" || previous === "search";
+}
+
+function toolGroupingKey(block: ProductBlockViewModel): string | undefined {
+  const activity = block.toolActivity;
+  if (!activity) return undefined;
+  const owner = activity.agentId
+    ? `agent:${activity.agentId}`
+    : activity.sessionId
+      ? `session:${activity.sessionId}`
+      : "main";
+  const request = activity.requestTurnId ?? activity.apiTurnId ?? activity.requestId;
+  if (!request) return undefined;
+  return [
+    owner,
+    `request:${request}`,
+    "kind:readonly",
+  ].join("|");
 }
 
 function createGroupedToolBlock(
@@ -903,7 +949,7 @@ function createGroupedToolBlock(
     })
     .join("\n\n");
   return {
-    id: `tool-group-${blocks[0]?.id ?? Date.now()}-${blocks.length}`,
+    id: `tool-group-${formatToolGroupIdPart(blocks[0])}-${blocks.length}`,
     kind: "tool",
     status: blocks.some((block) => block.status === "partial") ? "partial" : "info",
     title: "",
@@ -912,7 +958,19 @@ function createGroupedToolBlock(
     nextAction: shellText[language].detailsHint,
     ctrlOCollapsed: true,
     messageKind: "tool_result_success",
+    toolActivity: blocks[0]?.toolActivity,
   };
+}
+
+function formatToolGroupIdPart(block: ProductBlockViewModel | undefined): string {
+  const activity = block?.toolActivity;
+  return (
+    activity?.requestTurnId ??
+    activity?.apiTurnId ??
+    activity?.requestId ??
+    block?.id ??
+    "unknown"
+  );
 }
 
 function formatToolGroupSummary(
@@ -920,29 +978,14 @@ function formatToolGroupSummary(
   fallbackCount: number,
   language: Language,
 ): string {
-  const ordered: ToolGroupingKind[] = [
-    "read",
-    "search",
-    "extension",
-    "agent",
-    "workflow",
-    "verification",
-  ];
+  const ordered: ToolGroupingKind[] = ["read", "search"];
   const zhLabels: Record<ToolGroupingKind, string> = {
     read: "读取",
     search: "搜索",
-    extension: "扩展工具",
-    agent: "后台智能体",
-    workflow: "工作流",
-    verification: "验证",
   };
   const enLabels: Record<ToolGroupingKind, string> = {
     read: "read",
     search: "search",
-    extension: "extension",
-    agent: "agent",
-    workflow: "workflow",
-    verification: "verification",
   };
   const parts = ordered.flatMap((kind) => {
     const count = counts.get(kind) ?? 0;

@@ -27,6 +27,28 @@ export type ProductBlockSelectionRange = {
   endColumn: number;
 };
 
+export type ToolActivityKind =
+  | "read"
+  | "search"
+  | "edit"
+  | "bash"
+  | "todo"
+  | "diff"
+  | "network"
+  | "other";
+
+export type ToolActivityIdentity = {
+  toolName: string;
+  toolUseId?: string;
+  requestTurnId?: string;
+  apiTurnId?: string;
+  requestId?: string;
+  resultId?: string;
+  agentId?: string;
+  sessionId?: string;
+  kind: ToolActivityKind;
+};
+
 /**
  * D.13Q-UX — 消息语义维度（与 ProductBlockKind 的"用途"维度正交）。
  *
@@ -118,6 +140,8 @@ export type ProductBlockViewModel = {
   messageKind?: MessageBlockKind;
   /** Phase 1 display contract: optional structured source for renderer/details parity. */
   displayBlock?: DisplayBlock;
+  /** Phase 4 display grouping identity, derived from runtime tool call/result metadata. */
+  toolActivity?: ToolActivityIdentity;
   /** Whole-line compatibility fallback for older app-owned transcript selection rendering. */
   selectionLineIndexes?: number[];
   /** Cell-column ranges highlighted by the app-owned transcript selection substrate. */

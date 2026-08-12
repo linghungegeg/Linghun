@@ -206,9 +206,15 @@ export class ShellBlockOutput extends Writable {
       this.context.language === "en-US"
         ? `${TOGGLE_DETAILS_KEYBIND} for details`
         : `${TOGGLE_DETAILS_KEYBIND} 查看完整内容`;
+    const resolvedToolUseId = toolUseId ?? structured.block.id;
     const block: ProductBlockViewModel = {
       ...base,
-      id: toolBlockId(structured.block.toolName, toolUseId ?? structured.block.id) ?? base.id,
+      id:
+        toolBlockId(structured.block.toolName, resolvedToolUseId) ??
+        fallbackStructuredToolBlockId(
+          structured.block.toolName,
+          structured.layered.evidenceId ?? structured.block.evidenceId,
+        ),
       kind: isError ? "error" : "details",
       status: isError ? "fail" : "info",
       title: "",
@@ -223,6 +229,12 @@ export class ShellBlockOutput extends Writable {
         summary: base.summary,
         body: base.fullText,
       },
+      toolActivity: createToolActivityIdentity({
+        toolName: structured.block.toolName,
+        toolUseId: resolvedToolUseId,
+        requestTurnId: this.context.currentRequestTurnId,
+        resultId: structured.layered.evidenceId ?? structured.block.evidenceId,
+      }),
     };
     this.appendTranscriptSourceBlock(block);
     this.upsertBlock(block);
@@ -239,8 +251,8 @@ export class ShellBlockOutput extends Writable {
   writeToolRunningBlock(toolName: string, toolUseId: string, summary?: string): void {
     const cleanSummary = this.visibleTextSanitizer.push(summary ?? "").replace(/\r/g, "").trim();
     const title = this.context.language === "en-US" ? "Running" : "正在处理";
-    const toolLabel = cleanSummary || (this.context.language === "en-US" ? "Working" : "处理中");
-    const body = cleanSummary || title;
+    const toolLabel = cleanSummary || toolName;
+    const body = cleanSummary || toolName;
     const base = createOutputBlock(body, this.context.language, toolBlockId(toolName, toolUseId));
     const block: ProductBlockViewModel = {
       ...base,
@@ -261,6 +273,11 @@ export class ShellBlockOutput extends Writable {
         collapsible: false,
         bordered: false,
       },
+      toolActivity: createToolActivityIdentity({
+        toolName,
+        toolUseId,
+        requestTurnId: this.context.currentRequestTurnId,
+      }),
     };
     this.appendTranscriptSourceBlock(block);
     this.upsertBlock(block);
@@ -835,6 +852,43 @@ export class ShellBlockOutput extends Writable {
 function toolBlockId(toolName: string | undefined, toolUseId: string | undefined): string | undefined {
   if (!toolName || !toolUseId) return undefined;
   return `tool:${toolName}:${toolUseId}`;
+}
+
+function fallbackStructuredToolBlockId(toolName: string | undefined, evidenceId: string | undefined): string {
+  if (toolName && evidenceId) return `tool:${toolName}:evidence:${evidenceId}`;
+  return `tool:${toolName ?? "unknown"}:inline:${randomUUID()}`;
+}
+
+function createToolActivityIdentity(input: {
+  toolName: string;
+  toolUseId?: string;
+  requestTurnId?: string;
+  resultId?: string;
+}): NonNullable<ProductBlockViewModel["toolActivity"]> {
+  return {
+    toolName: input.toolName,
+    kind: classifyToolActivityKind(input.toolName),
+    ...(input.toolUseId ? { toolUseId: input.toolUseId } : {}),
+    ...(input.requestTurnId
+      ? { requestTurnId: input.requestTurnId, apiTurnId: input.requestTurnId }
+      : {}),
+    ...(input.resultId ? { resultId: input.resultId } : {}),
+  };
+}
+
+function classifyToolActivityKind(
+  toolName: string,
+): NonNullable<ProductBlockViewModel["toolActivity"]>["kind"] {
+  if (toolName === "Read" || toolName === "ReadSnippets" || toolName === "SourcePack") {
+    return "read";
+  }
+  if (toolName === "Grep" || toolName === "Glob") return "search";
+  if (toolName === "Write" || toolName === "Edit" || toolName === "MultiEdit") return "edit";
+  if (toolName === "Bash") return "bash";
+  if (toolName === "Todo") return "todo";
+  if (toolName === "Diff") return "diff";
+  if (toolName === "WebSearch" || toolName === "WebFetch") return "network";
+  return "other";
 }
 
 function createVisibleStructuredDetails(

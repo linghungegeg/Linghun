@@ -41,6 +41,10 @@ export function transcriptEventsToAgentBlocks(
         summary: `${event.name}(${input})`,
         fullText: `${event.name}(${input})`,
         messageKind: "tool_call",
+        toolActivity: createAgentToolActivity(event.name, {
+          toolUseId: event.id,
+          requestTurnId: readOptionalString(event, "requestTurnId"),
+        }),
         keep: true,
       });
       continue;
@@ -63,6 +67,11 @@ export function transcriptEventsToAgentBlocks(
           body: text,
           bordered: event.isError,
         },
+        toolActivity: createAgentToolActivity(event.toolName, {
+          toolUseId: event.toolUseId,
+          requestTurnId: readOptionalString(event, "requestTurnId"),
+          resultId: event.evidenceId,
+        }),
         keep: true,
       });
     }
@@ -88,4 +97,40 @@ function formatToolResult(event: Extract<TranscriptEvent, { type: "tool_result" 
 
 function firstLine(text: string): string {
   return text.replace(/\r/g, "").split("\n").find((line) => line.trim())?.trim() ?? "";
+}
+
+function readOptionalString(value: unknown, key: string): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const item = (value as Record<string, unknown>)[key];
+  return typeof item === "string" && item.length > 0 ? item : undefined;
+}
+
+function createAgentToolActivity(
+  toolName: string,
+  ids: { toolUseId?: string; requestTurnId?: string; resultId?: string },
+): NonNullable<ProductBlockViewModel["toolActivity"]> {
+  return {
+    toolName,
+    kind: classifyAgentToolKind(toolName),
+    ...(ids.toolUseId ? { toolUseId: ids.toolUseId } : {}),
+    ...(ids.requestTurnId
+      ? { requestTurnId: ids.requestTurnId, apiTurnId: ids.requestTurnId }
+      : {}),
+    ...(ids.resultId ? { resultId: ids.resultId } : {}),
+  };
+}
+
+function classifyAgentToolKind(
+  toolName: string,
+): NonNullable<ProductBlockViewModel["toolActivity"]>["kind"] {
+  if (toolName === "Read" || toolName === "ReadSnippets" || toolName === "SourcePack") {
+    return "read";
+  }
+  if (toolName === "Grep" || toolName === "Glob") return "search";
+  if (toolName === "Write" || toolName === "Edit" || toolName === "MultiEdit") return "edit";
+  if (toolName === "Bash") return "bash";
+  if (toolName === "Todo") return "todo";
+  if (toolName === "Diff") return "diff";
+  if (toolName === "WebSearch" || toolName === "WebFetch") return "network";
+  return "other";
 }

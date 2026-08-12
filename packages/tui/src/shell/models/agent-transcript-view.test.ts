@@ -23,14 +23,17 @@ describe("agent transcript view model", () => {
         name: "Read",
         input: { path: "packages/tui/src/index.ts" },
         createdAt: "2026-01-01T00:00:02.000Z",
-      },
+        requestTurnId: "turn-a",
+      } as TranscriptEvent,
       {
         type: "tool_result",
         toolUseId: "t1",
         toolName: "Read",
         content: "Read 10 lines",
         createdAt: "2026-01-01T00:00:03.000Z",
-      },
+        requestTurnId: "turn-a",
+        evidenceId: "ev-t1",
+      } as TranscriptEvent,
     ];
 
     const blocks = transcriptEventsToAgentBlocks(events, "zh-CN");
@@ -44,7 +47,20 @@ describe("agent transcript view model", () => {
     expect(blocks[0]?.messageKind).toBe("user_text");
     expect(blocks[1]?.messageKind).toBe("assistant_text");
     expect(blocks[2]?.messageKind).toBe("tool_call");
+    expect(blocks[2]?.toolActivity).toMatchObject({
+      toolName: "Read",
+      toolUseId: "t1",
+      requestTurnId: "turn-a",
+      kind: "read",
+    });
     expect(blocks[3]?.messageKind).toBe("tool_result_success");
+    expect(blocks[3]?.toolActivity).toMatchObject({
+      toolName: "Read",
+      toolUseId: "t1",
+      requestTurnId: "turn-a",
+      resultId: "ev-t1",
+      kind: "read",
+    });
     expect(blocks[3]?.fullText).toContain("Read 10 lines");
   });
 });

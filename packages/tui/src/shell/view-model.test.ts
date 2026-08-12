@@ -148,6 +148,13 @@ function createBackgroundTask(
   };
 }
 
+function withToolActivity(
+  block: ProductBlockViewModel,
+  toolActivity: NonNullable<ProductBlockViewModel["toolActivity"]>,
+): ProductBlockViewModel {
+  return { ...block, toolActivity };
+}
+
 describe("shell view model", () => {
   it("keeps the home brand and localized composer placeholder without vision copy", () => {
     const zhView = createShellViewModel(createContext({ language: "zh-CN" }), { width: 80 });
@@ -5261,15 +5268,18 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(body).toContain("Multi-agent collaboration running");
   });
 
-  it("classifyToolGroupingBlock recognizes multiAgent collaboration text as 'agent' grouping", async () => {
+  it("classifyToolGroupingBlock uses structured tool activity, not multiAgent text", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/view-model.ts"), "utf8");
     const fnStart = source.indexOf("function classifyToolGroupingBlock(");
     expect(fnStart).toBeGreaterThan(0);
     const fnEnd = source.indexOf("\nfunction ", fnStart + 30);
     const body = source.slice(fnStart, fnEnd);
-    expect(body).toContain("多智能体协作");
-    expect(body).toContain("Multi-agent collaboration");
+    expect(body).toContain("block.toolActivity?.kind");
+    expect(body).toContain('"read"');
+    expect(body).toContain('"search"');
+    expect(body).not.toContain("多智能体协作");
+    expect(body).not.toContain("Multi-agent collaboration");
   });
 
   it("Composer no longer carries SGR wheel handling in the input path", async () => {
@@ -7260,10 +7270,11 @@ describe("ShellBlockOutput — assistant streaming block", () => {
 
     expect(blocks.map((block) => block.messageKind)).toEqual([
       "assistant_text",
-      "tool_result_success",
+      "assistant_text",
       "diagnostic",
       "tool_result_error",
       "local_command_output",
+      "tool_result_success",
     ]);
     for (const block of blocks) {
       expect(block.fullText).toContain("safetail");
@@ -10500,15 +10511,31 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
     expect(view.workflowProgressView?.runs[0]?.id).toBe("workflow-explicit");
   });
 
-  it("Phase 7.18: adjacent read/search/deferred tool outputs collapse into one low-noise block", () => {
+  it("Phase 4: adjacent Read/Grep tool outputs group by structured call metadata", () => {
     const blocks: ProductBlockViewModel[] = [
-      createOutputBlock("Read(package.json)", "zh-CN", "read-start"),
-      createOutputBlock("读取摘要：12 行。\npackage content raw diagnostic", "zh-CN", "read-end"),
-      createOutputBlock("搜索摘要：3 处。\nraw grep result line", "zh-CN", "grep-end"),
-      createOutputBlock(
-        "已发现 2 个扩展工具。\nSearchExtraTools matched raw list",
-        "zh-CN",
-        "search-extra",
+      withToolActivity(createOutputBlock("Read(package.json)", "zh-CN", "read-a"), {
+        toolName: "Read",
+        toolUseId: "read-a",
+        requestTurnId: "turn-1",
+        kind: "read",
+      }),
+      withToolActivity(
+        createOutputBlock("Read(src/a.ts)\npackage content raw diagnostic", "zh-CN", "read-b"),
+        {
+          toolName: "Read",
+          toolUseId: "read-b",
+          requestTurnId: "turn-1",
+          kind: "read",
+        },
+      ),
+      withToolActivity(
+        createOutputBlock("Grep(pattern)\nraw grep result line", "zh-CN", "grep-c"),
+        {
+          toolName: "Grep",
+          toolUseId: "grep-c",
+          requestTurnId: "turn-1",
+          kind: "search",
+        },
       ),
       {
         id: "assistant-after-tools",
@@ -10533,11 +10560,122 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
     expect(group?.summary).toContain("工具活动已分组");
     expect(group?.summary).toContain("读取");
     expect(group?.summary).toContain("搜索");
-    expect(group?.summary).toContain("扩展工具");
-    expect(group?.fullText).toContain("SearchExtraTools matched raw list");
+    expect(group?.toolActivity?.requestTurnId).toBe("turn-1");
+    expect(group?.fullText).toContain("package content raw diagnostic");
+    expect(group?.fullText).toContain("raw grep result line");
     const primaryText = view.blocks.map((block) => `${block.title}\n${block.summary}`).join("\n");
-    expect(primaryText).not.toContain("SearchExtraTools matched raw list");
+    expect(primaryText).not.toContain("raw grep result line");
     expect(view.blocks.some((block) => block.id === "assistant-after-tools")).toBe(true);
+  });
+
+  it("Phase 4: legacy rendered natural language alone is not enough to group tools", () => {
+    const blocks: ProductBlockViewModel[] = [
+      createOutputBlock("Read(package.json)", "zh-CN", "read-start"),
+      createOutputBlock("读取摘要：12 行。\npackage content raw diagnostic", "zh-CN", "read-end"),
+      createOutputBlock("搜索摘要：3 处。\nraw grep result line", "zh-CN", "grep-end"),
+    ];
+
+    const view = createShellViewModel(createContext(), {
+      width: 100,
+      height: 24,
+      viewMode: "task",
+      outputBlocks: blocks,
+    });
+
+    expect(view.blocks.some((block) => block.id.startsWith("tool-group-"))).toBe(false);
+    expect(view.blocks.map((block) => block.id)).toEqual(["read-start", "read-end", "grep-end"]);
+  });
+
+  it("Phase 4: different turns and mixed tool kinds do not merge", () => {
+    const blocks: ProductBlockViewModel[] = [
+      withToolActivity(createOutputBlock("Read(src/a.ts)", "en-US", "read-a"), {
+        toolName: "Read",
+        toolUseId: "read-a",
+        requestTurnId: "turn-1",
+        kind: "read",
+      }),
+      withToolActivity(createOutputBlock("Read(src/b.ts)", "en-US", "read-b"), {
+        toolName: "Read",
+        toolUseId: "read-b",
+        requestTurnId: "turn-2",
+        kind: "read",
+      }),
+      withToolActivity(createOutputBlock("Read(src/c.ts)", "en-US", "read-c"), {
+        toolName: "Read",
+        toolUseId: "read-c",
+        requestTurnId: "turn-3",
+        kind: "read",
+      }),
+      withToolActivity(createOutputBlock("Edit summary: patch +1 -1", "en-US", "edit-d"), {
+        toolName: "Edit",
+        toolUseId: "edit-d",
+        requestTurnId: "turn-3",
+        kind: "edit",
+      }),
+      withToolActivity(createOutputBlock("Grep(pattern)\nraw", "en-US", "grep-e"), {
+        toolName: "Grep",
+        toolUseId: "grep-e",
+        requestTurnId: "turn-3",
+        kind: "search",
+      }),
+    ];
+
+    const view = createShellViewModel(createContext({ language: "en-US" }), {
+      width: 100,
+      height: 24,
+      viewMode: "task",
+      outputBlocks: blocks,
+    });
+
+    expect(view.blocks.some((block) => block.id.startsWith("tool-group-"))).toBe(false);
+    expect(view.blocks.map((block) => block.id)).toEqual([
+      "read-a",
+      "read-b",
+      "read-c",
+      "edit-d",
+      "grep-e",
+    ]);
+  });
+
+  it("Phase 4: agent transcript tool groups keep the selected agent owner", () => {
+    const ctx = createContext({
+      agentTranscriptViewState: {
+        agentId: "agent-a",
+        sessionId: "session-a",
+        label: "Explorer",
+        status: "ready",
+        blocks: [
+          withToolActivity(createOutputBlock("Read(src/a.ts)", "en-US", "agent-read"), {
+            toolName: "Read",
+            toolUseId: "agent-read",
+            requestTurnId: "agent-turn",
+            kind: "read",
+          }),
+          withToolActivity(createOutputBlock("Grep(pattern)\nmatch", "en-US", "agent-grep"), {
+            toolName: "Grep",
+            toolUseId: "agent-grep",
+            requestTurnId: "agent-turn",
+            kind: "search",
+          }),
+        ],
+      },
+    } as unknown as Partial<TuiContext>);
+
+    const view = createShellViewModel(ctx, {
+      width: 100,
+      height: 24,
+      viewMode: "task",
+    });
+
+    expect(view.blocks).toHaveLength(1);
+    expect(view.blocks[0]?.id).toContain("tool-group-agent-turn-2");
+    expect(view.blocks[0]?.toolActivity).toMatchObject({
+      agentId: "agent-a",
+      sessionId: "session-a",
+      requestTurnId: "agent-turn",
+    });
+    expect(view.blocks[0]?.fullText).toContain("Read(src/a.ts)");
+    expect(view.blocks[0]?.fullText).toContain("Grep(pattern)");
   });
 
   it("tool output blocks use tool_result_success semantics instead of assistant text", () => {

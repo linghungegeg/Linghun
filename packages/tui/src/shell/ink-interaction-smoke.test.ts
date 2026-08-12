@@ -700,9 +700,8 @@ describe("Ink TTY interaction smoke", () => {
       expect(visible).toContain("inline");
       expect(visible).toContain("│  名称  │");
       expect(visible).toContain("包含中文宽字符");
-      expect(visible).toContain("+ ts · copy · details");
-      expect(visible).toContain("| 1 | const answer = 42;");
-      expect(visible).toContain("+---");
+      expect(visible).toContain("ts · 3 lines");
+      expect(visible).toContain("1 | const answer = 42;");
       expect(visible).toContain("--- a/file.ts");
       expect(visible).toContain("+ const newValue = 2;");
       expect(visible).toContain("┈┈┈");

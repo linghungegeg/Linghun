@@ -28,6 +28,11 @@ describe("tui-output-surface", () => {
     expect(blocks[0]?.messageKind).toBe("tool_call");
     expect(blocks[0]?.status).toBe("running");
     expect(blocks[0]?.displayBlock?.bordered).toBe(false);
+    expect(blocks[0]?.toolActivity).toMatchObject({
+      toolName: "Bash",
+      toolUseId: "call-1",
+      kind: "bash",
+    });
 
     const structured = createStructuredToolOutput(
       "Bash",
@@ -41,6 +46,11 @@ describe("tui-output-surface", () => {
     expect(blocks[0]?.messageKind).toBe("tool_result_success");
     expect(blocks[0]?.status).toBe("info");
     expect(blocks[0]?.displayBlock?.bordered).toBe(false);
+    expect(blocks[0]?.toolActivity).toMatchObject({
+      toolName: "Bash",
+      toolUseId: "call-1",
+      kind: "bash",
+    });
     expect(blocks[0]?.summary).toContain("命令已完成");
   });
 
@@ -59,6 +69,38 @@ describe("tui-output-surface", () => {
     expect(blocks[0]?.displayBlock?.title).toBe("正在处理");
     expect(blocks[0]?.displayBlock?.body).toBe("second chunk");
     expect(blocks[0]?.displayBlock?.bordered).toBe(false);
+  });
+
+  it("uses the tool name instead of an isolated processing line for empty running summaries", () => {
+    const context = createContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(context, blocks);
+
+    output.writeToolRunningBlock("Read", "call-empty");
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.fullText).toBe("Read");
+    expect(blocks[0]?.summary).toBe("Read");
+    expect(blocks[0]?.displayBlock?.summary).toBe("Read");
+    expect(blocks[0]?.fullText).not.toBe("正在处理");
+  });
+
+  it("keeps inline structured tool output from replacing adjacent ordinary output", () => {
+    const context = createContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(context, blocks);
+
+    output.write("ordinary output");
+    output.writeStructuredToolOutput(
+      createStructuredToolOutput("Glob", { text: "src/a.ts", data: { count: 1 } }, "zh-CN"),
+    );
+
+    expect(blocks.map((block) => block.messageKind)).toEqual([
+      "assistant_text",
+      "tool_result_success",
+    ]);
+    expect(blocks[0]?.fullText).toBe("ordinary output");
+    expect(blocks[1]?.id).toContain("tool:Glob:inline:");
   });
 
   it("keeps running tool helper silent for plain writable fallback", () => {
