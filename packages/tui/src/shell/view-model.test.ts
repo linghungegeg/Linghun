@@ -1704,6 +1704,58 @@ describe("mapBottomPaneStatusToView — unified bottom status", () => {
     expect(status?.text).toBe("思考中…");
   });
 
+  it("lets current Todo take over the bottom status when request activity is only continuing after tool", () => {
+    const ctx = createContext({
+      requestActivityPhase: "continuing_after_tool",
+      tools: {
+        todos: [
+          { id: "todo-1", content: "整理阶段 5", status: "in_progress" },
+          { id: "todo-2", content: "收口详情", status: "pending" },
+        ],
+      },
+    } as unknown as Partial<TuiContext>);
+
+    const status = mapBottomPaneStatusToView(ctx, {
+      activity: mapRequestActivityToView(ctx),
+      visibleWorkState: {
+        mainRequestActive: true,
+        userInputPending: false,
+        toolsRunning: false,
+        agentsRunning: 0,
+        backgroundTasksRunning: 0,
+        explicitWorkflowRunning: false,
+        multiAgentWorkflowRunning: false,
+        pendingCompletionCount: 0,
+        scrollDetached: false,
+        unseenCount: 0,
+      },
+    });
+
+    expect(status).toMatchObject({
+      kind: "running",
+      source: "request",
+      text: expect.stringContaining("Todo 1/2"),
+    });
+    expect(status?.reason).toBe("进行中");
+  });
+
+  it("keeps tool-running higher than Todo in the bottom status", () => {
+    const ctx = createContext({
+      requestActivityPhase: "tool_running",
+      requestActivityToolName: "Read",
+      tools: {
+        todos: [{ id: "todo-1", content: "整理阶段 5", status: "in_progress" }],
+      },
+    } as unknown as Partial<TuiContext>);
+
+    const status = mapBottomPaneStatusToView(ctx, {
+      activity: mapRequestActivityToView(ctx),
+    });
+
+    expect(status).toMatchObject({ kind: "running", source: "tool" });
+    expect(status?.text).toContain("运行 Read");
+  });
+
   it("maps permission pending to a low-noise bottom status line", () => {
     const ctx = createContext({ requestActivityPhase: "request_started" } as Partial<TuiContext>);
     const permission = mapPendingApprovalToPermission({

@@ -894,10 +894,6 @@ function createTodoSurfacePreview(
     completed: items.filter((item) => item.status === "completed").length,
     blocked: items.filter((item) => item.status === "blocked").length,
   };
-  // Main screen only shows in_progress and blocked items; completed goes to details.
-  const activeItems = items.filter(
-    (item) => item.status === "in_progress" || item.status === "blocked",
-  );
   const parts =
     language === "en-US"
       ? [
@@ -915,26 +911,7 @@ function createTodoSurfacePreview(
   const lines = [
     language === "en-US" ? `Todo: ${parts.join(" · ")}` : `Todo：${parts.join(" · ")}`,
   ];
-  // Show up to PRIMARY_PREVIEW_LINE_CAP - 1 active items (reserve 1 line for header).
-  const displayItems = activeItems.slice(0, PRIMARY_PREVIEW_LINE_CAP - 1);
-  for (const item of displayItems) {
-    const label =
-      language === "en-US"
-        ? item.status.replace("_", " ")
-        : item.status === "in_progress"
-          ? "进行中"
-          : "阻塞";
-    lines.push(`  ${label}: ${item.content}`);
-  }
-  const hiddenCount = items.length - displayItems.length;
-  if (hiddenCount > 0) {
-    lines.push(
-      language === "en-US"
-        ? `... ${hiddenCount} more item(s) in details.`
-        : `... 另有 ${hiddenCount} 项在详情中。`,
-    );
-  }
-  return { text: lines.join("\n"), truncated: hiddenCount > 0 };
+  return { text: lines.join("\n"), truncated: true };
 }
 
 type TodoSurfaceItem = {

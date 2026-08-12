@@ -415,6 +415,20 @@ describe("TaskBottomPane budget allocation", () => {
     expect(allocation.maxRows).toBe(9);
   });
 
+  it("keeps the task list ahead of background and agent progress when only one optional row fits", () => {
+    const allocation = allocateBottomPaneBudget(10, {
+      taskListRows: 2,
+      agentProgressRows: 2,
+      workflowProgressRows: 2,
+      backgroundOverlayRows: 2,
+    });
+
+    expect(allocation.showTaskList).toBe(true);
+    expect(allocation.showAgentProgress).toBe(false);
+    expect(allocation.showWorkflowProgress).toBe(false);
+    expect(allocation.showBackgroundOverlay).toBe(false);
+  });
+
   it("expands live preview frames consistently across terminal height tiers", () => {
     for (const height of [16, 24, 28, 40]) {
       const idleHeight = nativeScrollbackTaskFrameHeight({

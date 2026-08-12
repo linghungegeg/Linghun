@@ -73,36 +73,55 @@ export function buildAgentProgressTreeView(context: TuiContext): AgentProgressTr
 
   const active = allAgents.filter((agent) => isVisibleAgentStatus(resolveAgentStatus(agent)));
   const agents = dedupeById([...active, ...recentlyCompleted]);
-  if (agents.length === 0) return undefined;
+  const showMainEntry = Boolean(context.agentTranscriptViewState);
+  if (agents.length === 0 && !showMainEntry) return undefined;
   const visible = smartSlice(agents, MAX_AGENT_ROWS, (agent) =>
     isVisibleAgentStatus(resolveAgentStatus(agent)),
   );
 
   const cursor = context.agentTreeState?.cursor ?? -1;
   const state = context.agentTreeState;
+  type AgentProgressRow = AgentProgressTreeView["rows"][number];
+  const mainRows: Array<Omit<AgentProgressRow, "branch">> = showMainEntry
+    ? [
+        {
+          id: "__main__",
+          name: context.language === "en-US" ? "main" : "主链",
+          status: "main",
+          activity: context.language === "en-US" ? "return to main chain" : "返回主链",
+          mailboxMessages: 0,
+          mailboxPending: 0,
+          tokens: 0,
+        },
+      ]
+    : [];
+  const agentRows: Array<Omit<AgentProgressRow, "branch">> = visible.visible.map((agent) => {
+    const background = context.backgroundTasks.find(
+      (task) => task.kind === "agent" && task.id === agent.id,
+    );
+    return {
+      id: agent.id,
+      name: formatAgentIdentityName(agent, context.language),
+      status: resolveAgentStatus(agent),
+      detailLabel: formatAgentDetailLabel(agent, context.language),
+      workflowRunId: background?.workflowRunId,
+      parentSessionId: agent.parentSessionId,
+      forkedFrom: agent.forkedFrom,
+      contextMode: agent.contextMode,
+      activity: agent.activitySummary ?? agent.activeTask?.summary ?? agent.lastResultSummary,
+      elapsed:
+        typeof agent.startedAt === "string" ? formatElapsedSince(agent.startedAt, now) : undefined,
+      mailboxMessages: agent.mailbox.length,
+      mailboxPending: agent.mailbox.filter((message) => message.status === "pending").length,
+      tokens: (agent.cost?.inputTokens ?? 0) + (agent.cost?.outputTokens ?? 0),
+    };
+  });
+  const rows = [...mainRows, ...agentRows].map((row, index, allRows) => ({
+    ...row,
+    branch: index === allRows.length - 1 ? ("last" as const) : ("middle" as const),
+  }));
   return {
-    rows: visible.visible.map((agent, index) => {
-      const background = context.backgroundTasks.find(
-        (task) => task.kind === "agent" && task.id === agent.id,
-      );
-      return {
-        id: agent.id,
-        branch: index === visible.visible.length - 1 ? "last" : "middle",
-        name: formatAgentIdentityName(agent, context.language),
-        status: resolveAgentStatus(agent),
-        detailLabel: formatAgentDetailLabel(agent, context.language),
-        workflowRunId: background?.workflowRunId,
-        parentSessionId: agent.parentSessionId,
-        forkedFrom: agent.forkedFrom,
-        contextMode: agent.contextMode,
-        activity: agent.activitySummary ?? agent.activeTask?.summary ?? agent.lastResultSummary,
-        elapsed:
-          typeof agent.startedAt === "string" ? formatElapsedSince(agent.startedAt, now) : undefined,
-        mailboxMessages: agent.mailbox.length,
-        mailboxPending: agent.mailbox.filter((message) => message.status === "pending").length,
-        tokens: (agent.cost?.inputTokens ?? 0) + (agent.cost?.outputTokens ?? 0),
-      };
-    }),
+    rows,
     hiddenPending: visible.hiddenPending,
     activitySummary: summarizeActivity(allAgents),
     cursor,

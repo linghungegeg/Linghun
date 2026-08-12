@@ -63,9 +63,9 @@ export function AgentProgressTree({
 
         const isLast = index === tree.rows.length - 1;
         const treeChar = isLast ? "└─" : "├─";
-        const statusText = row.status === "running" ? "" : ` · ${row.status}`;
+        const statusText = row.status === "running" || row.status === "main" ? "" : ` · ${row.status}`;
         const rowText = `${row.name}${statusText}${row.activity ? `: ${row.activity}` : ""}${
-          row.elapsed ? ` · ${workLabel} ${row.elapsed}` : ""
+          row.elapsed && row.status !== "main" ? ` · ${workLabel} ${row.elapsed}` : ""
         }`;
 
         return (
@@ -136,6 +136,7 @@ export function AgentProgressTree({
 }
 
 function agentStatusMarker(status: string): string {
+  if (status === "main") return "↩";
   if (status === "completed") return "✓";
   if (status === "failed") return "x";
   if (status === "blocked") return "!";

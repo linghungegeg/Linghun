@@ -283,6 +283,32 @@ describe("tool-output-presenter", () => {
       expect(occurrences).toBe(1);
     });
 
+    it("Todo 主屏只保留统计摘要，完整列表进入详情层", () => {
+      const structured = createStructuredToolOutput(
+        "Todo",
+        {
+          text: "Todo created: id=1\n[pending] task 1\n[in_progress] task 2",
+          data: {
+            items: [
+              { id: "1", content: "task 1", status: "pending" },
+              { id: "2", content: "task 2", status: "in_progress" },
+              { id: "3", content: "task 3", status: "completed" },
+            ],
+          },
+        },
+        "zh-CN",
+      );
+
+      expect(structured.layered.preview).toContain("Todo：");
+      expect(structured.layered.preview).not.toContain("task 1");
+      expect(structured.layered.preview).not.toContain("task 2");
+      expect(structured.layered.preview).not.toContain("task 3");
+      expect(structured.layered.truncated).toBe(true);
+      expect(structured.text).toContain("完整内容已收起");
+      expect(structured.layered.details).toContain("task 1");
+      expect(structured.layered.details).toContain("task 2");
+    });
+
     it("失败结构化 DisplayBlock 包含错误状态和退出码文本", () => {
       const structured = createStructuredToolOutput(
         "Bash",

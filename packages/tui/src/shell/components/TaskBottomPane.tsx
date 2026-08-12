@@ -112,10 +112,10 @@ export function allocateBottomPaneBudget(
     return true;
   };
 
+  const showTaskList = take(slotEstimates.taskListRows);
   const showWorkflowProgress = take(slotEstimates.workflowProgressRows);
   const showAgentProgress = take(slotEstimates.agentProgressRows);
   const showBackgroundOverlay = take(slotEstimates.backgroundOverlayRows);
-  const showTaskList = take(slotEstimates.taskListRows);
   const showRuntimeSummary = take(slotEstimates.runtimeSummaryRows);
   const showNotifications = take(slotEstimates.notificationRows);
 

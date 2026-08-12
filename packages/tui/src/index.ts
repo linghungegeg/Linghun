@@ -3543,6 +3543,13 @@ function isAgentTreeSelectable(agent: AgentRun): boolean {
   );
 }
 
+function countAgentTreeSelectableRows(context: TuiContext): number {
+  return (
+    (context.agentTranscriptViewState ? 1 : 0) +
+    (context.agents ?? []).filter(isAgentTreeSelectable).length
+  );
+}
+
 function closeCommandPanelState(
   context: Pick<TuiContext, "commandPanelState" | "transcriptViewportGeometry">,
 ): void {
@@ -3984,10 +3991,10 @@ async function runInkShell(
       // ─── Agent tree keyboard navigation (Phase 3 visual alignment) ──────────────
       if (event.type === "agent-tree-move") {
         const agents = context.agents ?? [];
-        const running = agents.filter(isAgentTreeSelectable);
+        const selectableCount = countAgentTreeSelectableRows(context);
         const cursor = context.agentTreeState?.cursor ?? -1;
         const next =
-          cursor < 0 ? 0 : Math.max(0, Math.min(cursor + event.delta, running.length - 1));
+          cursor < 0 ? 0 : Math.max(0, Math.min(cursor + event.delta, selectableCount - 1));
         context.agentTreeState = { cursor: next, expandedId: context.agentTreeState?.expandedId };
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
@@ -3996,9 +4003,19 @@ async function runInkShell(
       if (event.type === "agent-tree-enter") {
         const agents = context.agents ?? [];
         const selectableAgents = agents.filter(isAgentTreeSelectable);
+        const mainEntryOffset = context.agentTranscriptViewState ? 1 : 0;
         const cursor = context.agentTreeState?.cursor ?? -1;
-        if (cursor >= 0 && cursor < selectableAgents.length) {
-          const agent = selectableAgents[cursor];
+        if (context.agentTranscriptViewState && cursor === 0) {
+          context.agentTranscriptViewState = undefined;
+          context.agentTreeState = { cursor: -1 };
+          context.transcriptScrollState = { scrollOffset: 0, stickToBottom: true };
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+          return;
+        }
+        const agentIndex = cursor - mainEntryOffset;
+        if (agentIndex >= 0 && agentIndex < selectableAgents.length) {
+          const agent = selectableAgents[agentIndex];
           if (agent) {
             const label =
               agent.displayName?.trim() ||
@@ -4057,8 +4074,9 @@ async function runInkShell(
         const agents = context.agents ?? [];
         const running = agents.filter((a) => a.status === "running");
         const cursor = context.agentTreeState?.cursor ?? -1;
-        if (cursor >= 0 && cursor < running.length) {
-          const agent = running[cursor];
+        const agentIndex = cursor - (context.agentTranscriptViewState ? 1 : 0);
+        if (agentIndex >= 0 && agentIndex < running.length) {
+          const agent = running[agentIndex];
           if (agent) {
             agent.status = "cancelled";
           }

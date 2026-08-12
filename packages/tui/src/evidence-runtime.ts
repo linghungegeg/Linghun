@@ -1366,6 +1366,7 @@ export async function appendDerivedToolEvents(
       items: context.tools.todos as TodoItem[],
       createdAt: new Date().toISOString(),
     }, commitGuard);
+    context.shellRerender?.();
   }
   if (commitGuard && !commitGuard()) return;
   if (name === "Diff" && isDiffSummary(output.data)) {

@@ -1773,8 +1773,15 @@ function mapWorkRequestSourceToBottomSource(
   return "request";
 }
 
-function isForegroundWorkRequestState(work: WorkRequestState): boolean {
-  return work.phase !== "agent_running" && work.phase !== "background_running";
+function isHighPriorityBottomWorkRequestState(work: WorkRequestState): boolean {
+  return (
+    work.phase === "tool_running" ||
+    work.phase === "permission_waiting" ||
+    work.phase === "verification_running" ||
+    work.phase === "provider_recovering" ||
+    work.phase === "blocked" ||
+    work.phase === "failed"
+  );
 }
 
 function formatElapsedMs(elapsedMs: number | undefined): string | undefined {
@@ -1802,7 +1809,7 @@ export function mapBottomPaneStatusToView(
   const isEn = language === "en-US";
   const phase = (context as { requestActivityPhase?: string }).requestActivityPhase;
 
-  if (input.workRequestState && isForegroundWorkRequestState(input.workRequestState)) {
+  if (input.workRequestState && isHighPriorityBottomWorkRequestState(input.workRequestState)) {
     return mapWorkRequestStateToBottomPaneStatus(input.workRequestState);
   }
 
@@ -1822,6 +1829,23 @@ export function mapBottomPaneStatusToView(
       elapsed: input.activity?.elapsed,
     };
   }
+
+  if (phase === "tool_running") {
+    const workStatus = input.workRequestState
+      ? mapWorkRequestStateToBottomPaneStatus(input.workRequestState)
+      : undefined;
+    return workStatus ?? {
+      kind: "running",
+      source: "tool",
+      text: input.activity?.text ?? (isEn ? "Running tool..." : "运行工具..."),
+      reason: input.activity?.toolName
+        ? `${input.activity.toolName}${input.activity.toolTarget ? `(${input.activity.toolTarget})` : ""}`
+        : undefined,
+      elapsed: input.activity?.elapsed,
+    };
+  }
+
+  const todoStatus = mapTaskListToBottomPaneStatus(buildTaskListView(context), language);
 
   if (phase === "verifying_final_answer") {
     return {
@@ -1928,7 +1952,7 @@ export function mapBottomPaneStatusToView(
         nextAction: isEn ? "Retry or inspect details." : "请重试或查看详情。",
       };
     }
-    if (input.activity.phase === "completed") {
+    if (input.activity.phase === "completed" && !todoStatus) {
       return {
         kind: "completed_partial",
         source: "request",
@@ -1938,6 +1962,7 @@ export function mapBottomPaneStatusToView(
           : "结果已可见；验证证据单独追踪。",
       };
     }
+    if (todoStatus) return todoStatus;
     return {
       kind: "running",
       source: input.activity.phase === "tool_running" ? "tool" : "request",
@@ -1951,6 +1976,7 @@ export function mapBottomPaneStatusToView(
   }
 
   const work = input.visibleWorkState;
+  if (todoStatus) return todoStatus;
   if (deferredWorkRequestStatus) {
     return deferredWorkRequestStatus;
   }
@@ -1984,6 +2010,35 @@ export function mapBottomPaneStatusToView(
   }
 
   return undefined;
+}
+
+function mapTaskListToBottomPaneStatus(
+  taskListView: ReturnType<typeof buildTaskListView>,
+  language: Language,
+): BottomPaneStatusView | undefined {
+  const current = taskListView?.rows[0];
+  if (!current) return undefined;
+  const isEn = language === "en-US";
+  const progress = `${taskListView.currentIndex}/${taskListView.totalCount}`;
+  const text = isEn
+    ? `Todo ${progress} · ${current.subject}`
+    : `Todo ${progress} · ${current.subject}`;
+  if (current.status === "blocked") {
+    return {
+      kind: "blocked",
+      source: "request",
+      text,
+      reason: current.activity,
+    };
+  }
+  return {
+    kind: "running",
+    source: "request",
+    text,
+    reason: current.status === "in_progress"
+      ? (isEn ? "in progress" : "进行中")
+      : (isEn ? "pending" : "待办"),
+  };
 }
 
 function isActionableBlockedBackgroundTask(

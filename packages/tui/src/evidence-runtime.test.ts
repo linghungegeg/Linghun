@@ -89,6 +89,28 @@ describe("evidence-runtime", () => {
     expect(events.some((event) => event.type === "todo_update")).toBe(false);
   });
 
+  it("rerenders the shell after a committed Todo update event", async () => {
+    const events: Array<{ type?: string }> = [];
+    let rerenders = 0;
+    const context = {
+      tools: createToolContext("F:/repo"),
+      store: {
+        appendEvent: async (_sessionId: string, event: { type?: string }) => {
+          events.push(event);
+        },
+      },
+      shellRerender: () => {
+        rerenders += 1;
+      },
+    } as unknown as TuiContext;
+    context.tools.todos.push({ id: "todo-1", content: "阶段 5", status: "in_progress" });
+
+    await appendDerivedToolEvents(context, "session-todo", "Todo", { text: "todo" });
+
+    expect(events.map((event) => event.type)).toEqual(["todo_update"]);
+    expect(rerenders).toBe(1);
+  });
+
   it("links persisted large-result evidence to its tool use", async () => {
     const events: unknown[] = [];
     const context = {

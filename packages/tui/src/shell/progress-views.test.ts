@@ -215,6 +215,38 @@ describe("Phase R3 progress view projectors", () => {
     expect(view?.rows.map((row) => row.subject)).toEqual(["任务 2"]);
   });
 
+  it("adds a main-chain return row only while viewing an agent transcript", () => {
+    const ctx = createContext();
+    ctx.agents = [
+      {
+        id: "agent-1",
+        displayName: "Explore",
+        status: "running",
+        transcriptSessionId: "agent-session-1",
+        mailbox: [],
+      },
+    ] as unknown as TuiContext["agents"];
+
+    expect(buildAgentProgressTreeView(ctx)?.rows.map((row) => row.id)).toEqual(["agent-1"]);
+
+    ctx.agentTranscriptViewState = {
+      agentId: "agent-1",
+      sessionId: "agent-session-1",
+      label: "Explore",
+      status: "ready",
+    };
+    ctx.agentTreeState = { cursor: 0 };
+
+    const view = buildAgentProgressTreeView(ctx);
+
+    expect(view?.rows.map((row) => row.id)).toEqual(["__main__", "agent-1"]);
+    expect(view?.rows[0]).toMatchObject({
+      name: "主链",
+      status: "main",
+      activity: "返回主链",
+    });
+  });
+
   it("bounds agent and workflow progress rows while keeping active work visible", () => {
     const ctx = createContext();
     ctx.agents = Array.from({ length: 9 }, (_, index) => ({
