@@ -5,6 +5,10 @@ import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
 import { evaluateAggregatedFinalAnswerGate } from "./model-stream-runtime.js";
 import type { EvidenceRecord } from "./tui-data-types.js";
 
+function withClaims(text: string, claims: Array<{ kind: string; phrase: string }>): string {
+  return `${text}\nLinghunFinalAnswerClaims: ${JSON.stringify({ claims })}`;
+}
+
 describe("final-answer-gate artifact freshness integration", () => {
   const now = new Date();
   const projectPath = "/workspace/project";
@@ -42,7 +46,7 @@ describe("final-answer-gate artifact freshness integration", () => {
         requestTurnId: "turn-1",
         cwd: projectPath,
       },
-      supportsClaims: ["file_write", "artifact_created"],
+      supportsClaims: ["file_write", "artifact_created", "Write", "file_written"],
       data: {
         artifactHint: {
           path: "dist/report.md",
@@ -53,21 +57,23 @@ describe("final-answer-gate artifact freshness integration", () => {
     };
   }
 
-  it("passes when artifact evidence is fresh and matches current request", () => {
+  it("passes when file change evidence is fresh and matches current request", () => {
     const context = createBaseContext({
       evidence: [createArtifactEvidence()],
     });
 
     const result = evaluateAggregatedFinalAnswerGate(
       context,
-      "LinghunFinalAnswerClaims: completion_claim",
+      withClaims("已修改 dist/report.md。", [
+        { kind: "file_change_claim", phrase: "dist/report.md" },
+      ]),
     );
 
     // Should pass because artifact evidence is fresh, has valid createdAt, and matches owner
     expect(result.status).toBe("passed");
   });
 
-  it("does not reject current-owner artifact evidence because createdAt is absent", () => {
+  it("does not reject current-owner file change evidence because createdAt is absent", () => {
     const context = createBaseContext({
       evidence: [
         createArtifactEvidence({
@@ -78,13 +84,15 @@ describe("final-answer-gate artifact freshness integration", () => {
 
     const result = evaluateAggregatedFinalAnswerGate(
       context,
-      "LinghunFinalAnswerClaims: completion_claim",
+      withClaims("已修改 dist/report.md。", [
+        { kind: "file_change_claim", phrase: "dist/report.md" },
+      ]),
     );
 
     expect(result.status).toBe("passed");
   });
 
-  it("does not reject current-owner artifact evidence because createdAt is invalid", () => {
+  it("does not reject current-owner file change evidence because createdAt is invalid", () => {
     const context = createBaseContext({
       evidence: [
         createArtifactEvidence({
@@ -95,13 +103,15 @@ describe("final-answer-gate artifact freshness integration", () => {
 
     const result = evaluateAggregatedFinalAnswerGate(
       context,
-      "LinghunFinalAnswerClaims: completion_claim",
+      withClaims("已修改 dist/report.md。", [
+        { kind: "file_change_claim", phrase: "dist/report.md" },
+      ]),
     );
 
     expect(result.status).toBe("passed");
   });
 
-  it("keeps current-owner artifact evidence valid past the former wall-clock TTL", () => {
+  it("keeps current-owner file change evidence valid past the former wall-clock TTL", () => {
     const context = createBaseContext({
       evidence: [
         createArtifactEvidence({
@@ -112,13 +122,15 @@ describe("final-answer-gate artifact freshness integration", () => {
 
     const result = evaluateAggregatedFinalAnswerGate(
       context,
-      "LinghunFinalAnswerClaims: completion_claim",
+      withClaims("已修改 dist/report.md。", [
+        { kind: "file_change_claim", phrase: "dist/report.md" },
+      ]),
     );
 
     expect(result.status).toBe("passed");
   });
 
-  it("fails when artifact evidence is from a different requestTurnId", () => {
+  it("fails when file change evidence is from a different requestTurnId", () => {
     const context = createBaseContext({
       evidence: [
         createArtifactEvidence({
@@ -133,7 +145,9 @@ describe("final-answer-gate artifact freshness integration", () => {
 
     const result = evaluateAggregatedFinalAnswerGate(
       context,
-      "LinghunFinalAnswerClaims: completion_claim",
+      withClaims("已修改 dist/report.md。", [
+        { kind: "file_change_claim", phrase: "dist/report.md" },
+      ]),
     );
 
     // Should fail because requestTurnId doesn't match
@@ -143,7 +157,7 @@ describe("final-answer-gate artifact freshness integration", () => {
     }
   });
 
-  it("fails when artifact evidence is from a different session", () => {
+  it("fails when file change evidence is from a different session", () => {
     const context = createBaseContext({
       evidence: [
         createArtifactEvidence({
@@ -158,7 +172,9 @@ describe("final-answer-gate artifact freshness integration", () => {
 
     const result = evaluateAggregatedFinalAnswerGate(
       context,
-      "LinghunFinalAnswerClaims: completion_claim",
+      withClaims("已修改 dist/report.md。", [
+        { kind: "file_change_claim", phrase: "dist/report.md" },
+      ]),
     );
 
     // Should fail because sessionId doesn't match
@@ -168,7 +184,7 @@ describe("final-answer-gate artifact freshness integration", () => {
     }
   });
 
-  it("fails when artifact evidence is from an agent", () => {
+  it("fails when file change evidence is from an agent", () => {
     const context = createBaseContext({
       evidence: [
         createArtifactEvidence({
@@ -184,7 +200,9 @@ describe("final-answer-gate artifact freshness integration", () => {
 
     const result = evaluateAggregatedFinalAnswerGate(
       context,
-      "LinghunFinalAnswerClaims: completion_claim",
+      withClaims("已修改 dist/report.md。", [
+        { kind: "file_change_claim", phrase: "dist/report.md" },
+      ]),
     );
 
     // Should fail because evidence has ownerAgentId
@@ -194,7 +212,7 @@ describe("final-answer-gate artifact freshness integration", () => {
     }
   });
 
-  it("fails when artifact evidence is from a workflow", () => {
+  it("fails when file change evidence is from a workflow", () => {
     const context = createBaseContext({
       evidence: [
         createArtifactEvidence({
@@ -210,7 +228,9 @@ describe("final-answer-gate artifact freshness integration", () => {
 
     const result = evaluateAggregatedFinalAnswerGate(
       context,
-      "LinghunFinalAnswerClaims: completion_claim",
+      withClaims("已修改 dist/report.md。", [
+        { kind: "file_change_claim", phrase: "dist/report.md" },
+      ]),
     );
 
     // Should fail because evidence has workflowRunId
@@ -220,7 +240,7 @@ describe("final-answer-gate artifact freshness integration", () => {
     }
   });
 
-  it("passes when multiple artifacts and at least one is fresh and valid", () => {
+  it("passes when multiple file change artifacts and at least one is fresh and valid", () => {
     const context = createBaseContext({
       evidence: [
         createArtifactEvidence({
@@ -236,7 +256,9 @@ describe("final-answer-gate artifact freshness integration", () => {
 
     const result = evaluateAggregatedFinalAnswerGate(
       context,
-      "LinghunFinalAnswerClaims: completion_claim",
+      withClaims("已修改 dist/report.md。", [
+        { kind: "file_change_claim", phrase: "dist/report.md" },
+      ]),
     );
 
     // Should pass because at least one artifact is fresh and valid
@@ -260,7 +282,9 @@ describe("final-answer-gate artifact freshness integration", () => {
 
     const result = evaluateAggregatedFinalAnswerGate(
       context,
-      "LinghunFinalAnswerClaims: completion_claim",
+      withClaims("已修改 dist/report.md。", [
+        { kind: "file_change_claim", phrase: "dist/report.md" },
+      ]),
     );
 
     expect(result.status).toBe("needs_disclaimer");

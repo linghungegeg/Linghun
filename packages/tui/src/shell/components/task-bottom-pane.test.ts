@@ -247,7 +247,7 @@ describe("TaskBottomPane budget allocation", () => {
   it("does not show the task summary when higher-priority rows use the post-preview budget", () => {
     const allocation = allocateBottomPaneBudget(14, {
       workingRows: 1,
-      taskListRows: 3,
+      taskListRows: 5,
       agentProgressRows: 2,
       backgroundOverlayRows: 2,
     });
