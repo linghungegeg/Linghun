@@ -438,7 +438,7 @@ export type AgentProgressTreeView = {
     branch: "middle" | "last";
     name: string;
     status: string;
-    modeLabel?: string;
+    detailLabel?: string;
     workflowRunId?: string;
     parentSessionId?: string;
     forkedFrom?: string;

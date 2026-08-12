@@ -88,9 +88,9 @@ export function buildAgentProgressTreeView(context: TuiContext): AgentProgressTr
       return {
         id: agent.id,
         branch: index === visible.visible.length - 1 ? "last" : "middle",
-        name: agent.displayName ?? agent.addressableName ?? agent.id,
+        name: formatAgentIdentityName(agent, context.language),
         status: resolveAgentStatus(agent),
-        modeLabel: formatAgentModeLabel(agent, context.language),
+        detailLabel: formatAgentDetailLabel(agent, context.language),
         workflowRunId: background?.workflowRunId,
         parentSessionId: agent.parentSessionId,
         forkedFrom: agent.forkedFrom,
@@ -209,7 +209,26 @@ export function buildWorkflowProgressView(context: TuiContext): WorkflowProgress
   };
 }
 
-function formatAgentModeLabel(
+function formatAgentIdentityName(
+  agent: AgentRun,
+  language: TuiContext["language"],
+): string {
+  const explicit = agent.displayName?.trim() || agent.addressableName?.trim();
+  if (explicit) return explicit;
+  if (language === "en-US") {
+    if (agent.type === "planner") return "Planner";
+    if (agent.type === "explorer") return "Explorer";
+    if (agent.type === "verifier") return "Verifier";
+    if (agent.type === "worker") return "Agent";
+    return "Agent";
+  }
+  if (agent.type === "planner") return "规划";
+  if (agent.type === "explorer") return "探索";
+  if (agent.type === "verifier") return "验证";
+  return "Agent";
+}
+
+function formatAgentDetailLabel(
   agent: AgentRun,
   language: TuiContext["language"],
 ): string | undefined {

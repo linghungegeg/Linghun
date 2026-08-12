@@ -47,7 +47,7 @@ describe("Phase R3 progress view projectors", () => {
     expect(view?.rows[0]?.elapsed).toMatch(/\d+s/);
   });
 
-  it("projects agent team and full-fork context labels", () => {
+  it("keeps agent internal labels out of the main identity", () => {
     const ctx = createContext();
     ctx.agents = [
       {
@@ -71,13 +71,37 @@ describe("Phase R3 progress view projectors", () => {
 
     const view = buildAgentProgressTreeView(ctx);
 
-    expect(view?.rows[0]?.modeLabel).toBe("team:review · 完整上下文");
+    expect(view?.rows[0]?.name).toBe("Fork Worker");
+    expect(view?.rows[0]?.detailLabel).toBe("team:review · 完整上下文");
     expect(view?.rows[0]).toMatchObject({
       workflowRunId: "wf-1",
       parentSessionId: "session-parent",
       forkedFrom: "handoff-packet",
       contextMode: "full_fork",
     });
+  });
+
+  it("uses short type labels instead of raw agent ids as the visible identity", () => {
+    const ctx = createContext();
+    ctx.agents = [
+      {
+        id: "agent-internal-123456",
+        type: "worker",
+        status: "running",
+        mailbox: [],
+      },
+      {
+        id: "agent-internal-abcdef",
+        type: "verifier",
+        status: "running",
+        mailbox: [],
+      },
+    ] as unknown as TuiContext["agents"];
+
+    const view = buildAgentProgressTreeView(ctx);
+
+    expect(view?.rows.map((row) => row.name)).toEqual(["Agent", "验证"]);
+    expect(view?.rows.map((row) => row.name)).not.toContain("agent-internal-123456");
   });
 
   it("projects todos with owner and blocked-by fields when present", () => {

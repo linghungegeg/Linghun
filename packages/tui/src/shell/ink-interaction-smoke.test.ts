@@ -846,7 +846,7 @@ describe("Ink TTY interaction smoke", () => {
             status: "running",
             workflowRunId: "wf-release",
             contextMode: "full_fork",
-            modeLabel: "完整上下文",
+            detailLabel: "完整上下文",
             parentSessionId: "session-parent-12345678",
             forkedFrom: "handoff-packet-12345678",
             activity: "reviewing",
@@ -889,7 +889,7 @@ describe("Ink TTY interaction smoke", () => {
     expect(visible).toContain("并行:batch-review");
     expect(visible).toContain("依赖:build");
     expect(visible).toContain("Agent reviewer");
-    expect(visible).toContain("完整上下文");
+    expect(visible).not.toContain("完整上下文");
     expect(visible.indexOf("release")).toBeLessThan(visible.indexOf("Agent reviewer"));
     shell.unmount();
   });
@@ -925,7 +925,7 @@ describe("Ink TTY interaction smoke", () => {
                     branch: "last",
                     name: "reviewer",
                     status: "running",
-                    modeLabel:
+                    detailLabel:
                       scenario.language === "en-US" ? "full context" : "完整上下文",
                     mailboxMessages: 2,
                     mailboxPending: 1,

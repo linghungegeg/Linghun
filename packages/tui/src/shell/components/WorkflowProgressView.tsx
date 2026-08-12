@@ -131,7 +131,7 @@ function NestedAgentRows({
   return rows.map((row) => {
     const selected = tree.cursor === tree.rows.findIndex((item) => item.id === row.id);
     const marker = workflowMarker(row.status, noColor);
-    const label = `${selected ? "▶" : "↳"} ${marker} Agent ${row.name}${row.modeLabel ? ` · ${row.modeLabel}` : ""} · ${row.status}${row.activity ? `: ${row.activity}` : ""}`;
+    const label = `${selected ? "▶" : "↳"} ${marker} Agent ${row.name} · ${row.status}${row.activity ? `: ${row.activity}` : ""}`;
     return (
       <Box key={row.id} flexDirection="column">
         <Text color={selected ? theme.accent : (theme.dim ?? theme.muted)} dimColor={!selected}>
@@ -140,7 +140,7 @@ function NestedAgentRows({
         {tree.expandedId === row.id ? (
           <Text color={theme.muted} dimColor>
             {fitText(
-              `${language === "en-US" ? "mailbox" : "消息"} ${row.mailboxPending ?? 0}/${row.mailboxMessages} · tokens ${row.tokens}${row.parentSessionId ? ` · parent ${shortId(row.parentSessionId)}` : ""}${row.forkedFrom ? ` · fork ${shortId(row.forkedFrom)}` : ""}`,
+              `${row.detailLabel ? `${row.detailLabel} · ` : ""}${language === "en-US" ? "mailbox" : "消息"} ${row.mailboxPending ?? 0}/${row.mailboxMessages} · tokens ${row.tokens}${row.parentSessionId ? ` · parent ${shortId(row.parentSessionId)}` : ""}${row.forkedFrom ? ` · fork ${shortId(row.forkedFrom)}` : ""}`,
               innerWidth,
             )}
           </Text>

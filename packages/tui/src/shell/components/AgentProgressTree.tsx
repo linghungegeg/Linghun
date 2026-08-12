@@ -51,7 +51,7 @@ export function AgentProgressTree({
         // Completed agents: collapse to single-line summary
         if (completed && !expanded) {
           const mailboxLabel = language === "en-US" ? "messages" : "消息";
-          const completedText = `✓ ${row.name}${row.modeLabel ? ` · ${row.modeLabel}` : ""} · ${row.mailboxMessages} ${mailboxLabel}${row.elapsed ? ` · ${row.elapsed}` : ""}`;
+          const completedText = `✓ ${row.name} · ${row.mailboxMessages} ${mailboxLabel}${row.elapsed ? ` · ${row.elapsed}` : ""}`;
           return (
             <Box key={row.id}>
               <Text color={theme.muted} dimColor>
@@ -64,7 +64,7 @@ export function AgentProgressTree({
         const isLast = index === tree.rows.length - 1;
         const treeChar = isLast ? "└─" : "├─";
         const statusText = row.status === "running" ? "" : ` · ${row.status}`;
-        const rowText = `${row.name}${row.modeLabel ? ` · ${row.modeLabel}` : ""}${statusText}${row.activity ? `: ${row.activity}` : ""}${
+        const rowText = `${row.name}${statusText}${row.activity ? `: ${row.activity}` : ""}${
           row.elapsed ? ` · ${workLabel} ${row.elapsed}` : ""
         }`;
 
@@ -156,7 +156,8 @@ function agentDetailText(
   const mailboxCount = row.mailboxPending === undefined
     ? String(row.mailboxMessages)
     : `${row.mailboxPending}/${row.mailboxMessages}`;
-  return `${row.status} · ${mailbox} ${mailboxCount} · ${tokens} ${row.tokens}${parent}${fork}${elapsed}`;
+  const detail = row.detailLabel ? ` · ${row.detailLabel}` : "";
+  return `${row.status}${detail} · ${mailbox} ${mailboxCount} · ${tokens} ${row.tokens}${parent}${fork}${elapsed}`;
 }
 
 function shortId(value: string): string {
