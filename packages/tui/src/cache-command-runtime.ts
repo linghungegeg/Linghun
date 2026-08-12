@@ -9,6 +9,7 @@ import {
 import { diffFreshness } from "./cache-freshness.js";
 import type { CacheRequestObservation } from "./cache-policy-runtime.js";
 import {
+  calculateContextUsageDisplaySnapshot,
   calculateContextPercentages,
   formatContextProgressBar,
   getContextWindowForModel,
@@ -115,6 +116,7 @@ export function formatCacheStatus(context: TuiContext, currentFreshness: CacheFr
   const source = latest?.cacheWriteTokensSource ?? "missing";
   const latestObservation = context.cache.lastRequestObservation;
   const diagnosticObservation = context.cache.lastMainChainRequestObservation ?? latestObservation;
+  const mainChainObservation = context.cache.lastMainChainRequestObservation;
   const diagnosis = diagnoseCacheBreak({
     latest,
     observation: diagnosticObservation,
@@ -136,6 +138,8 @@ export function formatCacheStatus(context: TuiContext, currentFreshness: CacheFr
     `- cache write source: ${source}`,
     `- compact: ${context.cache.compacted ? "yes" : "no"}`,
     `- post-compact warmup: ${formatPostCompactWarmupStatus(context)}`,
+    `- observation scope: latest ${formatObservationScope(latestObservation)}; main-chain ${formatObservationScope(mainChainObservation)}; diagnosis ${formatObservationScope(diagnosticObservation)}`,
+    `- current context: ${formatContextUsageSnapshot(context)}`,
     `- prompt sections: ${formatPromptSectionsStatus(context)}`,
     `- workspace reference: hits ${context.cache.workspaceReference.hits}; misses ${context.cache.workspaceReference.misses}; failures ${context.cache.workspaceReference.failures}; latest ${context.cache.workspaceReference.latest?.source ?? "none"}`,
     `- workspace snapshot lite: ${formatWorkspaceSnapshotLiteStatus(context)}`,
@@ -153,6 +157,52 @@ function formatPostCompactWarmupStatus(context: TuiContext): string {
   if (!warmup) return "none";
   const lastChanged = warmup.lastChangedKeys.length > 0 ? warmup.lastChangedKeys.join(",") : "none";
   return `${warmup.status}; compact ${warmup.compactId}; remaining ${warmup.remainingTurns}/${warmup.totalTurns}; summary ${warmup.summaryHash}; baseline ${warmup.baselinePrefixHash ?? "pending"}; changed ${lastChanged}`;
+}
+
+function formatObservationScope(observation: CacheRequestObservation | undefined): string {
+  if (!observation) return "none";
+  const usage = observation.usage;
+  const usageText = usage
+    ? `usage ${usage.source} input/output ${usage.inputTokens}/${usage.outputTokens} read/write ${usage.cacheReadTokens}/${usage.cacheWriteTokens}`
+    : "usage pending";
+  return `${observation.kind}:${observation.id}; ${usageText}`;
+}
+
+function formatContextUsageSnapshot(context: TuiContext): string {
+  const runtime = getSelectedModelRuntime(context);
+  const executorRoute = context.config.modelRoutes?.routes?.find((route) => route.role === "executor");
+  const usage = calculateContextUsageDisplaySnapshot(
+    context.cache.contextUsage,
+    getContextWindowForModel(runtime.model, executorRoute),
+  );
+  return usage ? formatContextUsageDisplay(usage) : "none";
+}
+
+function formatContextUsageDisplay(
+  usage: NonNullable<ReturnType<typeof calculateContextUsageDisplaySnapshot>>,
+): string {
+  const basis = usage.confirmed ? "confirmed usage" : "estimated chars";
+  const stale = usage.staleReason ? `; stale ${usage.staleReason}` : "";
+  const trigger =
+    usage.compactTriggerTokens !== undefined
+      ? `; trigger ${formatCompactTokenCount(usage.compactTriggerTokens)}`
+      : "";
+  const savings =
+    usage.savingsRatio !== undefined ? `; saved ${(usage.savingsRatio * 100).toFixed(1)}%` : "";
+  return `${usage.source}; ${basis}; ${usage.usedTokens}/${usage.maxTokens} tokens (${formatPercent(usage.ratio)})${trigger}${savings}${stale}; updated ${usage.updatedAt}`;
+}
+
+function formatCompactLifecycle(context: TuiContext): string {
+  if (context.cache.compactProgress?.status === "running") return "compacting";
+  if (context.cache.postCompactCacheWarmup) {
+    return `post-compact warmup ${context.cache.postCompactCacheWarmup.status}`;
+  }
+  if (context.cache.contextUsage?.source === "compact") return "new baseline";
+  if (context.cache.compactProgress?.status === "complete") return "compact complete";
+  if (context.cache.compactProjection || context.cache.compactBoundaries.length > 0) {
+    return "compact complete";
+  }
+  return "normal";
 }
 
 function formatPromptSectionsStatus(context: TuiContext): string {
@@ -264,10 +314,15 @@ export function formatCompactStatus(context: TuiContext): string {
   const latest = context.cache.compactBoundaries.at(-1);
   const pressure = context.cache.compactPressure;
   const runtime = getSelectedModelRuntime(context);
+  const executorRoute = context.config.modelRoutes?.routes?.find((route) => route.role === "executor");
+  const usageDisplay = calculateContextUsageDisplaySnapshot(
+    context.cache.contextUsage,
+    getContextWindowForModel(runtime.model, executorRoute),
+  );
   const contextUsage = pressure
     ? calculateContextPercentages(
         Math.ceil(pressure.estimatedChars / 4),
-        Math.ceil(pressure.maxChars / 4) || getContextWindowForModel(runtime.model),
+        Math.ceil(pressure.maxChars / 4) || getContextWindowForModel(runtime.model, executorRoute),
       )
     : undefined;
   const projection = context.cache.compactProjection;
@@ -282,6 +337,10 @@ export function formatCompactStatus(context: TuiContext): string {
     `- latest tokens: ${latest ? `${latest.preCompactTokenEstimate ?? "-"}→${latest.postCompactTokenEstimate ?? "-"}` : "-"}`,
     `- latest compact time: ${deep?.createdAt ?? projection?.createdAt ?? latest?.createdAt ?? "none"}`,
   ];
+  if (usageDisplay) {
+    lines.push(`- current context: ${formatContextUsageDisplay(usageDisplay)}`);
+  }
+  lines.push(`- lifecycle: ${formatCompactLifecycle(context)}`);
   // Phase 10: 可视化 token 分布条形图
   if (contextUsage) {
     const bar = formatContextProgressBar(contextUsage.ratio, 24);

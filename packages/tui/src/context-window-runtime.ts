@@ -11,6 +11,15 @@ export type ContextPercentage = {
   bar: string;
 };
 
+export type ContextUsageDisplaySnapshot = ContextPercentage & {
+  source: ContextUsageSnapshot["source"];
+  updatedAt: string;
+  confirmed: boolean;
+  staleReason?: ContextUsageSnapshot["staleReason"];
+  compactTriggerTokens?: number;
+  savingsRatio?: number;
+};
+
 export function buildStableContextUsageSnapshot(input: {
   previous?: ContextUsageSnapshot;
   estimatedChars: number;
@@ -77,6 +86,34 @@ export function calculateContextPercentages(
     ratio,
     label: `上下文 ${(ratio * 100).toFixed(1)}% (${formatCompactNumber(safeUsed)}/${formatCompactNumber(safeMax)})`,
     bar: formatContextProgressBar(ratio),
+  };
+}
+
+export function calculateContextUsageDisplaySnapshot(
+  usage: ContextUsageSnapshot | undefined,
+  fallbackContextWindowTokens: number,
+): ContextUsageDisplaySnapshot | undefined {
+  if (!usage) return undefined;
+  const source =
+    usage.confirmedUsedTokens !== undefined ? ("provider_usage" as const) : usage.source;
+  const usedTokens =
+    usage.confirmedUsedTokens !== undefined
+      ? usage.confirmedUsedTokens
+      : Math.ceil(usage.estimatedChars / 4);
+  const maxTokens =
+    usage.contextWindowTokens !== undefined
+      ? usage.contextWindowTokens
+      : fallbackContextWindowTokens;
+  return {
+    ...calculateContextPercentages(usedTokens, maxTokens),
+    source,
+    updatedAt: usage.updatedAt,
+    confirmed: usage.confirmedUsedTokens !== undefined,
+    ...(usage.staleReason ? { staleReason: usage.staleReason } : {}),
+    ...(usage.compactTriggerTokens !== undefined
+      ? { compactTriggerTokens: usage.compactTriggerTokens }
+      : {}),
+    ...(usage.savingsRatio !== undefined ? { savingsRatio: usage.savingsRatio } : {}),
   };
 }
 

@@ -3280,6 +3280,73 @@ describe("model message prompt cache layout", () => {
     expect(continuationRuntime.context.cache.history.at(-1)?.kind).toBe("continuation");
   });
 
+  it("refreshes the live usage snapshot before the final usage commit", async () => {
+    const { context } = await makeSendMessageContext();
+    let rerenderCount = 0;
+    context.shellRerender = () => {
+      rerenderCount += 1;
+    };
+    let usageSeen!: () => void;
+    const usageArrived = new Promise<void>((resolve) => {
+      usageSeen = resolve;
+    });
+    let releaseMessageStop!: () => void;
+    const messageStopGate = new Promise<void>((resolve) => {
+      releaseMessageStop = resolve;
+    });
+    const running = __testStreamFinalModelAnswerWithoutTools(
+      {
+        messages: [{ role: "user", content: "live usage" }],
+        provider: "test",
+        model: "test-model",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+        originalUserText: "live usage",
+      },
+      context,
+      {
+        async *stream() {
+          yield { type: "assistant_text_delta", text: "answer" } as const;
+          yield {
+            type: "usage",
+            usage: { inputTokens: 120, outputTokens: 12, totalTokens: 132 },
+          } as const;
+          usageSeen();
+          await messageStopGate;
+          yield {
+            type: "message_stop",
+            chunkCount: 2,
+            hadUsage: true,
+            finishReason: "stop",
+          } as const;
+        },
+        async countMessagesTokensWithAPI() {
+          return { source: "unavailable", reason: "test" } as const;
+        },
+      } as unknown as ModelGateway,
+      context.sessionId!,
+      new MemoryOutput(),
+      new AbortController().signal,
+    );
+
+    await usageArrived;
+    expect(context.cache.history).toHaveLength(0);
+    expect(context.cache.contextUsage).toMatchObject({
+      confirmedUsedTokens: 120,
+    });
+    expect(context.cache.contextUsage?.source).toBe("pressure");
+    expect(context.cache.lastRequestObservation?.usage).toMatchObject({
+      inputTokens: 120,
+      outputTokens: 12,
+    });
+    expect(rerenderCount).toBe(1);
+
+    releaseMessageStop();
+    await running;
+    expect(context.cache.history).toHaveLength(1);
+    expect(context.cache.history[0]?.kind).toBe("final");
+  });
+
   it("starts a complete tool_use before message_stop while preserving terminal usage", async () => {
     const { context, events } = await makeSendMessageContext();
     await writeFile(join(context.projectPath, "early-read.txt"), "early tool content", "utf8");

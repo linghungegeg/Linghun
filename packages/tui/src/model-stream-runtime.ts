@@ -50,6 +50,7 @@ import {
 import {
   compactPreflightDeps,
   markContextUsageStale,
+  recordConfirmedContextUsage,
   recordModelUsage,
   refreshWorkspaceReferenceCache,
   shouldForceCompactFromConfirmedUsage,
@@ -1128,6 +1129,18 @@ function recordCacheUsageObservation(
   usage: ModelUsage,
 ): void {
   recordCacheUsageObservationState(context.cache, usage, kind);
+}
+
+function refreshLiveUsageSnapshot(
+  context: TuiContext,
+  kind: CacheRequestKind,
+  usage: ModelUsage,
+  isCurrent: () => boolean,
+): void {
+  if (!isCurrent()) return;
+  recordCacheUsageObservation(context, kind, usage);
+  recordConfirmedContextUsage(context, usage);
+  context.shellRerender?.();
 }
 
 type ModelUsageCommitKind = "main" | "continuation" | "final";
@@ -4856,6 +4869,7 @@ export async function sendMessage(
         if (event.type === "usage") {
           roundHadUsage = true;
           pendingRoundUsage = event.usage;
+          refreshLiveUsageSnapshot(context, "main", event.usage, requestOwnerIsCurrent);
           continue;
         }
         if (event.type === "message_stop") {
@@ -5015,6 +5029,7 @@ export async function sendMessage(
             return;
           }
           commitStagedModelUsage(context, stagedUsage);
+          context.shellRerender?.();
           scheduleApiTokenCountDiagnostics({
           context,
           gateway,
@@ -6921,6 +6936,7 @@ async function streamFinalModelAnswerWithoutTools(
     if (event.type === "usage") {
       hadUsage = true;
       pendingUsage = event.usage;
+      refreshLiveUsageSnapshot(context, "final", event.usage, () => !requestIsStale());
       continue;
     }
     if (event.type === "message_stop") {
@@ -7018,6 +7034,7 @@ async function streamFinalModelAnswerWithoutTools(
     );
     if (acceptedAttemptGeneration !== providerAttemptGeneration || requestIsStale()) return "";
     commitStagedModelUsage(context, stagedUsage);
+    context.shellRerender?.();
     scheduleApiTokenCountDiagnostics({
       context,
       gateway,
@@ -7772,6 +7789,12 @@ export async function continueModelAfterToolResults(
         if (event.type === "usage") {
           roundHadUsage = true;
           pendingRoundUsage = event.usage;
+          refreshLiveUsageSnapshot(
+            context,
+            "continuation",
+            event.usage,
+            requestOwnerIsCurrent,
+          );
           continue;
         }
         if (event.type === "message_stop") {
@@ -7923,6 +7946,7 @@ export async function continueModelAfterToolResults(
           return;
         }
         commitStagedModelUsage(context, stagedUsage);
+        context.shellRerender?.();
         scheduleApiTokenCountDiagnostics({
           context,
           gateway,

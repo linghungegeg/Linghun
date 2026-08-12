@@ -61,4 +61,40 @@ describe("usage-stats-presenter estimated cost", () => {
     expect(stats).toContain("cost: estimated CNY 0.0100");
     expect(stats).toContain("not billing");
   });
+
+  it("separates current-session totals, main-chain totals, and the latest request", () => {
+    const context = createUsageContext() as {
+      sessionId?: string;
+      cache: { history: Array<Record<string, unknown>> };
+    };
+    context.sessionId = "session-current";
+    context.cache.history.push(
+      {
+        turn: 2,
+        inputTokens: 50,
+        outputTokens: 5,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        kind: "agent-child",
+        source: "api_usage",
+      },
+      {
+        turn: 3,
+        inputTokens: 60,
+        outputTokens: 6,
+        cacheReadTokens: 20,
+        cacheWriteTokens: 2,
+        kind: "continuation",
+        source: "api_usage",
+      },
+    );
+
+    const text = formatUsage(context as never);
+
+    expect(text).toContain("single session session-current");
+    expect(text).toContain("main-chain tokens: input 60");
+    expect(text).toContain("latest request: continuation#3");
+    expect(text).toContain("latest main-chain request: continuation#3");
+    expect(text).not.toContain("latest main-chain request: agent-child#2");
+  });
 });

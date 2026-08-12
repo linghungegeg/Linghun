@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildStableContextUsageSnapshot,
   calculateContextPercentages,
+  calculateContextUsageDisplaySnapshot,
   getContextWindowForModel,
   getNativeContextWindowForModel,
 } from "./context-window-runtime.js";
@@ -28,6 +29,54 @@ describe("context-window-runtime", () => {
     const result = calculateContextPercentages(12_000, 200_000);
     expect(result.ratio).toBeCloseTo(0.06);
     expect(result.label).toBe("上下文 6.0% (12k/200k)");
+  });
+
+  it("prefers confirmed provider usage and preserves compact metadata for display", () => {
+    const result = calculateContextUsageDisplaySnapshot(
+      {
+        estimatedChars: 800_000,
+        maxChars: 1_000_000,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        source: "provider_usage",
+        confirmedUsedTokens: 12_000,
+        contextWindowTokens: 200_000,
+        compactTriggerTokens: 180_000,
+        staleReason: "disconnected_mid_stream",
+        savingsRatio: 0.25,
+      },
+      400_000,
+    );
+
+    expect(result).toMatchObject({
+      usedTokens: 12_000,
+      maxTokens: 200_000,
+      ratio: 0.06,
+      source: "provider_usage",
+      confirmed: true,
+      compactTriggerTokens: 180_000,
+      staleReason: "disconnected_mid_stream",
+      savingsRatio: 0.25,
+    });
+  });
+
+  it("falls back to estimated chars when provider usage is unavailable", () => {
+    const result = calculateContextUsageDisplaySnapshot(
+      {
+        estimatedChars: 40_000,
+        maxChars: 800_000,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        source: "pressure",
+      },
+      200_000,
+    );
+
+    expect(result).toMatchObject({
+      usedTokens: 10_000,
+      maxTokens: 200_000,
+      ratio: 0.05,
+      source: "pressure",
+      confirmed: false,
+    });
   });
 
   it("keeps context usage monotonic until compact resets the baseline", () => {

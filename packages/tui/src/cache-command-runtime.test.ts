@@ -235,6 +235,37 @@ describe("cache-command-runtime", () => {
     expect(text).toContain("break diagnosis: ok");
   });
 
+  it("shows current context basis and separates latest from main-chain observations", () => {
+    const context = makeContext();
+    const sideObservation = makeObservation({
+      id: "obs-side-current",
+      kind: "side-question",
+      provider: "deepseek",
+      usage: undefined,
+    });
+    context.cache.lastRequestObservation = sideObservation;
+    context.cache.lastMainChainRequestObservation = makeObservation({
+      id: "obs-main-current",
+      kind: "main",
+    });
+    context.cache.contextUsage = {
+      estimatedChars: 800_000,
+      maxChars: 1_000_000,
+      updatedAt: "2026-01-01T00:00:03.000Z",
+      source: "provider_usage",
+      confirmedUsedTokens: 12_000,
+      contextWindowTokens: 200_000,
+      compactTriggerTokens: 180_000,
+    };
+
+    const text = formatCacheStatus(context, freshness);
+
+    expect(text).toContain("observation scope: latest side-question:obs-side-current");
+    expect(text).toContain("main-chain main:obs-main-current");
+    expect(text).toContain("current context: provider_usage; confirmed usage; 12000/200000 tokens");
+    expect(text).toContain("trigger 180k");
+  });
+
   it("uses main-chain telemetry for cache break diagnosis when sidechain ran last", () => {
     const context = makeContext();
     const mainObservation = makeObservation({
@@ -371,5 +402,40 @@ describe("cache-command-runtime", () => {
 
     expect(text).toContain("progress: compact running");
     expect(text).not.toContain("[████────────]");
+  });
+
+  it("labels compacting, new baseline, and post-compact warmup separately", () => {
+    const context = makeContext();
+    context.cache.compactProgress = {
+      status: "running",
+      stages: ["scan_context"],
+      preCompactChars: 120_000,
+      postCompactChars: 0,
+    };
+    expect(formatCompactStatus(context)).toContain("lifecycle: compacting");
+
+    context.cache.compactProgress = { ...context.cache.compactProgress, status: "complete" };
+    context.cache.contextUsage = {
+      estimatedChars: 40_000,
+      maxChars: 200_000,
+      updatedAt: "2026-01-01T00:00:01.000Z",
+      source: "compact",
+    };
+    expect(formatCompactStatus(context)).toContain("lifecycle: new baseline");
+
+    context.cache.postCompactCacheWarmup = {
+      compactId: "boundary-1",
+      summaryHash: "summary",
+      projectionHash: "projection",
+      baselinePrefixHash: "baseline",
+      baselineConversationPrefixHash: "conversation",
+      remainingTurns: 1,
+      totalTurns: 2,
+      status: "warming",
+      lastChangedKeys: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:01.000Z",
+    };
+    expect(formatCompactStatus(context)).toContain("lifecycle: post-compact warmup warming");
   });
 });

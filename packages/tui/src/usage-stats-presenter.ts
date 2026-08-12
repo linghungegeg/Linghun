@@ -5,14 +5,21 @@ export const CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions";
 
 export function formatUsage(context: TuiContext): string {
   const totals = sumCacheHistory(context.cache.history);
+  const mainChainSamples = collectMainChainUsageSamples(context.cache.history);
+  const mainChainTotals = sumCacheHistory(mainChainSamples);
   const totalEstimatedCny = sumRoleUsageEstimatedCny(context);
   const latest = context.cache.history.at(-1);
+  const latestMainChain = [...mainChainSamples].at(-1);
   return [
     "Usage（本会话归一化 token/cache usage；raw usage 保留在记录中）",
+    `- scope: single session ${context.sessionId ?? "pending"}; history samples ${context.cache.history.length}`,
     `- input tokens: ${totals.inputTokens}`,
     `- output tokens: ${totals.outputTokens}`,
     `- cache read tokens: ${totals.cacheReadTokens}`,
     `- cache write/create tokens: ${totals.cacheWriteTokens}`,
+    `- main-chain tokens: input ${mainChainTotals.inputTokens}; output ${mainChainTotals.outputTokens}; cache read ${mainChainTotals.cacheReadTokens}; cache write ${mainChainTotals.cacheWriteTokens}; samples ${mainChainSamples.length}`,
+    `- latest request: ${formatUsageSample(latest)}`,
+    `- latest main-chain request: ${formatUsageSample(latestMainChain)}`,
     `- model: ${latest?.model ?? context.model}`,
     `- provider: ${latest?.provider ?? "unknown"}`,
     `- endpoint: ${latest?.endpoint ?? CHAT_COMPLETIONS_ENDPOINT}`,
@@ -40,9 +47,7 @@ export function formatStats(args: string[], context: TuiContext): string {
     return formatEndpointStats(context.cache.history);
   }
   const totals = sumCacheHistory(context.cache.history);
-  const mainChainSamples = context.cache.history.filter((item) =>
-    item.kind === "main" || item.kind === "continuation" || item.kind === "final"
-  );
+  const mainChainSamples = collectMainChainUsageSamples(context.cache.history);
   const mainChainTotals = sumCacheHistory(mainChainSamples);
   const totalEstimatedCny = sumRoleUsageEstimatedCny(context);
   const latest = context.cache.history.at(-1);
@@ -66,16 +71,32 @@ export function formatStats(args: string[], context: TuiContext): string {
   return [
     "Stats",
     `- samples: ${context.cache.history.length}`,
+    `- scope: single session ${context.sessionId ?? "pending"}`,
     `- elapsed ms: ${Date.now() - context.cache.startedAt}`,
     `- model: ${context.model}`,
     `- provider: ${provider}`,
     `- main-chain hit rate: ${formatPercent(mainChainHitRate)}`,
     `- all-calls hit rate: ${formatPercent(allCallsHitRate)}`,
     `- tokens: input ${totals.inputTokens}; output ${totals.outputTokens}; cache read ${totals.cacheReadTokens}; cache write ${totals.cacheWriteTokens}`,
+    `- main-chain tokens: input ${mainChainTotals.inputTokens}; output ${mainChainTotals.outputTokens}; cache read ${mainChainTotals.cacheReadTokens}; cache write ${mainChainTotals.cacheWriteTokens}`,
+    `- latest request: ${formatUsageSample(latest)}`,
+    `- latest main-chain request: ${formatUsageSample([...mainChainSamples].at(-1))}`,
     `- cost: estimated ${formatEstimatedCny(totalEstimatedCny)}（packaged model pricing estimate; not billing）`,
     "- role/model/provider usage (estimated):",
     ...formatRoleUsageLines(context),
   ].join("\n");
+}
+
+function collectMainChainUsageSamples(history: CacheTurnStats[]): CacheTurnStats[] {
+  return history.filter((item) =>
+    item.kind === "main" || item.kind === "continuation" || item.kind === "final"
+  );
+}
+
+function formatUsageSample(sample: CacheTurnStats | undefined): string {
+  if (!sample) return "none";
+  const kind = sample.kind ?? "unknown";
+  return `${kind}#${sample.turn}; input ${sample.inputTokens}; output ${sample.outputTokens}; cache read ${sample.cacheReadTokens}; cache write ${sample.cacheWriteTokens}; source ${sample.source ?? "unknown"}`;
 }
 
 export function sumRoleUsageEstimatedCny(context: TuiContext): number {
