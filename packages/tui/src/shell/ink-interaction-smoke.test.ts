@@ -2477,6 +2477,36 @@ describe("Ink TTY interaction smoke", () => {
     shell.unmount();
   });
 
+  it("labels selected agent Enter action as details instead of transcript view", async () => {
+    const view = {
+      ...baseTaskView(),
+      blocks: [],
+      commandPanel: undefined,
+      agentProgressTree: {
+        rows: [
+          {
+            id: "agent-running",
+            branch: "last" as const,
+            name: "探索",
+            status: "running" as const,
+            activity: "读取文件",
+            mailboxMessages: 0,
+            tokens: 0,
+          },
+        ],
+        hiddenPending: 0,
+        cursor: 0,
+      },
+    };
+    const { output, shell } = await renderWithEvents(() => view);
+
+    expect(output.text).toContain("Enter 详情");
+    expect(output.text).not.toContain("Enter 查看");
+    expect(output.text).not.toContain("enter view");
+
+    shell.unmount();
+  });
+
   it("selects task suggestions with arrows and Enter", async () => {
     let view: ShellViewModel = {
       ...baseTaskView(),
