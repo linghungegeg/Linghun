@@ -873,7 +873,6 @@ export async function executeApprovedModelToolUse(
     toolUseId: toolCall.id,
     ...(requestOwner ? { requestTurnId: requestOwner.requestTurnId } : {}),
   });
-  writeToolRunningBlock(output, toolName, toolCall.id, toolTarget);
   await context.store.appendEvent(
     sessionId,
     {
@@ -4581,9 +4580,7 @@ function installToolProgressHandler(
     const visibleLines = lines.slice(0, remainingLines);
     const inkSession = context.isInkSession === true;
     if (remainingLines > 0 && visibleLines.length > 0) {
-      if (inkSession) {
-        writeToolRunningBlock(output, event.toolName, callId, truncateDisplay(visibleLines.join(" "), 240));
-      } else {
+      if (!inkSession) {
         output.write(`${truncateDisplay(visibleLines.join("\n"), 2_000)}\n`);
       }
       visibleProgressLines += Math.min(lines.length, remainingLines);
@@ -4595,16 +4592,7 @@ function installToolProgressHandler(
       visibleProgressLines >= PROGRESS_PREVIEW_LINES &&
       !progressSuppressed
     ) {
-      if (inkSession) {
-        writeToolRunningBlock(
-          output,
-          event.toolName,
-          callId,
-          context.language === "en-US"
-            ? "More output hidden; press Ctrl+O for details."
-            : "更多输出已收起，可查看详情。",
-        );
-      } else {
+      if (!inkSession) {
         output.write(
           context.language === "en-US"
             ? "... more command output hidden; press Ctrl+O for details.\n"

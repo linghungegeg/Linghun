@@ -39,6 +39,7 @@ import type { AgentRun, WorkflowRunState } from "./tui-data-types.js";
 class WebToolOutput extends Writable {
   text = "";
   errors: string[] = [];
+  runningBlocks: Array<{ toolName: string; toolUseId: string; summary?: string }> = [];
 
   override _write(
     chunk: unknown,
@@ -51,6 +52,10 @@ class WebToolOutput extends Writable {
 
   writeErrorLine(text: string): void {
     this.errors.push(text);
+  }
+
+  writeToolRunningBlock(toolName: string, toolUseId: string, summary?: string): void {
+    this.runningBlocks.push({ toolName, toolUseId, summary });
   }
 }
 
@@ -202,6 +207,44 @@ describe("model-tool-runtime Web terminal output", () => {
       }
     },
   );
+
+  it("keeps Bash running progress in request activity without creating main-screen running blocks", async () => {
+    const originalCall = builtInTools.Bash.call;
+    builtInTools.Bash.call = (async (_input, toolContext) => {
+      await (toolContext.onProgress as ((event: ToolProgressEvent) => void | Promise<void>) | undefined)?.({
+        toolName: "Bash",
+        stream: "stdout",
+        text: "first line\nsecond line\n",
+      });
+      return { text: "done", data: { exitCode: 0 } };
+    }) as typeof originalCall;
+    const events: unknown[] = [];
+    const context = createWebToolTestContext(events);
+    context.isInkSession = true;
+    const output = new WebToolOutput();
+
+    try {
+      const result = await executeApprovedModelToolUse(
+        { id: "bash-progress", name: "Bash", input: { command: "printf test" } },
+        "Bash",
+        context,
+        "session-web",
+        output,
+      );
+
+      expect(result.ok).toBe(true);
+      expect(output.runningBlocks).toEqual([]);
+      expect(events.some((event) => (event as { type?: string }).type === "tool_call_delta"))
+        .toBe(true);
+      expect(events.filter((event) => (event as { type?: string }).type === "tool_call_start"))
+        .toHaveLength(1);
+      expect(events.filter((event) => (event as { type?: string }).type === "tool_result"))
+        .toHaveLength(1);
+      expect(context.requestActivityPhase).toBeUndefined();
+    } finally {
+      builtInTools.Bash.call = originalCall;
+    }
+  });
 
   it("keeps new-owner evidence when a stale request reuses the same tool use id", async () => {
     const originalCall = builtInTools.WebSearch.call;

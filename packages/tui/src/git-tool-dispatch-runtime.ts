@@ -89,6 +89,10 @@ export type WorktreeRemoveExecuteResult = {
   result: WorktreeRemoveResult;
 };
 
+type GitToolOwner = {
+  requestTurnId?: string;
+};
+
 /**
  * index-owned 运行时 helper 注入。保持与 index.ts 既有实现完全一致的行为；
  * 本模块不复制这些 helper，只编排调用顺序。
@@ -147,6 +151,7 @@ export type GitToolDispatchDeps = {
     isError: boolean,
     evidenceId?: string,
     commitGuard?: () => boolean,
+    requestTurnId?: string,
   ) => Promise<void>;
   createSingleToolCallContinuation: (
     continuation: PendingModelContinuation,
@@ -296,6 +301,7 @@ export async function executeGitToolUse(
   continuation?: PendingModelContinuation,
 ): Promise<GitToolResult> {
   const commitGuard = continuationCommitGuard(context, continuation);
+  const requestTurnId = continuation?.requestTurnId;
   const activityOwner = continuation?.requestTurnId
     ? { kind: "foreground" as const, requestTurnId: continuation.requestTurnId }
     : undefined;
@@ -333,10 +339,14 @@ export async function executeGitToolUse(
   if (commitGuard && !commitGuard()) return staleResult();
   try {
     if (toolCall.name === GIT_STATUS_INSPECT) {
-      return await runGitStatusInspectTool(toolCall, context, sessionId, output, deps, commitGuard);
+      return await runGitStatusInspectTool(toolCall, context, sessionId, output, deps, commitGuard, {
+        requestTurnId,
+      });
     }
     if (toolCall.name === GIT_ROLLBACK_EXPLAIN) {
-      return await runGitRollbackExplainTool(toolCall, context, sessionId, output, deps, commitGuard);
+      return await runGitRollbackExplainTool(toolCall, context, sessionId, output, deps, commitGuard, {
+        requestTurnId,
+      });
     }
     if (toolCall.name === GIT_STABLE_POINT_CREATE) {
       return await runStablePointTool(
@@ -348,6 +358,7 @@ export async function executeGitToolUse(
         parseStablePointInput(toolCall.input),
         continuation,
         commitGuard,
+        { requestTurnId },
       );
     }
     if (toolCall.name === MANAGED_WORKTREE_CREATE) {
@@ -359,6 +370,7 @@ export async function executeGitToolUse(
         deps,
         commitGuard,
         continuation?.abortSignal,
+        { requestTurnId },
       );
     }
     // ManagedWorktreeRemove
@@ -370,6 +382,7 @@ export async function executeGitToolUse(
       deps,
       continuation,
       commitGuard,
+      { requestTurnId },
     );
   } catch (error) {
     if (commitGuard && !commitGuard()) return staleResult();
@@ -393,6 +406,7 @@ export async function executeGitToolUse(
       true,
       evidence.id,
       commitGuard,
+      requestTurnId,
     );
     if (commitGuard && !commitGuard()) return staleResult();
     return { ok: false, tool: toolCall.name, text, evidenceId: evidence.id };
@@ -406,6 +420,7 @@ async function runGitRollbackExplainTool(
   output: Writable,
   deps: GitToolDispatchDeps,
   commitGuard?: () => boolean,
+  owner: GitToolOwner = {},
 ): Promise<GitToolResult> {
   if (commitGuard && !commitGuard()) {
     return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
@@ -437,6 +452,7 @@ async function runGitRollbackExplainTool(
     false,
     evidence?.id,
     commitGuard,
+    owner.requestTurnId,
   );
   if (commitGuard && !commitGuard()) {
     return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
@@ -453,6 +469,7 @@ async function runGitStatusInspectTool(
   output: Writable,
   deps: GitToolDispatchDeps,
   commitGuard?: () => boolean,
+  owner: GitToolOwner = {},
 ): Promise<GitToolResult> {
   if (commitGuard && !commitGuard()) {
     return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
@@ -507,6 +524,7 @@ async function runGitStatusInspectTool(
     false,
     evidence?.id,
     commitGuard,
+    owner.requestTurnId,
   );
   if (commitGuard && !commitGuard()) {
     return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
@@ -528,6 +546,7 @@ async function runStablePointTool(
   input: { message?: string; includeUntracked?: boolean },
   continuation?: PendingModelContinuation,
   commitGuard?: () => boolean,
+  owner: GitToolOwner = {},
 ): Promise<GitToolResult> {
   if (commitGuard && !commitGuard()) {
     return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
@@ -572,6 +591,7 @@ async function runStablePointTool(
       true,
       evidence.id,
       commitGuard,
+      owner.requestTurnId,
     );
     deps.writeLine(output, text);
     return { ok: false, tool: toolCall.name, text, evidenceId: evidence.id };
@@ -636,6 +656,7 @@ async function runStablePointTool(
     !result.ok,
     result.evidenceId,
     commitGuard,
+    owner.requestTurnId,
   );
   if (commitGuard && !commitGuard()) {
     return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
@@ -800,6 +821,7 @@ async function runWorktreeCreateTool(
   deps: GitToolDispatchDeps,
   commitGuard?: () => boolean,
   abortSignal?: AbortSignal,
+  owner: GitToolOwner = {},
 ): Promise<GitToolResult> {
   const input = parseWorktreeCreateInput(toolCall.input);
   const result = await performWorktreeCreate(
@@ -824,6 +846,7 @@ async function runWorktreeCreateTool(
     !result.ok,
     result.evidenceId,
     commitGuard,
+    owner.requestTurnId,
   );
   if (commitGuard && !commitGuard()) {
     return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
@@ -946,6 +969,7 @@ async function runWorktreeRemoveTool(
   deps: GitToolDispatchDeps,
   continuation?: PendingModelContinuation,
   commitGuard?: () => boolean,
+  owner: GitToolOwner = {},
 ): Promise<GitToolResult> {
   if (commitGuard && !commitGuard()) {
     return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
@@ -1065,6 +1089,7 @@ async function runWorktreeRemoveTool(
     true,
     evidence.id,
     commitGuard,
+    owner.requestTurnId,
   );
   if (commitGuard && !commitGuard()) {
     return { ok: false, tool: toolCall.name, text: "cancelled: stale git tool result discarded" };
@@ -1335,6 +1360,7 @@ export async function resolveStablePointApprove(
     !result.ok,
     result.evidenceId,
     commitGuard,
+    approval.continuation?.requestTurnId,
   );
   if (commitGuard && !commitGuard()) return;
   deps.writeLine(output, result.text);
