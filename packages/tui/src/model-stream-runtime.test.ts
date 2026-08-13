@@ -5416,9 +5416,9 @@ describe("high reasoning tool empty response retry", () => {
 });
 
 describe("final answer gate aggregation", () => {
-  it("keeps real main-chain visible claim inference contract-only", async () => {
+  it("uses result-only visible claim inference for engineering final answers", async () => {
     const source = await readFile(new URL("./model-stream-runtime.ts", import.meta.url), "utf8");
-    expect(source).toContain('const MAIN_CHAIN_VISIBLE_CLAIM_INFERENCE = "none"');
+    expect(source).toContain('const MAIN_CHAIN_VISIBLE_CLAIM_INFERENCE = "result_only"');
   });
 
   it("treats structured claims as hints when visible text asserts a stronger result", () => {
@@ -5434,14 +5434,14 @@ describe("final answer gate aggregation", () => {
     }
   });
 
-  it("uses contract-only main-chain inference without broad text interception", () => {
+  it("gates visible engineering result claims without requiring a model contract", () => {
     const planText =
       "方案：先读 packages/tui/src/model-stream-runtime.ts，再分析函数调用 final gate 的路径。";
     const result = evaluateAggregatedFinalAnswerGate(
       makeGateContext() as never,
       planText,
       false,
-      { visibleClaimInference: "none" },
+      { visibleClaimInference: "result_only" },
     );
     expect(result.status).toBe("passed");
 
@@ -5449,7 +5449,7 @@ describe("final answer gate aggregation", () => {
       makeGateContext() as never,
       withClaims(planText, [{ kind: "code_fact", phrase: "函数调用 final gate" }]),
       false,
-      { visibleClaimInference: "none" },
+      { visibleClaimInference: "result_only" },
     );
     expect(structured.status).toBe("needs_disclaimer");
     if (structured.status === "needs_disclaimer") {
@@ -5460,9 +5460,85 @@ describe("final answer gate aggregation", () => {
       makeGateContext() as never,
       "测试已经通过。",
       false,
+      { visibleClaimInference: "result_only" },
+    );
+    expect(testClaim.status).toBe("needs_disclaimer");
+    if (testClaim.status === "needs_disclaimer") {
+      expect(testClaim.unsupportedKinds).toContain("test_claim");
+    }
+
+    const emptyContract = evaluateAggregatedFinalAnswerGate(
+      makeGateContext() as never,
+      withClaims("测试已经通过。", []),
+      false,
+      { visibleClaimInference: "result_only" },
+    );
+    expect(emptyContract.status).toBe("needs_disclaimer");
+    if (emptyContract.status === "needs_disclaimer") {
+      expect(emptyContract.unsupportedKinds).toContain("test_claim");
+    }
+
+    const readonlyAudit = evaluateAggregatedFinalAnswerGate(
+      makeGateContext() as never,
+      "只读审计完成：本轮没有运行测试，也没有修改文件。",
+      false,
+      { visibleClaimInference: "result_only" },
+    );
+    expect(readonlyAudit.status).toBe("passed");
+  });
+
+  it("keeps ordinary chat outside visible result inference", () => {
+    const context = {
+      ...makeGateContext(),
+      lastMetaSchedulerDecision: {
+        policyDecision: { taskKind: "chat" },
+      },
+    };
+    const result = evaluateAggregatedFinalAnswerGate(
+      context as never,
+      "测试通过通常表示命令以成功状态结束。",
+      false,
       { visibleClaimInference: "none" },
     );
-    expect(testClaim.status).toBe("passed");
+    expect(result.status).toBe("passed");
+  });
+
+  it("distinguishes result assertions from plans and general explanations", () => {
+    const unsupportedResultAssertions = [
+      "修改已完成。",
+      "已修复这个问题。",
+      "测试已经通过。",
+      "验证已经完成。",
+      "已修改 packages/tui/src/model-stream-runtime.ts。",
+      "已执行 corepack pnpm test。",
+      "All tests passed.",
+      "The fix is verified.",
+    ];
+    const nonAssertions = [
+      "方案：运行测试后再确认结果。",
+      "尚未运行测试。",
+      "测试通过通常表示命令以成功状态结束。",
+    ];
+
+    for (const text of unsupportedResultAssertions) {
+      const result = evaluateAggregatedFinalAnswerGate(
+        makeGateContext() as never,
+        text,
+        false,
+        { visibleClaimInference: "result_only" },
+      );
+      expect(result.status, text).toBe("needs_disclaimer");
+    }
+
+    for (const text of nonAssertions) {
+      const result = evaluateAggregatedFinalAnswerGate(
+        makeGateContext() as never,
+        text,
+        false,
+        { visibleClaimInference: "result_only" },
+      );
+      expect(result.status, text).toBe("passed");
+    }
   });
 
   it("requires a structured claim contract for high-risk main-chain scopes", () => {

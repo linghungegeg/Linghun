@@ -1695,7 +1695,7 @@ export function inferVisibleFinalAnswerClaims(text: string): FinalAnswerClaimMat
   const add = (kind: FinalAnswerClaimKind, pattern: RegExp): void => {
     for (const clause of splitClaimClauses(visible)) {
       const claimText = stripClaimExplanationExamples(clause);
-      if (!claimText) continue;
+      if (!claimText || isGeneralizedClaimExplanation(claimText)) continue;
       if (
         kind === "completion_claim" &&
         /(?:agent|子\s*agent|智能体|workflow|工作流)/iu.test(claimText)
@@ -1731,7 +1731,7 @@ export function inferVisibleFinalAnswerClaims(text: string): FinalAnswerClaimMat
   add("test_claim", /(?:测试|tests?|vitest|jest|pytest|go\s+test|cargo\s+test).{0,40}(?:通过|passed|pass)/iu);
   add(
     "verification_claim",
-    /(?:(?:tests?|测试|typecheck|lint|build|构建|smoke|冒烟).{0,40}(?:通过|passed|pass|成功)|(?:验证|verification).{0,24}(?:测试|tests?|typecheck|lint|build|构建|smoke|冒烟).{0,24}(?:通过|passed|pass|成功))/iu,
+    /(?:(?:tests?|测试|typecheck|lint|build|构建|smoke|冒烟).{0,40}(?:通过|passed|pass|成功)|(?:验证|verification).{0,24}(?:测试|tests?|typecheck|lint|build|构建|smoke|冒烟).{0,24}(?:通过|passed|pass|成功)|(?:验证|verification|fix|修复).{0,24}(?:完成|completed|verified|成功))/iu,
   );
   add("file_change_claim", /(?:已|已经|successfully\s+)?(?:修改|写入|创建|更新|删除|edited|wrote|created|updated|deleted).{0,100}(?:文件|file|[\w./\\-]+\.[A-Za-z0-9._-]+)/iu);
   add("agent_status_claim", /(?:agent|子\s*agent|智能体).{0,60}(?:完成|completed|通过|passed|成功)/iu);
@@ -1745,7 +1745,7 @@ export function inferVisibleFinalAnswerClaims(text: string): FinalAnswerClaimMat
     "code_fact",
     /(?:(?:代码|函数|方法|类|模块|function|method|class|module).{0,100}(?:负责|会|调用|返回|实现|uses?|calls?|returns?|implements?|(?:(?:do|does)\s+not|don't|doesn't)\s+(?:call|use|reference|invoke))|[\p{L}\p{N}_$.-]{2,}.{0,40}(?:未(?:被)?|没有(?:被)?|不)(?:调用|引用|使用)|(?:未发现|未找到|找不到|没有(?:发现|找到|任何)?|不存在|无(?:任何)?)[^。；;\n]{0,80}(?:调用|引用|使用|匹配|callers?|references?|matches?)|(?:不|没有(?:被)?)(?:调用|引用|使用)[^。；;\n]{0,80}|(?:no\s+(?:calls?|callers?|invocations?|references?|matches?|usages?|uses?)|not\s+(?:used|using|referenced|called|invoked)|(?:(?:do|does)\s+not|don't|doesn't)\s+(?:call|use|reference|invoke)|[\p{L}\p{N}_$./\\-]{2,}[^.\n]{0,40}\bunused\b|\bunused\s+[\p{L}\p{N}_$./\\-]{2,})[^.\n]{0,80})/iu,
   );
-  add("completion_claim", /(?:已完成|已经完成|已修复|已经修复|(?:检查|审计|复核|核对)(?:完(?:成)?|结束)|completed|fixed|done)/iu);
+  add("completion_claim", /(?:已完成|已经完成|已修复|已经修复|completed|fixed|done)/iu);
   return claims;
 }
 
@@ -1800,6 +1800,12 @@ function isNegatedOrProspectiveClaim(text: string, sourceText: string): boolean 
     );
   if (!capabilityDescription) return false;
   return !/(?:已|已经|曾经|(?:修改|写入|创建|更新|删除|执行|安装|启动|停止|运行)了|successfully\b|(?:have|has)\s+(?:modified|written|created|updated|deleted|edited|run|executed|installed|started|stopped)\b|\b(?:ran|executed|installed|started|stopped|wrote|created|updated|deleted|edited)\b)/iu.test(
+    text,
+  );
+}
+
+function isGeneralizedClaimExplanation(text: string): boolean {
+  return /(?:(?:通常|一般|往往|一般来说).{0,40}(?:表示|意味着)|usually\s+(?:means|indicates))/iu.test(
     text,
   );
 }

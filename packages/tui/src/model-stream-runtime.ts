@@ -307,7 +307,7 @@ export type FinalGateEvidenceGapActionPlan = {
 
 const MAX_FINAL_GATE_CLAIM_ALIGNMENT_REWRITES = 0;
 const MAX_FINAL_GATE_CONTRACT_RETRY_ROUNDS = 2;
-const MAIN_CHAIN_VISIBLE_CLAIM_INFERENCE = "none" satisfies NonNullable<
+const MAIN_CHAIN_VISIBLE_CLAIM_INFERENCE = "result_only" satisfies NonNullable<
   FinalAnswerClaimEvaluationOptions["visibleClaimInference"]
 >;
 const SAME_TOOL_FAILURE_RETRY_GUARD_LIMIT = 4;
@@ -328,7 +328,7 @@ function createMainChainFinalGateClaimOptions(
   context: TuiContext,
 ): FinalAnswerClaimEvaluationOptions {
   return {
-    visibleClaimInference: MAIN_CHAIN_VISIBLE_CLAIM_INFERENCE,
+    visibleClaimInference: mainChainVisibleClaimInference(context),
     requireStructuredClaimContract: shouldRequireStructuredFinalAnswerClaimContract(context),
   };
 }
@@ -337,7 +337,7 @@ function createMainChainVisibleFinalGateClaimOptions(
   context: TuiContext,
 ): FinalAnswerClaimEvaluationOptions {
   return {
-    visibleClaimInference: MAIN_CHAIN_VISIBLE_CLAIM_INFERENCE,
+    visibleClaimInference: mainChainVisibleClaimInference(context),
     requireStructuredClaimContract: false,
   };
 }
@@ -415,6 +415,16 @@ function shouldRequireStructuredFinalAnswerClaimContract(context: TuiContext): b
       policy.permissionSignal?.expectedMutating ||
       policy.permissionPlan?.expectedMutating,
   );
+}
+
+function mainChainVisibleClaimInference(
+  context: TuiContext,
+): NonNullable<FinalAnswerClaimEvaluationOptions["visibleClaimInference"]> {
+  // Normal conversation remains a zero-cost text path. Engineering result claims
+  // are inferred locally so an omitted or empty model contract cannot bypass the gate.
+  return context.lastMetaSchedulerDecision?.policyDecision.taskKind === "chat"
+    ? "none"
+    : MAIN_CHAIN_VISIBLE_CLAIM_INFERENCE;
 }
 
 function shouldRunExtendedFinalAnswerGate(context: Pick<TuiContext, "lastMetaSchedulerDecision">): boolean {
