@@ -31,12 +31,6 @@
     "marked": "^18.0.5",
     "react": "^19.2.6"
   },
-  "optionalDependencies": {
-    "@linghun/codebase-memory-darwin-arm64": "0.1.0",
-    "@linghun/codebase-memory-darwin-x64": "0.1.0",
-    "@linghun/codebase-memory-linux-x64": "0.1.0",
-    "@linghun/codebase-memory-win32-x64": "0.1.0"
-  },
   "devDependencies": {
     "@types/react": "^19.2.15"
   }

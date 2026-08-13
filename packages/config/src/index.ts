@@ -493,6 +493,9 @@ const defaultDeepSeekModel = normalizeDeepSeekModelName(
 const defaultLinghunModel = normalizeDeepSeekModelName(
   process.env.LINGHUN_DEFAULT_MODEL ?? defaultDeepSeekModel,
 );
+const CODEBASE_MEMORY_URL_ENV = "LINGHUN_CODEBASE_MEMORY_MCP_URL";
+const CODEBASE_MEMORY_NPX_PACKAGE = "codebase-memory-mcp@latest";
+const defaultCodebaseMemoryUrl = process.env[CODEBASE_MEMORY_URL_ENV]?.trim();
 const openAiCompatibleModelPlaceholder = "openai-compatible-model";
 const defaultOpenAiEndpointProfile = normalizeEndpointProfile(
   process.env.LINGHUN_OPENAI_ENDPOINT_PROFILE,
@@ -707,8 +710,21 @@ export const defaultConfig: LinghunConfig = {
     enabledServers: ["codebase-memory"],
     servers: {
       "codebase-memory": {
-        command: process.env[CODEBASE_MEMORY_ENV] ?? CODEBASE_MEMORY_COMMAND,
-        args: [],
+        command: defaultCodebaseMemoryUrl ? "" : (process.env[CODEBASE_MEMORY_ENV] ?? "npx"),
+        args: defaultCodebaseMemoryUrl
+          ? []
+          : process.env[CODEBASE_MEMORY_ENV]
+            ? []
+            : ["-y", CODEBASE_MEMORY_NPX_PACKAGE],
+        ...(defaultCodebaseMemoryUrl
+          ? {
+              url: defaultCodebaseMemoryUrl,
+              transport: "sse" as const,
+              sourceUrl: defaultCodebaseMemoryUrl,
+              trustLevel: "trusted" as const,
+              permissionSummary: "readonly-index",
+            }
+          : {}),
       },
     },
   },

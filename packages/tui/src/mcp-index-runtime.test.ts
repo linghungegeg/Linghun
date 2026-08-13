@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { access, chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,7 @@ import {
   configureMcpIndexRuntime,
   executeExtraTool,
   findBundledCodebaseMemoryBinary,
+  getCodebaseMemoryResolution,
   refreshIndexStatus,
   isSupportiveIndexEvidence,
   recordIndexEvidence,
@@ -100,6 +101,10 @@ function restoreEnv(name: string, value: string | undefined): void {
 }
 
 describe("mcp-index-runtime", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   test("persists index evidence with its original request owner before resume", async () => {
     const persisted: Array<Record<string, unknown>> = [];
     const context = {
@@ -658,6 +663,104 @@ describe("mcp-index-runtime", () => {
     expect(context.index.edges).toBe(7);
     expect(context.index.artifactStatus).toBe("ready");
     expect(context.index.status).not.toBe("unknown");
+  });
+
+  test("default official codebase-memory npm package is reported as the official source", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-index-official-npm-"));
+    const mockNpx = join(projectPath, "node_modules", "npm", "bin", "npx-cli.js");
+    await mkdir(join(projectPath, "node_modules", "npm", "bin"), { recursive: true });
+    await writeFile(
+      mockNpx,
+      `if (process.argv.includes("--version")) {
+  console.log("codebase-memory-mcp 9.8.7");
+  process.exit(0);
+}
+console.error("unexpected args", process.argv.slice(2).join(" "));
+process.exit(1);
+`,
+      "utf8",
+    );
+    await chmod(mockNpx, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${projectPath}${process.platform === "win32" ? ";" : ":"}${previousPath ?? ""}`;
+    const context = createIndexContext(projectPath);
+    context.config.mcp.servers["codebase-memory"] = {
+      command: "npx",
+      args: ["-y", "codebase-memory-mcp@latest"],
+    } as typeof context.config.mcp.servers["codebase-memory"];
+
+    try {
+      const resolution = await getCodebaseMemoryResolution(context as never);
+
+      expect(resolution.status).toBe("ready");
+      expect(resolution.source).toBe("official-npm");
+      expect(resolution.version).toBe("9.8.7");
+      expect(context.index.binarySource).toBe("official-npm");
+      expect(context.index.runtime).toBe("official codebase-memory npm package");
+    } finally {
+      restoreEnv("PATH", previousPath);
+    }
+  });
+
+  test("refreshIndexStatus can use remote readonly codebase-memory MCP without local binary", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-index-remote-mcp-"));
+    const url = "https://index.example.test/mcp";
+    const context = createIndexContext(projectPath);
+    context.config.mcp.servers["codebase-memory"] = {
+      command: "",
+      args: [],
+      url,
+      transport: "sse",
+      trustLevel: "trusted",
+    };
+    const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        const request = JSON.parse(String(init?.body ?? "{}")) as {
+          id: number;
+          method: string;
+          params?: Record<string, unknown>;
+        };
+        requests.push({ method: request.method, params: request.params ?? {} });
+        const result =
+          request.method === "tools/list"
+            ? { tools: [{ name: "list_projects" }, { name: "index_status" }] }
+            : request.params?.name === "list_projects"
+              ? {
+                  content: [
+                    {
+                      type: "text",
+                      text: JSON.stringify({
+                        projects: [{ name: "RemoteProject", root_path: projectPath }],
+                      }),
+                    },
+                  ],
+                }
+              : {
+                  content: [
+                    { type: "text", text: JSON.stringify({ status: "ready", nodes: 13, edges: 9 }) },
+                  ],
+                };
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }), {
+          headers: { "content-type": "application/json" },
+        });
+      }) as never,
+    );
+
+    await refreshIndexStatus(context as never);
+
+    expect(context.index.status).toBe("ready");
+    expect(context.index.projectName).toBe("RemoteProject");
+    expect(context.index.nodes).toBe(13);
+    expect(context.index.edges).toBe(9);
+    expect(context.index.binarySource).toBe("mcp");
+    expect(context.index.runtime).toBe("remote codebase-memory MCP");
+    expect(requests.map((request) => request.method)).toEqual([
+      "tools/list",
+      "tools/call",
+      "tools/call",
+    ]);
   });
 
   test("refreshIndexStatus uses the current artifact and CLI project name instead of a hardcoded project", async () => {

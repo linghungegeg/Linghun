@@ -3,7 +3,14 @@ import { basename, join } from "node:path";
 import type { LinghunConfig } from "@linghun/config";
 import { isRecord } from "./tui-state-runtime.js";
 
-export type CodebaseMemoryBinarySource = "env" | "bundled" | "managed" | "path" | "missing";
+export type CodebaseMemoryBinarySource =
+  | "env"
+  | "mcp"
+  | "official-npm"
+  | "bundled"
+  | "managed"
+  | "path"
+  | "missing";
 export type CodebaseMemoryBinaryStatus =
   | "ready"
   | "missing"

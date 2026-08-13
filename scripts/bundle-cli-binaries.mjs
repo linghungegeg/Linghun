@@ -52,7 +52,7 @@ async function main() {
     }
   } else if (options.downloadCodebaseMemory) {
     await bundleReleasedCodebaseMemory(options.platformArch);
-  } else {
+  } else if (options.localCodebaseMemory) {
     await bundleLocalCodebaseMemory(options.platformArch);
   }
 }
@@ -61,6 +61,7 @@ function parseArgs(args) {
   return {
     allCodebaseMemory: args.includes("--all-codebase-memory"),
     downloadCodebaseMemory: args.includes("--download-codebase-memory"),
+    localCodebaseMemory: args.includes("--local-codebase-memory"),
     nativeRunnerArtifacts: readOption(args, "--native-runner-artifacts"),
     preEngineArtifacts: readOption(args, "--pre-engine-artifacts"),
     platformArch: readOption(args, "--platform-arch") ?? currentPlatformArch,

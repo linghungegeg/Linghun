@@ -349,6 +349,20 @@ export async function createMcpStdioRunner<T>(
           const isResponse = isMcpJsonRpcResponse(obj);
           const responseHandler = isResponse ? pending.get(obj.id) : undefined;
           const isProgress = isMcpProgressNotification(obj);
+          if (
+            obj.jsonrpc === "2.0" &&
+            Object.prototype.hasOwnProperty.call(obj, "error") &&
+            obj.id == null
+          ) {
+            const rpcError = obj.error as { message?: string; code?: number | string };
+            settle({
+              ok: false,
+              summary: `MCP stdio error: ${sanitizeDiagnosticText(rpcError?.message ?? "unknown")}`,
+              errorCode:
+                typeof rpcError?.code === "string" ? rpcError.code : "MCP_STDIO_SERVER_ERROR",
+            });
+            return;
+          }
           if (obj.jsonrpc === "2.0" && (responseHandler || isProgress)) {
             armInactivityTimeout();
             receivedBytes += Buffer.byteLength(line, "utf8");

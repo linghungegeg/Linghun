@@ -105,6 +105,26 @@ export type CodebaseMemoryResolution = {
   summary: string;
 };
 
+function getConfiguredCodebaseMemoryServer(context: TuiContext): McpServerConfig | undefined {
+  return context.config.mcp.servers["codebase-memory"];
+}
+
+function isCodebaseMemorySseServer(server: McpServerConfig | undefined): server is McpServerConfig {
+  return server?.transport === "sse" && typeof server.url === "string" && server.url.trim() !== "";
+}
+
+function isOfficialCodebaseMemoryNpmServer(server: McpServerConfig | undefined): boolean {
+  if (!server || server.transport === "sse") return false;
+  if (server.disabled === true) return false;
+  if (server.command.trim().toLowerCase() !== "npx") return false;
+  const args = server.args ?? [];
+  return args.some(isOfficialCodebaseMemoryNpmPackage);
+}
+
+function isOfficialCodebaseMemoryNpmPackage(arg: string): boolean {
+  return /^codebase-memory-mcp(?:@.+)?$/u.test(arg);
+}
+
 export type ExecuteExtraToolResult =
   | { ok: true; text: string; data?: unknown; degraded?: false }
   | { ok: true; text: string; data?: unknown; degraded: true }
@@ -363,29 +383,38 @@ export async function resolveCodebaseMemoryBinary(
   context: TuiContext,
   signal?: AbortSignal,
 ): Promise<CodebaseMemoryResolution> {
-  const configured = context.config.mcp.servers["codebase-memory"];
+  const configured = getConfiguredCodebaseMemoryServer(context);
   const configuredCommand = configured?.command?.trim();
   const configuredArgs = configured?.args ?? [];
+  if (isCodebaseMemorySseServer(configured)) {
+    return {
+      command: "",
+      args: [],
+      source: "mcp",
+      status: "ready",
+      detailPath: configured.url,
+      summary: "remote codebase-memory MCP ready",
+    };
+  }
   const envCommand = process.env[CODEBASE_MEMORY_ENV]?.trim();
   if (envCommand) {
     const spec = await codebaseMemoryCommandSpec(envCommand, []);
     return probeCodebaseMemoryBinary(spec.command, spec.args, "env", context, spec.detailPath, signal);
   }
+  if (isOfficialCodebaseMemoryNpmServer(configured)) {
+    const spec = await codebaseMemoryCommandSpec(configuredCommand || "npx", configuredArgs);
+    return probeCodebaseMemoryBinary(
+      spec.command,
+      spec.args,
+      "official-npm",
+      context,
+      configuredCommand || "npx",
+      signal,
+    );
+  }
   if (configuredCommand && configuredCommand !== CODEBASE_MEMORY_COMMAND) {
     const spec = await codebaseMemoryCommandSpec(configuredCommand, configuredArgs);
     return probeCodebaseMemoryBinary(spec.command, spec.args, "env", context, spec.detailPath, signal);
-  }
-
-  const bundled = await findBundledCodebaseMemoryBinary();
-  if (bundled) {
-    return probeCodebaseMemoryBinary(
-      bundled.command,
-      bundled.args,
-      "bundled",
-      context,
-      bundled.detailPath,
-      signal,
-    );
   }
 
   const managed = await findManagedCodebaseMemoryBinary(context);
@@ -430,6 +459,14 @@ export async function codebaseMemoryCommandSpec(
   command: string,
   args: string[],
 ): Promise<{ command: string; args: string[]; detailPath: string }> {
+  const npxScript = await resolveNpxNodeScript(command);
+  if (npxScript) {
+    return { command: process.execPath, args: [npxScript, ...args], detailPath: command };
+  }
+  const resolvedCommand = await resolveCommandFromPath(command);
+  if (resolvedCommand && resolvedCommand !== command) {
+    return codebaseMemoryCommandSpec(resolvedCommand, args);
+  }
   const lowerCommand = command.toLowerCase();
   if (lowerCommand.endsWith(".cjs")) {
     return { command: process.execPath, args: [command, ...args], detailPath: command };
@@ -468,6 +505,49 @@ export async function codebaseMemoryCommandSpec(
     };
   }
   return { command, args, detailPath: command };
+}
+
+async function resolveNpxNodeScript(command: string): Promise<string | undefined> {
+  if (command.includes("/") || command.includes("\\")) return undefined;
+  if (command.trim().toLowerCase() !== "npx") return undefined;
+  const candidates =
+    process.platform === "win32"
+      ? ["node_modules/npm/bin/npx-cli.js"]
+      : ["lib/node_modules/npm/bin/npx-cli.js", "node_modules/npm/bin/npx-cli.js"];
+  const pathDirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+  for (const dir of pathDirs) {
+    for (const candidate of candidates) {
+      const path = join(dir, candidate);
+      if (await pathExists(path)) return path;
+    }
+  }
+  return undefined;
+}
+
+async function resolveCommandFromPath(command: string): Promise<string | undefined> {
+  if (command.includes("/") || command.includes("\\")) return undefined;
+  const candidates = createPathCommandCandidates(command);
+  const pathDirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+  for (const dir of pathDirs) {
+    for (const candidate of candidates) {
+      const path = join(dir, candidate);
+      if (await pathExists(path)) return path;
+    }
+  }
+  return undefined;
+}
+
+function createPathCommandCandidates(command: string): string[] {
+  if (process.platform !== "win32") return [command];
+  const pathext = (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+    .split(";")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+  const candidates = [command];
+  for (const ext of pathext) {
+    candidates.push(`${command}${ext}`);
+  }
+  return candidates;
 }
 
 async function resolveWindowsShimNodeScript(command: string): Promise<string | undefined> {
@@ -1365,7 +1445,11 @@ export function rememberCodebaseMemoryResolution(
   context.index.binaryVersion = resolution.version;
   context.index.binaryCommand = redactedPath(resolution.detailPath);
   context.index.runtime =
-    resolution.source === "bundled"
+    resolution.source === "mcp"
+      ? "remote codebase-memory MCP"
+      : resolution.source === "official-npm"
+        ? "official codebase-memory npm package"
+      : resolution.source === "bundled"
       ? "bundled codebase-memory"
       : resolution.source === "managed"
         ? "Linghun-managed codebase-memory"
@@ -1648,7 +1732,7 @@ export async function refreshIndexStatus(
           : "missing";
     const artifactError = context.index.error;
     context.index.artifactStatus = context.index.artifactStatus ?? "unknown";
-    context.index.error = `${resolution.summary}。普通聊天不受影响；如需索引，请配置 ${CODEBASE_MEMORY_ENV} 或安装 Linghun-managed codebase-memory。`;
+    context.index.error = `${resolution.summary}。普通聊天不受影响；如需索引，请配置远端 codebase-memory MCP URL 或 ${CODEBASE_MEMORY_ENV} 外部命令。`;
     if (context.index.status === "error" && artifactError) {
       context.index.error = artifactError;
     }
@@ -1762,6 +1846,12 @@ export async function refreshIndexStaleHint(
   projectName: string,
   signal?: AbortSignal,
 ): Promise<void> {
+  const resolution = await getCodebaseMemoryResolution(context, signal);
+  if (signal?.aborted) return;
+  if (resolution.source === "mcp") {
+    context.index.staleHint = "remote codebase-memory MCP is readonly；不会自动运行 detect_changes。";
+    return;
+  }
   const changes = await runCodebaseMemoryCli(
     context,
     "detect_changes",
@@ -2190,6 +2280,48 @@ export async function runCodebaseMemoryCli(
   if (resolution.status !== "ready") {
     return { ok: false, summary: resolution.summary, errorCode: resolution.status };
   }
+  if (resolution.source === "mcp") {
+    const risk = getCodebaseMemoryToolRisk(tool);
+    if (risk !== "readonly") {
+      return {
+        ok: false,
+        summary: "remote codebase-memory MCP is readonly in Linghun; use local /index refresh for index writes",
+        errorCode: "REMOTE_CODEBASE_MEMORY_READONLY",
+      };
+    }
+    const server = getConfiguredCodebaseMemoryServer(context);
+    if (!isCodebaseMemorySseServer(server)) {
+      return {
+        ok: false,
+        summary: "remote codebase-memory MCP endpoint is not configured",
+        errorCode: "REMOTE_CODEBASE_MEMORY_MISSING",
+      };
+    }
+    const result = await runMcpSseToolCall(server, tool, input, timeoutMs, signal);
+    if (!result.ok) {
+      return { ok: false, summary: result.summary, errorCode: result.errorCode };
+    }
+    const data = unwrapCodebaseMemoryMcpResult(result.data);
+    if (isRecord(result.data) && result.data.isError === true && data === result.data) {
+      return { ok: false, summary: "remote codebase-memory MCP returned an error result" };
+    }
+    return { ok: true, data };
+  }
+  if (resolution.source === "official-npm") {
+    const server: McpServerConfig = {
+      command: resolution.command,
+      args: resolution.args,
+    };
+    const result = await runMcpStdioToolCall(server, tool, input, cwd, timeoutMs, signal);
+    if (!result.ok) {
+      return { ok: false, summary: result.summary, errorCode: result.errorCode };
+    }
+    const data = unwrapCodebaseMemoryMcpResult(result.data);
+    if (isRecord(result.data) && result.data.isError === true && data === result.data) {
+      return { ok: false, summary: "official codebase-memory MCP returned an error result" };
+    }
+    return { ok: true, data };
+  }
   const result = await runCommandCapture(
     resolution.command,
     [...resolution.args, "cli", tool, JSON.stringify(input)],
@@ -2213,6 +2345,17 @@ export async function runCodebaseMemoryCli(
   }
 }
 
+function unwrapCodebaseMemoryMcpResult(data: unknown): unknown {
+  if (!isRecord(data)) return data;
+  const text = extractFirstTextContent(data);
+  if (!text) return data;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return data;
+  }
+}
+
 export async function deleteCodebaseMemoryProjectIndex(
   context: TuiContext,
   project: string,
@@ -2229,6 +2372,27 @@ export async function deleteCodebaseMemoryProjectIndex(
   }
   if (resolution.status !== "ready") {
     return { ok: false, summary: resolution.summary, errorCode: resolution.status };
+  }
+  if (resolution.source === "official-npm") {
+    const result = await runMcpStdioToolCall(
+      { command: resolution.command, args: resolution.args },
+      "delete_project",
+      { project },
+      cwd,
+      timeoutMs,
+      signal,
+    );
+    if (!result.ok) {
+      return { ok: false, summary: result.summary, errorCode: result.errorCode };
+    }
+    const data = unwrapCodebaseMemoryMcpResult(result.data);
+    if (isRecord(data) && data.status === "not_found") {
+      return { ok: true };
+    }
+    if (isRecord(result.data) && result.data.isError === true && data === result.data) {
+      return { ok: false, summary: "official codebase-memory MCP returned an error result" };
+    }
+    return { ok: true };
   }
   const result = await runCommandCapture(
     resolution.command,

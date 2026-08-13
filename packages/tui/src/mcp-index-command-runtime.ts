@@ -70,8 +70,8 @@ export function formatMcpStatus(context: TuiContext): string {
   const runtime =
     context.index.runtime ??
     (isEn
-      ? "Linghun-managed codebase-memory or external fallback"
-      : "Linghun 内置 codebase-memory 或外部 fallback");
+      ? "remote codebase-memory MCP or external fallback"
+      : "远端 codebase-memory MCP 或外部 fallback");
   return [
     "MCP status",
     `- enabled: ${context.mcp.enabled ? "yes" : "no"}`,
@@ -84,7 +84,7 @@ export function formatMcpStatus(context: TuiContext): string {
     `- runtime: ${runtime}`,
     "- guard: codebase-memory deferred tools currently require Linghun static registry + required args before CLI execution; unknown or incomplete tool calls are rejected.",
     "- guard: extension-contributed MCP/skill/plugin tools must pass discovery + trust + schemaLoaded + compatible runtime before execution.",
-    "- license/NOTICE: Linghun-managed codebase-memory must be shipped with license/NOTICE metadata; external fallback is reported as external, not bundled.",
+    "- package: codebase-memory binary is not shipped by default; remote MCP or external fallback is reported explicitly.",
     isEn
       ? "- next: run /mcp doctor for diagnostics, /mcp tools to list registered tools, /index status for codebase-memory state."
       : "- 下一步：运行 /mcp doctor 做诊断、/mcp tools 查看已登记工具、/index status 查看 codebase-memory 状态。",
@@ -144,7 +144,7 @@ export function buildIndexStatusPanel(context: TuiContext): CommandPanelView {
 export function formatIndexStatus(context: TuiContext): string {
   const suggestion =
     context.index.binaryStatus && context.index.binaryStatus !== "ready"
-      ? `建议：配置 ${CODEBASE_MEMORY_ENV}，或安装/修复 Linghun-managed codebase-memory；普通聊天不受影响。`
+      ? `建议：配置远端 codebase-memory MCP URL，或通过 ${CODEBASE_MEMORY_ENV} 指向外部 codebase-memory-mcp；普通聊天不受影响。`
       : context.index.status === "missing"
         ? context.index.error
           ? "建议：确认 codebase-memory artifact 是否存在；可显式运行 /index init fast。普通聊天不受影响。"
@@ -168,7 +168,7 @@ export function formatIndexStatus(context: TuiContext): string {
     `- version: ${context.index.binaryVersion ?? "-"}`,
     `- artifact status: ${context.index.artifactStatus ?? "unknown"}`,
     `- artifact path (details): ${redactedPath(context.index.artifactPath)}`,
-    `- runtime: ${context.index.runtime ?? "Linghun-managed codebase-memory or external fallback"}`,
+    `- runtime: ${context.index.runtime ?? "remote codebase-memory MCP or external fallback"}`,
     `- graph: ${context.index.nodes ?? "-"} nodes, ${context.index.edges ?? "-"} edges`,
     `- changed files: ${context.index.changedFiles ?? "-"}`,
     `- stale hint: ${context.index.staleHint ? truncateDisplay(context.index.staleHint, 160) : "-"}`,
