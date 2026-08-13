@@ -2607,7 +2607,7 @@ describe("Ink TTY interaction smoke", () => {
     shell.unmount();
   });
 
-  it("queues a busy follow-up with Tab and submits with Tab when idle", async () => {
+  it("queues a busy follow-up with Enter and keeps plain Tab non-submitting", async () => {
     const busyView: ShellViewModel = {
       ...baseTaskView(),
       commandPanel: undefined,
@@ -2615,7 +2615,7 @@ describe("Ink TTY interaction smoke", () => {
       queuedInputs: [],
     };
     const busy = await renderWithEvents(() => busyView);
-    for (const value of [..."follow up", "\t"]) await writeInput(busy.input, busy.shell, value);
+    for (const value of [..."follow up", "\r"]) await writeInput(busy.input, busy.shell, value);
 
     expect(busy.events).toContainEqual({ type: "queue-submit", text: "follow up" });
     expect(busy.events).not.toContainEqual({ type: "submit", text: "follow up" });
@@ -2625,11 +2625,11 @@ describe("Ink TTY interaction smoke", () => {
     const idle = await renderWithEvents(() => idleView);
     for (const value of [..."send now", "\t"]) await writeInput(idle.input, idle.shell, value);
 
-    expect(idle.events).toContainEqual({ type: "submit", text: "send now" });
+    expect(idle.events).not.toContainEqual({ type: "submit", text: "send now" });
     idle.shell.unmount();
   });
 
-  it("keeps slash completion ahead of busy Tab queueing", async () => {
+  it("keeps slash completion ahead of plain Tab while busy", async () => {
     const view: ShellViewModel = {
       ...baseTaskView(),
       commandPanel: undefined,

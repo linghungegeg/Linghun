@@ -1204,7 +1204,7 @@ describe("task-only view mode", () => {
     // Vision text NOT shown in task mode
     expect(output.text).not.toContain("技术普惠会越来越成熟");
     // Composer still present, with the task-mode placeholder
-    expect(output.text).toContain("输入后续消息，按 Tab 排队");
+    expect(output.text).toContain("输入后续消息，按 Enter 排队");
   });
 
   it("task mode Ink render shows permission with border", async () => {
@@ -4625,7 +4625,7 @@ describe("D.13D Final Closure — interaction shell", () => {
     expect(output.text).not.toContain("费用");
     expect(output.text).not.toContain("项目：");
     // task placeholder used
-    expect(output.text).toContain("输入后续消息，按 Tab 排队");
+    expect(output.text).toContain("输入后续消息，按 Enter 排队");
   });
 
   it("Task Ink render still hides home brand wordmark", async () => {
@@ -8717,8 +8717,8 @@ describe("D.13Q-UX Real Smoke Fix v2 — D. busy guard 不吞草稿", () => {
       submitted: true,
     });
     expect(view.composer.busy).toBe(true);
-    expect(view.composer.busyHint).toContain("Tab 排队");
-    expect(view.composer.taskPlaceholder).toContain("按 Tab 排队");
+    expect(view.composer.busyHint).toContain("Enter 排队");
+    expect(view.composer.taskPlaceholder).toContain("按 Enter 排队");
   });
 
   it("activeAbortController 存在时 busy=true，即使 submitted=false", () => {
@@ -8735,11 +8735,11 @@ describe("D.13Q-UX Real Smoke Fix v2 — D. busy guard 不吞草稿", () => {
     expect(view.composer.busyHint).toBeUndefined();
   });
 
-  it("Composer 源码在 busy 时 Enter 不提交不清空，仅 showHintNotice", async () => {
+  it("Composer 源码在 busy 时 Enter 直接 queue-submit", async () => {
     const fs = await import("node:fs");
     const composerSource = fs.readFileSync(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
     expect(composerSource).toMatch(/view\.composer\.busy && !isSlashSubmit/);
-    expect(composerSource).toMatch(/showHintNotice\([\s\S]*?busyHint/);
+    expect(composerSource).toMatch(/emitInput\(\{ type: "queue-submit", text: submitText \}\)/);
   });
 });
 

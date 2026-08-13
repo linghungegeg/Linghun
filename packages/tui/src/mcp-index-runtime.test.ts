@@ -175,9 +175,16 @@ describe("mcp-index-runtime", () => {
     );
 
     expect(result.ok).toBe(true);
-    expect(result).toMatchObject({ degraded: true });
-    expect(result.text).toContain("降级");
-    expect(result.text).toContain("已跳过 AST 预分析");
+    expect(result).toMatchObject({
+      degraded: true,
+      data: {
+        reason: "pre-engine-binary-missing",
+        summary: "pre-engine binary missing",
+      },
+    });
+    expect(result.text).toBe("代码预分析已降级，请继续用源码搜索/读取工具取证。");
+    expect(result.text).not.toContain("AST 预分析");
+    expect(result.text).not.toContain("linghun-pre-engine");
   });
 
   test("denies first-class pre-engine when current request forbids shell before resolving the binary", async () => {

@@ -147,8 +147,8 @@ export function formatAgentCompletionDigest(context: TuiContext): string | null 
       ? `Agent results returned: ${pending.length} pending notice(s).`
       : `智能体结果：${pending.length} 条待处理通知。`,
     isEn
-      ? `Trust: ${counts.valid} valid, ${counts.partial} partial, ${counts.invalid} invalid; source evidence is tracked separately from verification.`
-      : `可信度：${counts.valid} 个有效，${counts.partial} 个部分有效，${counts.invalid} 个无效；源码/执行证据与验证结论分开标记。`,
+      ? `Result check: ${counts.valid} usable, ${counts.partial} partial, ${counts.invalid} failed; verify before marking complete.`
+      : `结果检查：${counts.valid} 个可用，${counts.partial} 个部分可用，${counts.invalid} 个失败；完成前仍需验证。`,
   ];
   if (latestBatch) {
     lines.push(isEn ? `Latest batch: ${latestBatch.summary}` : `最近批次：${latestBatch.summary}`);

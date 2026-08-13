@@ -1949,6 +1949,9 @@ function buildPreEngineFallbackRequiredResult(
   context: TuiContext,
 ): ToolOutput {
   const zh = context.language === "zh-CN";
+  const visibleNextAction = zh
+    ? "继续用源码搜索/读取工具取证。"
+    : "Continue with source search/read tools.";
   const requiredNextAction = zh
     ? "pre 预分析不可用或证据不足。本轮不要把 pre 结果当成完成；必须继续调用真实工具，例如 SearchExtraTools、SourcePack、Grep、Glob、Read 或 ReadSnippets，取得源码证据后再回答或继续修改。"
     : "Pre-analysis is unavailable or insufficient. Do not treat this pre-engine result as completion; call real tools such as SearchExtraTools, SourcePack, Grep, Glob, Read, or ReadSnippets in this turn, gather source evidence, then answer or continue editing.";
@@ -1957,7 +1960,7 @@ function buildPreEngineFallbackRequiredResult(
       ? { ...(result.data as Record<string, unknown>) }
       : { pre_engine_result: result.data };
   return {
-    text: `${result.text}\n${requiredNextAction}`,
+    text: `${result.text}\n${visibleNextAction}`,
     data: {
       ...fallbackData,
       degraded: true,

@@ -410,7 +410,7 @@ describe("Composer dispatcher behavior boundaries", () => {
       expect(r.cursorCol).toBeLessThanOrEqual(18);
     });
 
-    it("soft-wrapped visual rows only prefix the first row", () => {
+    it("soft-wrapped visual rows reserve prompt width on continuation rows", () => {
       const buf = bufferInsert(createEditBuffer(""), "abcdef");
       const r = formatComposerRenderLines({
         buffer: buf,
@@ -421,7 +421,21 @@ describe("Composer dispatcher behavior boundaries", () => {
       });
       expect(r.visualLines.length).toBeGreaterThan(1);
       expect(r.visualLines[0]?.prefix).toBe("› ");
-      expect(r.visualLines.slice(1).every((line) => line.prefix === "")).toBe(true);
+      expect(r.visualLines.slice(1).every((line) => line.prefix === "  ")).toBe(true);
+    });
+
+    it("explicit multiline rows reserve prompt width after the first line", () => {
+      const buf = createEditBuffer("line1\nline2");
+      const r = formatComposerRenderLines({
+        buffer: buf,
+        placeholder: "",
+        masking: false,
+        noColor: true,
+        maxWidth: 80,
+      });
+
+      expect(r.lines).toEqual(["line1", "line2"]);
+      expect(r.visualLines.map((line) => line.prefix)).toEqual(["› ", "  "]);
     });
 
     it("marks truncated visible composer rows with brackets without changing raw lines", () => {

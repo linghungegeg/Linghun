@@ -710,8 +710,8 @@ export function createShellViewModel(
       placeholder: composerPlaceholder,
       taskPlaceholder: composerBusy
         ? language === "en-US"
-          ? "Type a follow-up, then press Tab to queue"
-          : "输入后续消息，按 Tab 排队"
+          ? "Type a follow-up, then press Enter to queue"
+          : "输入后续消息，按 Enter 排队"
         : text.taskPlaceholder,
       submittedHint: text.submittedHint,
       draftText: options.composerDraftText,
@@ -721,8 +721,8 @@ export function createShellViewModel(
       busy: composerBusy,
       busyHint: composerBusy
         ? language === "en-US"
-          ? "Still working. Enter keeps the draft; Tab queues it; Ctrl+C interrupts."
-          : "正在处理上一条；Enter 保留草稿，Tab 排队，Ctrl+C 中断。"
+          ? "Still working. Enter queues the draft; Ctrl+C interrupts."
+          : "正在处理上一条；Enter 排队草稿，Ctrl+C 中断。"
         : undefined,
     },
     queuedInputs: options.queuedInputs,

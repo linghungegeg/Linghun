@@ -275,7 +275,8 @@ function buildVisualLines(buf: EditBuffer, maxWidth?: number): VisualLine[] {
     const isFirstRawLine = rawIndex === 0;
     let startChar = 0;
     while (startChar < chars.length || (chars.length === 0 && startChar === 0)) {
-      const prompt = isFirstRawLine && startChar === 0 ? PROMPT_MARKER : "";
+      const prompt =
+        isFirstRawLine && startChar === 0 ? PROMPT_MARKER : CONTINUATION_PROMPT_MARKER;
       const promptWidth = displayWidthOf(prompt);
       const budget = Math.max(4, composerWidth - promptWidth);
       let width = 0;
@@ -515,6 +516,7 @@ export function isMultilineEnterSequence(input: string): boolean {
 
 const COMPOSER_MAX_VISIBLE_LINES = 5;
 const PROMPT_MARKER = "› ";
+const CONTINUATION_PROMPT_MARKER = " ".repeat(displayWidthOf(PROMPT_MARKER));
 
 const PERMISSION_ACTION_ORDER: PermissionActionId[] = [
   "allow_once",
@@ -1227,20 +1229,33 @@ export function Composer({
             return;
           }
         }
-        // D.13Q-UX Real Smoke Fix v2 — D. busy guard：模型仍在处理上一条时
-        // Enter 不提交、不清空 buffer，仅显示一行轻提示。Ctrl+C 双击清空 / 上抛
-        // interrupt 由现有分支接管，不在这里处理。slash command / setup flow
-        // 走自己的 submit 路径，不受 busy 限制（slash 通常是控制类命令；setup
-        // flow 在 busy 之前就完成）。
+        // Busy follow-up: Enter queues the draft through the existing queued-input path.
         const isSlashSubmit = text.startsWith("/");
         const setupActive = view.composer.setupActive;
         if (view.composer.busy && !isSlashSubmit && !setupActive) {
-          showHintNotice(
-            view.composer.busyHint ??
-              (view.language === "en-US"
-                ? "Still working on the previous request. Press Ctrl+C to interrupt, then send again."
-                : "正在处理上一条，按 Ctrl+C 可中断，稍后再发。"),
-          );
+          const submitText = text.trim();
+          if (!submitText) {
+            showHintNotice(
+              view.composer.busyHint ??
+                (view.language === "en-US"
+                  ? "Still working. Type a follow-up, then press Enter to queue."
+                  : "正在处理上一条；输入后续消息后按 Enter 排队。"),
+            );
+            return;
+          }
+          if ((view.queuedInputs?.length ?? 0) >= MAX_QUEUED_INPUTS) {
+            showHintNotice(
+              view.language === "en-US"
+                ? `Queue is full (${MAX_QUEUED_INPUTS}). Edit or wait for an item to run.`
+                : `排队已满（${MAX_QUEUED_INPUTS} 条），请取回编辑或等待执行。`,
+            );
+            return;
+          }
+          historyRef.current = historyAdd(historyRef.current, text);
+          resetBuffer();
+          setSlashHidden(false);
+          clearHintNotice();
+          emitInput({ type: "queue-submit", text: submitText });
           return;
         }
         // slash 可见且光标只在 head 上 → 接受候选再提交。
@@ -1284,7 +1299,7 @@ export function Composer({
         return;
       }
 
-      // Tab — slash/ghost completion wins; otherwise queue while busy or submit while idle.
+      // Tab — slash/ghost completion only.
       if (key.tab && !key.shift) {
         if (slashVisible && slashSelection >= 0) {
           const picked = slashCandidates[slashSelectionClamped];
@@ -1305,27 +1320,6 @@ export function Composer({
           resetBuffer(`${text}${ghost} `);
           return;
         }
-        const submitText = text.trim();
-        if (!submitText) return;
-        if (view.composer.busy) {
-          if ((view.queuedInputs?.length ?? 0) >= MAX_QUEUED_INPUTS) {
-            showHintNotice(
-              view.language === "en-US"
-                ? `Queue is full (${MAX_QUEUED_INPUTS}). Edit or wait for an item to run.`
-                : `排队已满（${MAX_QUEUED_INPUTS} 条），请取回编辑或等待执行。`,
-            );
-            return;
-          }
-          historyRef.current = historyAdd(historyRef.current, text);
-          resetBuffer();
-          clearHintNotice();
-          emitInput({ type: "queue-submit", text: submitText });
-          return;
-        }
-        historyRef.current = historyAdd(historyRef.current, text);
-        resetBuffer();
-        clearHintNotice();
-        emitInput({ type: "submit", text: submitText });
         return;
       }
 
@@ -2049,7 +2043,7 @@ export function formatComposerRenderLines({
   return {
     lines: renderedLines,
     visualLines: renderedLines.map((line, index) => ({
-      prefix: startLine + index === 0 ? PROMPT_MARKER : "",
+      prefix: startLine + index === 0 ? PROMPT_MARKER : CONTINUATION_PROMPT_MARKER,
       text: visualLines[index] ?? line,
     })),
     truncatedAbove,

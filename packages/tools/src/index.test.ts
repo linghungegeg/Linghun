@@ -1494,7 +1494,7 @@ describe("Phase 05 core tools", () => {
 
   it("ReadSnippets truncates ranges over the per-range line limit", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
-    const content = Array.from({ length: 130 }, (_, index) => `line-${index + 1}`).join("\n");
+    const content = Array.from({ length: 310 }, (_, index) => `line-${index + 1}`).join("\n");
     const context = createToolContext(project);
     await writeFile(join(project, "large.ts"), content, "utf8");
     await writeFile(join(project, "next.ts"), "next-line\n", "utf8");
@@ -1503,7 +1503,7 @@ describe("Phase 05 core tools", () => {
       "ReadSnippets",
       {
         ranges: [
-          { path: "large.ts", start: 1, end: 130 },
+          { path: "large.ts", start: 1, end: 310 },
           { path: "next.ts", start: 1, end: 1 },
         ],
       },
@@ -1512,7 +1512,7 @@ describe("Phase 05 core tools", () => {
 
     const ranges = (result.output.data as { ranges: Array<{ end: number; truncated: boolean }> })
       .ranges;
-    expect(ranges[0]).toMatchObject({ end: 120, truncated: true });
+    expect(ranges[0]).toMatchObject({ end: 300, truncated: true });
     expect(ranges[1]).toMatchObject({ end: 1, truncated: false });
     expect(result.output.text).toContain("该范围已截断");
     expect(result.output.text).toContain("next-line");
@@ -1652,6 +1652,27 @@ describe("Phase 05 core tools", () => {
     const empty = await runTool("SourcePack", { query: "not-present-anywhere" }, context);
     expect(empty.output.text).toContain("empty");
     expect(empty.output.data).toMatchObject({ count: 0, empty: true });
+  });
+
+  it("SourcePack defaults to twelve snippets without changing the hard max", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    context.sourcePackCandidates = Array.from({ length: 14 }, (_, index) => ({
+      path: `candidate-${index + 1}.ts`,
+      start: 1,
+      end: 1,
+      reason: "index symbol hit: defaultLimitNeedle",
+      confidence: 0.9,
+    }));
+    for (let index = 1; index <= 14; index++) {
+      await writeFile(join(project, `candidate-${index}.ts`), `const defaultLimitNeedle${index} = ${index};\n`, "utf8");
+    }
+
+    const defaultResult = await runTool("SourcePack", { query: "defaultLimitNeedle" }, context);
+    const clampedResult = await runTool("SourcePack", { query: "defaultLimitNeedle", limit: 20 }, context);
+
+    expect((defaultResult.output.data as { count: number }).count).toBe(12);
+    expect((clampedResult.output.data as { count: number }).count).toBe(12);
   });
 
   it("SourcePack skips Linghun session artifacts by default", async () => {

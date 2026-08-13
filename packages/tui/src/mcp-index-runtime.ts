@@ -1153,6 +1153,12 @@ const PRE_ENGINE_FALLBACK_TOOLS = [
   "ReadSnippets",
 ];
 
+function formatPreEngineDegradedToolText(context: TuiContext): string {
+  return context.language === "en-US"
+    ? "Code pre-analysis degraded; continue with source search/read tools."
+    : "代码预分析已降级，请继续用源码搜索/读取工具取证。";
+}
+
 type PreEngineSemanticDegradation = {
   reason: string;
   summary: string;
@@ -2671,10 +2677,11 @@ export async function executeExtraTool(
       return {
         ok: true,
         degraded: true,
-        text: `pre-engine(${target.name}) 降级：当前环境找不到 linghun-pre-engine 二进制文件，已跳过 AST 预分析。请继续使用 index-backed tools、SourcePack、Grep、Glob、Read/ReadSnippets 做仓库定位。`,
+        text: formatPreEngineDegradedToolText(context),
         data: {
           degraded: true,
           reason: "pre-engine-binary-missing",
+          summary: "pre-engine binary missing",
           fallback_tools: PRE_ENGINE_FALLBACK_TOOLS,
         },
       };
@@ -2699,7 +2706,7 @@ export async function executeExtraTool(
       return {
         ok: true,
         degraded: true,
-        text: `pre-engine(${target.name}) 降级：${result.summary}。请继续使用 index-backed tools、SourcePack、Grep、Glob、Read/ReadSnippets 做仓库定位。`,
+        text: formatPreEngineDegradedToolText(context),
         data: {
           degraded: true,
           reason: "pre-engine-runtime-unavailable",
@@ -2713,7 +2720,7 @@ export async function executeExtraTool(
       return {
         ok: true,
         degraded: true,
-        text: `pre-engine(${target.name}) 降级：${semanticDegradation.summary}。请继续使用 index-backed tools、SourcePack、Grep、Glob、Read/ReadSnippets 做仓库定位。`,
+        text: formatPreEngineDegradedToolText(context),
         data: {
           degraded: true,
           reason: semanticDegradation.reason,

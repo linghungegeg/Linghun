@@ -315,3 +315,7 @@ prototypes/pre-engine/target/
 .claude/worktrees/agent-aebe9124297c410c4/packages/ink-runtime/node_modules/
 .claude/worktrees/agent-aebe9124297c410c4/packages/pre-engine-darwin-arm64/node_modules/
 .claude/worktrees/agent-aebe9124297c410c4/packages/pre-engine-darwin-x64/node_modules/
+packages/pre-engine-darwin-arm64/node_modules/
+packages/pre-engine-darwin-x64/node_modules/
+packages/pre-engine-linux-x64/node_modules/
+packages/pre-engine-win32-x64/node_modules/

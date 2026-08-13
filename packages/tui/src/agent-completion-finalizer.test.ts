@@ -89,7 +89,10 @@ describe("agent-completion-finalizer", () => {
     const digest = formatAgentCompletionDigest(context);
     expect(notice.validity).toBe("invalid");
     expect(digest).toContain("智能体结果：1 条待处理通知");
+    expect(digest).toContain("结果检查：0 个可用，0 个部分可用，1 个失败");
     expect(digest).toContain("不要把结果直接等同于全部通过");
+    expect(digest).not.toContain("可信度");
+    expect(digest).not.toContain("源码/执行证据");
     expect(context.notifications).toEqual([]);
 
     markAgentCompletionNoticeReported(context, notice.id, "2026-01-01T00:00:03.000Z");

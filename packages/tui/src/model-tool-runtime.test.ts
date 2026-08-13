@@ -641,7 +641,9 @@ describe("model-tool-runtime ReadSnippets and SourcePack integration", () => {
       { language: "zh-CN" } as TuiContext,
     );
 
-    expect(result.text).toContain("必须继续调用真实工具");
+    expect(result.text).toContain("继续用源码搜索/读取工具取证");
+    expect(result.text).not.toContain("fallback_required");
+    expect(result.text).not.toContain("必须继续调用真实工具");
     expect(result.data).toMatchObject({
       degraded: true,
       fallback_required: true,

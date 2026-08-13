@@ -86,7 +86,7 @@ export function computeWrappedInputState(input: WrappedInputStateInput): Wrapped
     safeMinContentWidth,
     safeWidth - safePaddingLeft - safePaddingRight,
   );
-  const firstLineWidth = Math.max(1, contentWidth - safePrefixWidth);
+  const lineWidth = Math.max(1, contentWidth - safePrefixWidth);
   const wrappedLines: string[] = [];
   let cursorRow = 0;
   let cursorCol = 0;
@@ -101,8 +101,7 @@ export function computeWrappedInputState(input: WrappedInputStateInput): Wrapped
     const lineChars = Array.from(lineText);
     const lineStartOffset = logicalLineStart;
     const lineEndOffset = lineStartOffset + lineChars.length;
-    const wrapWidth = logicalIndex === 0 ? firstLineWidth : Math.max(1, contentWidth);
-    const segments = wrapInputLine(lineChars, wrapWidth);
+    const segments = wrapInputLine(lineChars, lineWidth);
 
     fallbackLineStart = lineStartOffset;
     fallbackLineChars = lineChars;

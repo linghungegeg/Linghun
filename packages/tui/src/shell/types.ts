@@ -211,7 +211,7 @@ export type ComposerViewModel = {
    * D.13Q-UX Real Smoke Fix v2 — D. busy guard.
    * 模型仍在处理上一条请求时为 true（submitted-pending 首帧 / activity phase 在
    * thinking|tool_running|continuing|permission_waiting / activeAbortController
-   * 还在）。Composer 在 busy=true 时仍允许打字保留草稿，但 Enter 不提交、不清空。
+   * 还在）。Composer 在 busy=true 时仍允许打字；Enter 通过 queued-input 路径排队。
    */
   busy?: boolean;
   /** busy=true 时显示的人类可读提示。"按 Ctrl+C 中断" 类。 */
