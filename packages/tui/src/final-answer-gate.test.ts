@@ -307,10 +307,10 @@ describe("Beta readiness typed evidence", () => {
   ): EvidenceRecord {
     return {
       id,
-      kind: "command_output",
+      kind: "test_result",
       source: "untrusted-source",
       summary,
-      supportsClaims: ["real TUI report pass", "DeepSeek dual-provider PASS"],
+      supportsClaims: ["verification_passed", "real TUI report pass", "DeepSeek dual-provider PASS"],
       createdAt: new Date().toISOString(),
       data: { betaEvidence: { role, status, ...(provider ? { provider } : {}) } },
     };
@@ -348,6 +348,44 @@ describe("Beta readiness typed evidence", () => {
       "write",
       "reference",
     ]);
+  });
+
+  it("rejects typed records from a non-verification source", () => {
+    const verdict = createPhase15BetaVerdictScope([
+      {
+        ...betaEvidence("real-tui", "real_tui_report_generation", "pass"),
+        kind: "command_output",
+      },
+    ]);
+
+    expect(verdict.status).toBe("PARTIAL");
+    expect(verdict.evidenceRefs).toEqual([]);
+  });
+
+  it("rejects typed evidence from a different request owner", () => {
+    const evidence = [
+      betaEvidence("real-tui", "real_tui_report_generation", "pass"),
+      betaEvidence("deepseek", "provider_report", "pass", "deepseek"),
+      betaEvidence("openai", "provider_report", "pass", "openai-compatible"),
+      betaEvidence("write", "report_write", "pass"),
+      betaEvidence("reference", "final_answer_report_reference", "pass"),
+    ].map((item) => ({
+      ...item,
+      ownerScope: {
+        ownerSessionId: "session-old",
+        requestTurnId: "turn-old",
+        cwd: "/workspace/project",
+      },
+    }));
+
+    const verdict = createPhase15BetaVerdictScope(evidence, [], {
+      sessionId: "session-current",
+      currentRequestTurnId: "turn-current",
+      projectPath: "/workspace/project",
+    });
+
+    expect(verdict.status).toBe("PARTIAL");
+    expect(verdict.evidenceRefs).toEqual([]);
   });
 
   it.each(["partial", "skipped", "blocked"])(

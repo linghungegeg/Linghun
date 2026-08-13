@@ -82,36 +82,38 @@ export function createHandoffRiskItems(evidence: EvidenceRecord[]): string[] {
 
 export function createPhase15BetaVerdictScope(
   evidence: EvidenceRecord[] = [],
-  transcript: TranscriptEvent[] = [],
+  _transcript: TranscriptEvent[] = [],
+  context?: Pick<TuiContext, "currentRequestTurnId" | "projectPath" | "sessionId">,
 ): VerdictEvidenceScope {
+  const betaEvidence = evidence.filter((item) => isEligibleBetaEvidence(item, context));
   const requiredEvidence = [
     {
       key: "real-tui-report-generation",
       missing: "real TUI report-generation path lacks PASS evidence",
-      present: hasBetaEvidence(evidence, "real_tui_report_generation"),
+      present: hasBetaEvidence(betaEvidence, "real_tui_report_generation"),
     },
     {
       key: "deepseek-dual-provider-pass",
       missing: "DeepSeek dual-provider live report evidence is missing",
-      present: hasBetaEvidence(evidence, "provider_report", "deepseek"),
+      present: hasBetaEvidence(betaEvidence, "provider_report", "deepseek"),
     },
     {
       key: "openai-compatible-dual-provider-pass",
       missing: "OpenAI-compatible dual-provider live report evidence is missing",
-      present: hasBetaEvidence(evidence, "provider_report", "openai-compatible"),
+      present: hasBetaEvidence(betaEvidence, "provider_report", "openai-compatible"),
     },
     {
       key: "write-evidence",
       missing: "report Write evidence is missing",
-      present: hasReportWriteEvidence(evidence),
+      present: hasReportWriteEvidence(betaEvidence),
     },
     {
       key: "final-answer-report-reference",
       missing: "final answer does not reference the generated report",
-      present: hasFinalAnswerReportReference(evidence, transcript),
+      present: hasFinalAnswerReportReference(betaEvidence),
     },
   ];
-  const hasBlockingGate = hasBlockingGateEvidence(evidence, transcript);
+  const hasBlockingGate = hasBlockingGateEvidence(betaEvidence);
   const uncoveredItems = requiredEvidence
     .filter((item) => !item.present)
     .map((item) => item.missing);
@@ -129,7 +131,7 @@ export function createPhase15BetaVerdictScope(
   return {
     scope: "beta",
     status: uncoveredItems.length === 0 ? "PASS" : "PARTIAL",
-    evidenceRefs: evidence.filter((item) => isBetaVerdictEvidence(item)).map((item) => item.id),
+    evidenceRefs: betaEvidence.map((item) => item.id),
     validationCommands: [
       "corepack pnpm test -- --run packages/tui/src/index.test.ts packages/tui/src/natural-command-bridge.test.ts",
       "corepack pnpm test",
@@ -151,42 +153,31 @@ function hasReportWriteEvidence(evidence: EvidenceRecord[]): boolean {
   return hasBetaEvidence(evidence, "report_write");
 }
 
-function hasFinalAnswerReportReference(
-  evidence: EvidenceRecord[],
-  transcript: TranscriptEvent[],
-): boolean {
+function hasFinalAnswerReportReference(evidence: EvidenceRecord[]): boolean {
   if (hasBetaEvidence(evidence, "final_answer_report_reference")) {
     return true;
   }
-  return transcript.some(
-    (event) =>
-      event.type === "system_event" &&
-      event.message === "beta:final_answer_report_reference:pass",
-  );
+  return false;
 }
 
-function hasBlockingGateEvidence(
-  evidence: EvidenceRecord[],
-  transcript: TranscriptEvent[],
-): boolean {
-  if (evidence.some((item) => getBetaEvidence(item)?.status !== "pass")) {
-    return true;
-  }
-  return transcript.some((event) => {
-    if (event.type === "verification_end") {
-      return (
-        event.report.status === "partial" ||
-        event.report.commands.some(
-          (command) => command.status === "partial" || command.status === "skipped",
-        )
-      );
-    }
-    return false;
-  });
+function hasBlockingGateEvidence(evidence: EvidenceRecord[]): boolean {
+  return evidence.some((item) => getBetaEvidence(item)?.status !== "pass");
 }
 
 function isBetaVerdictEvidence(item: EvidenceRecord): boolean {
   return getBetaEvidence(item) !== undefined;
+}
+
+function isEligibleBetaEvidence(
+  item: EvidenceRecord,
+  context?: Pick<TuiContext, "currentRequestTurnId" | "projectPath" | "sessionId">,
+): boolean {
+  return (
+    isBetaVerdictEvidence(item) &&
+    item.kind === "test_result" &&
+    item.supportsClaims.includes("verification_passed") &&
+    (!context || evidenceMatchesRequestOwner(item, context))
+  );
 }
 
 type BetaEvidenceRole =
@@ -254,7 +245,7 @@ export function checkClaimSupport(claim: string, context: TuiContext): ClaimChec
           .filter((item) => item.kind === "beta_readiness")
           .map((item) => item.phrase),
       ],
-      verdict: createPhase15BetaVerdictScope(context.evidence),
+      verdict: createPhase15BetaVerdictScope(context.evidence, [], context),
     };
   }
 
