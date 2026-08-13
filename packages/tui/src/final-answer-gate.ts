@@ -88,23 +88,17 @@ export function createPhase15BetaVerdictScope(
     {
       key: "real-tui-report-generation",
       missing: "real TUI report-generation path lacks PASS evidence",
-      present: hasEvidenceClaim(
-        evidence,
-        /real[-\s]?tui.*report.*pass|report[-\s]?generation.*pass/iu,
-      ),
+      present: hasBetaEvidence(evidence, "real_tui_report_generation"),
     },
     {
       key: "deepseek-dual-provider-pass",
       missing: "DeepSeek dual-provider live report evidence is missing",
-      present: hasEvidenceClaim(evidence, /deepseek.*(?:gate\s*f|dual[-\s]?provider).*pass/iu),
+      present: hasBetaEvidence(evidence, "provider_report", "deepseek"),
     },
     {
       key: "openai-compatible-dual-provider-pass",
       missing: "OpenAI-compatible dual-provider live report evidence is missing",
-      present: hasEvidenceClaim(
-        evidence,
-        /openai[-\s]?compatible.*(?:gate\s*f|dual[-\s]?provider).*pass/iu,
-      ),
+      present: hasBetaEvidence(evidence, "provider_report", "openai-compatible"),
     },
     {
       key: "write-evidence",
@@ -153,44 +147,29 @@ export function createPhase15BetaVerdictScope(
   };
 }
 
-function hasEvidenceClaim(evidence: EvidenceRecord[], pattern: RegExp): boolean {
-  return evidence.some((item) =>
-    pattern.test([item.summary, item.source, ...item.supportsClaims].join(" ")),
-  );
-}
-
 function hasReportWriteEvidence(evidence: EvidenceRecord[]): boolean {
-  return evidence.some(
-    (item) =>
-      item.kind === "command_output" &&
-      (item.source === "Write" || item.supportsClaims.includes("Write")) &&
-      /report|报告|\.md\b/iu.test([item.summary, item.source, ...item.supportsClaims].join(" ")),
-  );
+  return hasBetaEvidence(evidence, "report_write");
 }
 
 function hasFinalAnswerReportReference(
   evidence: EvidenceRecord[],
   transcript: TranscriptEvent[],
 ): boolean {
-  if (hasEvidenceClaim(evidence, /final answer.*report|最终回答.*报告|reference.*report/iu)) {
+  if (hasBetaEvidence(evidence, "final_answer_report_reference")) {
     return true;
   }
-  return [...transcript]
-    .reverse()
-    .some(
-      (event) =>
-        event.type === "assistant_text_delta" &&
-        /(?:report[\w./\\-]*\.md|报告文件|生成的报告|saved report)/iu.test(event.text),
-    );
+  return transcript.some(
+    (event) =>
+      event.type === "system_event" &&
+      event.message === "beta:final_answer_report_reference:pass",
+  );
 }
 
 function hasBlockingGateEvidence(
   evidence: EvidenceRecord[],
   transcript: TranscriptEvent[],
 ): boolean {
-  const blockingStatusPattern =
-    /(?:blocking|阻塞|gate|闸门).{0,80}(?:SKIPPED|PARTIAL|BLOCKED|跳过|部分|阻塞)|(?:SKIPPED|PARTIAL|BLOCKED).{0,80}(?:blocking|阻塞|gate|闸门)/iu;
-  if (hasEvidenceClaim(evidence, blockingStatusPattern)) {
+  if (evidence.some((item) => getBetaEvidence(item)?.status !== "pass")) {
     return true;
   }
   return transcript.some((event) => {
@@ -202,20 +181,61 @@ function hasBlockingGateEvidence(
         )
       );
     }
-    if (event.type === "system_event" || event.type === "assistant_text_delta") {
-      const text = event.type === "system_event" ? event.message : event.text;
-      return blockingStatusPattern.test(text);
-    }
     return false;
   });
 }
 
 function isBetaVerdictEvidence(item: EvidenceRecord): boolean {
-  return (
-    /real[-\s]?tui.*report.*pass|report[-\s]?generation.*pass|deepseek.*(?:gate\s*f|dual[-\s]?provider).*pass|openai[-\s]?compatible.*(?:gate\s*f|dual[-\s]?provider).*pass|final answer.*report|最终回答.*报告/iu.test(
-      [item.summary, item.source, ...item.supportsClaims].join(" "),
-    ) || hasReportWriteEvidence([item])
-  );
+  return getBetaEvidence(item) !== undefined;
+}
+
+type BetaEvidenceRole =
+  | "real_tui_report_generation"
+  | "provider_report"
+  | "report_write"
+  | "final_answer_report_reference";
+
+type BetaEvidence = {
+  role: BetaEvidenceRole;
+  status: "pass" | "partial" | "skipped" | "blocked";
+  provider?: "deepseek" | "openai-compatible";
+};
+
+function getBetaEvidence(item: EvidenceRecord): BetaEvidence | undefined {
+  if (!isRecord(item.data) || !isRecord(item.data.betaEvidence)) return undefined;
+  const { role, status, provider } = item.data.betaEvidence;
+  if (
+    ![
+      "real_tui_report_generation",
+      "provider_report",
+      "report_write",
+      "final_answer_report_reference",
+    ].includes(String(role)) ||
+    !["pass", "partial", "skipped", "blocked"].includes(String(status)) ||
+    (provider !== undefined && provider !== "deepseek" && provider !== "openai-compatible")
+  ) {
+    return undefined;
+  }
+  return { role: role as BetaEvidenceRole, status: status as BetaEvidence["status"], provider };
+}
+
+function hasBetaEvidence(
+  evidence: EvidenceRecord[],
+  role: BetaEvidenceRole,
+  provider?: BetaEvidence["provider"],
+): boolean {
+  return evidence.some((item) => {
+    const betaEvidence = getBetaEvidence(item);
+    return (
+      betaEvidence?.role === role &&
+      betaEvidence.status === "pass" &&
+      (provider === undefined || betaEvidence.provider === provider)
+    );
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function checkClaimSupport(claim: string, context: TuiContext): ClaimCheck {

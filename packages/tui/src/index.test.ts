@@ -8426,7 +8426,7 @@ describe("Phase 06 TUI slash commands", () => {
     );
 
     expect(output.text).toContain("verdict PARTIAL");
-    expect(output.text).toContain("证据已记录；详情用 /details evidence。");
+    expect(output.text).toContain("证据已缺失；详情用 /details evidence。");
     expect(output.text).toContain("DeepSeek dual-provider live report evidence is missing");
     expect(output.text).not.toContain("Evidence:");
     expect(output.text).not.toContain("123e4567-e89b-12d3-a456-426614174000");

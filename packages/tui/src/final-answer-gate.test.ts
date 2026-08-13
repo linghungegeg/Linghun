@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { TuiContext } from "./index.js";
-import { runArchitectureAndCompletenessFinalGate } from "./final-answer-gate.js";
+import {
+  createPhase15BetaVerdictScope,
+  runArchitectureAndCompletenessFinalGate,
+} from "./final-answer-gate.js";
 import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
 import { evaluateAggregatedFinalAnswerGate } from "./model-stream-runtime.js";
 import type { EvidenceRecord } from "./tui-data-types.js";
@@ -292,6 +295,79 @@ describe("final-answer-gate artifact freshness integration", () => {
       expect(result.unsupportedKinds).toContain("engineering_missing_artifact");
     }
   });
+});
+
+describe("Beta readiness typed evidence", () => {
+  function betaEvidence(
+    id: string,
+    role: string,
+    status: string,
+    provider?: string,
+    summary = "untrusted text says every legacy PASS phrase",
+  ): EvidenceRecord {
+    return {
+      id,
+      kind: "command_output",
+      source: "untrusted-source",
+      summary,
+      supportsClaims: ["real TUI report pass", "DeepSeek dual-provider PASS"],
+      createdAt: new Date().toISOString(),
+      data: { betaEvidence: { role, status, ...(provider ? { provider } : {}) } },
+    };
+  }
+
+  it("does not treat legacy wording as Beta readiness evidence", () => {
+    const verdict = createPhase15BetaVerdictScope([
+      betaEvidence(
+        "legacy",
+        "unknown",
+        "pass",
+        undefined,
+        "real TUI report pass; DeepSeek dual-provider PASS; final answer report",
+      ),
+    ]);
+
+    expect(verdict.status).toBe("PARTIAL");
+    expect(verdict.evidenceRefs).toEqual([]);
+  });
+
+  it("accepts only explicit typed Beta evidence for every required fact", () => {
+    const verdict = createPhase15BetaVerdictScope([
+      betaEvidence("real-tui", "real_tui_report_generation", "pass"),
+      betaEvidence("deepseek", "provider_report", "pass", "deepseek"),
+      betaEvidence("openai", "provider_report", "pass", "openai-compatible"),
+      betaEvidence("write", "report_write", "pass"),
+      betaEvidence("reference", "final_answer_report_reference", "pass"),
+    ]);
+
+    expect(verdict.status).toBe("PASS");
+    expect(verdict.evidenceRefs).toEqual([
+      "real-tui",
+      "deepseek",
+      "openai",
+      "write",
+      "reference",
+    ]);
+  });
+
+  it.each(["partial", "skipped", "blocked"])(
+    "keeps Beta readiness partial for typed %s evidence",
+    (status) => {
+      const verdict = createPhase15BetaVerdictScope([
+        betaEvidence("real-tui", "real_tui_report_generation", "pass"),
+        betaEvidence("deepseek", "provider_report", "pass", "deepseek"),
+        betaEvidence("openai", "provider_report", "pass", "openai-compatible"),
+        betaEvidence("write", "report_write", "pass"),
+        betaEvidence("reference", "final_answer_report_reference", "pass"),
+        betaEvidence("blocked", "provider_report", status, "deepseek"),
+      ]);
+
+      expect(verdict.status).toBe("PARTIAL");
+      expect(verdict.uncoveredItems).toContain(
+        "blocking gate evidence still contains SKIPPED, PARTIAL, or BLOCKED",
+      );
+    },
+  );
 });
 
 describe("architecture runtime candidate boundary", () => {
