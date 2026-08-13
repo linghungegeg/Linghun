@@ -20,6 +20,7 @@ import {
   type TuiContext,
 } from "./index.js";
 import { createProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
+import { formatTerminalReadinessDoctor } from "./terminal-readiness-presenter.js";
 import { createTerminalReadinessView } from "./terminal-readiness-runtime.js";
 import type { BackgroundTaskState } from "./tui-data-types.js";
 
@@ -112,6 +113,9 @@ describe("terminal readiness runtime", () => {
     expect(blockedView.costPreview.labels).toContain("background-visible");
     expect(blockedView.problems.map((problem) => problem.summary)).toEqual(
       expect.arrayContaining([expect.stringContaining("job blocked")]),
+    );
+    expect(formatTerminalReadinessDoctor(blockedView, { showAll: true })).toContain(
+      "background/tasks: total 1; running 0; blocked 2; next: /problems",
     );
   });
 });

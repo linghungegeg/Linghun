@@ -266,7 +266,11 @@ async function runModelCommand(argv: string[]): Promise<CliResult> {
     const header = `模型诊断：${target.modelId}\nprovider=${target.providerId} model=${target.modelId} endpointProfile=${endpointProfile} endpointPath=${baseUrlDiagnostic.endpointPath}\nreasoning=${reasoningStatus}\nbaseUrl=${target.provider.baseUrl ? "present" : "missing"}\napiKey=${apiKeyStatus}\nlimited=headless-cli; full route diagnostics: TUI /model doctor\n`;
     const warningText = warnings.length > 0 ? `${warnings.join("\n")}\n` : "";
     if (problems.length === 0) {
-      return { stdout: `${header}${warningText}状态：配置看起来可用。\n`, stderr: "", exitCode: 0 };
+      return {
+        stdout: `${header}${warningText}状态：配置字段完整；未发起网络请求，尚未验证连通性或模型响应。\n`,
+        stderr: "",
+        exitCode: 0,
+      };
     }
     return {
       stdout: `${header}${warningText}状态：发现 ${problems.length} 个问题。\n${problems.join("\n")}\n建议：修复后重新运行 /model doctor。\n`,

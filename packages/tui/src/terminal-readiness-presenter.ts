@@ -197,8 +197,8 @@ function formatTerminalReadinessDoctorSummary(
     );
     lines.push(
       view.language === "en-US"
-        ? "Next: use /doctor all for details before claiming readiness."
-        : "下一步：如需完整清单，用 /doctor all；不要据此宣称整体 ready。",
+        ? "Next: use /doctor all for the detailed local-check record."
+        : "下一步：如需查看本地检查明细，使用 /doctor all。",
     );
     return lines.join("\n");
   }
@@ -351,7 +351,7 @@ export function createReadinessItems(view: TerminalReadinessView): TerminalReadi
           ? `total ${view.background.total}; running ${view.background.running}; blocked ${view.background.blocked}`
           : `总数 ${view.background.total}；运行中 ${view.background.running}；阻塞 ${view.background.blocked}`,
       nextAction:
-        view.background.total > 0 ? "/background" : view.background.blocked > 0 ? "/problems" : "no action",
+        view.background.blocked > 0 ? "/problems" : view.background.total > 0 ? "/background" : "no action",
     },
     {
       id: "verification",

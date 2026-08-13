@@ -33456,15 +33456,17 @@ describe("D.13V-B/C source invariants", () => {
     expect(body).toContain('dispatchKind: "ExecuteExtraTool"');
   });
 
-  it("source: resource guard 文案标注 concurrency cap，不是权限拒绝", async () => {
+  it("source: resource guard 文案只说明当前并发状态与恢复动作", async () => {
     const text = await readSrc("background-control-runtime.ts");
     expect(text).toContain("RESOURCE_GUARD_KIND");
-    // checkResourceGuard 的所有用户可见返回都应明确"并发上限/不是权限拒绝"。
+    // checkResourceGuard 的用户可见返回只应说明当前状态和可执行的恢复动作。
     const guardStart = text.indexOf("function checkResourceGuard");
     expect(guardStart).toBeGreaterThan(-1);
     const guardBody = text.slice(guardStart, guardStart + 2000);
     expect(guardBody).toContain("并发上限");
-    expect(guardBody).toContain("不是权限拒绝");
+    expect(guardBody).toContain("/interrupt");
+    expect(guardBody).not.toContain("resource/concurrency cap");
+    expect(guardBody).not.toContain("不是权限拒绝");
     // 不允许把 resource guard 声称为新权限模式
     expect(guardBody).not.toMatch(/(?:第五|fifth)\s*(?:权限|permission)/);
   });

@@ -134,7 +134,20 @@ describe("CLI", () => {
       expect(doctor.stdout).not.toContain("base_url：");
       expect(doctor.stdout).toContain("缺少 api_key");
       expect(doctor.stdout).toContain("建议：修复后重新运行 /model doctor");
+      expect(doctor.stdout).not.toContain("配置字段完整");
       expect(doctor.exitCode).toBe(0);
+    });
+  });
+
+  it("labels a clean model doctor result as configuration-only", async () => {
+    await withIsolatedCliConfig(async () => {
+      vi.stubEnv("LINGHUN_DEEPSEEK_API_KEY", "sk-cli-test-secret");
+
+      const doctor = await runCli(["/model", "doctor"]);
+
+      expect(doctor.stdout).toContain("配置字段完整");
+      expect(doctor.stdout).toContain("未发起网络请求");
+      expect(doctor.stdout).not.toContain("配置看起来可用");
     });
   });
 

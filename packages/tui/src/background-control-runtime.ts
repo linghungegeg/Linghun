@@ -128,7 +128,7 @@ export function checkResourceGuard(
       typeof context.foregroundAbortPendingUntilMs === "number" &&
       context.foregroundAbortPendingUntilMs > Date.now();
     return context.activeAbortController || abortPending
-      ? "并发上限：已有前台模型请求正在运行；请等待完成或使用 /interrupt 取消后再继续。这是 resource/concurrency cap，不是权限拒绝。"
+      ? "当前已有前台请求在运行；请等待完成或使用 /interrupt 取消后再继续。"
       : null;
   }
   const activeTasks = context.backgroundTasks.filter(
@@ -136,7 +136,7 @@ export function checkResourceGuard(
   );
   const resourceCountedTasks = activeTasks.filter((task) => isResourceGuardCountedKind(task.kind));
   if (resourceCountedTasks.length >= BACKGROUND_RUNNING_GLOBAL_CAP) {
-    return `并发上限：后台任务已达到全局上限 ${BACKGROUND_RUNNING_GLOBAL_CAP}；请等待完成、查看 /background，或用 /interrupt 取消卡住任务。这是 resource/concurrency cap，不是权限拒绝。`;
+    return `后台任务已达到并发上限 ${BACKGROUND_RUNNING_GLOBAL_CAP}；请等待完成、查看 /background，或用 /interrupt 取消卡住任务。`;
   }
   const capTasks = resourceCountedTasks.filter(
     (task) => !ignoreTaskId || task.workflowRunId !== ignoreTaskId || task.kind !== "agent",
@@ -149,12 +149,12 @@ export function checkResourceGuard(
         task.kind === "bash",
     );
     return heavy
-      ? `并发上限：已有 ${heavy.kind} 重任务正在运行。请等待完成、查看 /background，或先 /interrupt。这是 resource/concurrency cap，不是权限拒绝。`
+      ? `已有 ${heavy.kind} 重任务正在运行；请等待完成、查看 /background，或先 /interrupt。`
       : null;
   }
   const cap = BACKGROUND_KIND_CAPS[kind];
   if (cap !== undefined && capTasks.filter((task) => task.kind === kind).length >= cap) {
-    return `并发上限：${kind} 后台任务已达到上限 ${cap}；请等待完成、查看 /background，或用 /interrupt 取消后重试。这是 resource/concurrency cap，不是权限拒绝。`;
+    return `${kind} 后台任务已达到并发上限 ${cap}；请等待完成、查看 /background，或用 /interrupt 取消后重试。`;
   }
   return null;
 }
