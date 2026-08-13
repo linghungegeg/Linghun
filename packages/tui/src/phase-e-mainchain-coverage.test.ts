@@ -2908,13 +2908,13 @@ describe("Phase E agent, slash, workflow, permission, and natural intent coverag
     expect(denied.decision).toBe("deny");
 
     const actions = [
-      routeNaturalIntent("当前状态").capability?.id,
-      routeNaturalIntent("查看模型").capability?.id,
-      routeNaturalIntent("帮我重建索引").capability?.id,
-      routeNaturalIntent("后台任务状态").capability?.id,
-      routeNaturalIntent("任务报告").capability?.id,
-      routeNaturalIntent("切到自动审查").capability?.id,
-      routeNaturalIntent("持续推进这个任务").capability?.id,
+      routeNaturalIntent("/status").capability?.id,
+      routeNaturalIntent("/model").capability?.id,
+      routeNaturalIntent("/index").capability?.id,
+      routeNaturalIntent("/background").capability?.id,
+      routeNaturalIntent("/job").capability?.id,
+      routeNaturalIntent("/mode auto-review").capability?.id,
+      routeNaturalIntent("/autopilot").capability?.id,
       routeNaturalIntent("解释 /doctor").capability?.id,
     ];
     expect(new Set(actions.filter(Boolean)).size).toBeGreaterThanOrEqual(6);

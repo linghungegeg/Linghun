@@ -1344,12 +1344,34 @@ export function routeNaturalIntent(
   preferredLanguage: Language = "zh-CN",
 ): NaturalIntent {
   const language = detectInputLanguage(text, preferredLanguage);
+  const mentionedSlash = /^\s*(\/[a-z-]+)/iu.exec(text)?.[1];
+  if (!mentionedSlash) {
+    return {
+      action: "model",
+      confidence: 0,
+      reason: "ordinary natural-language request delegated to model task contract",
+      candidates: [],
+      language,
+      inquiry: "execute",
+      runtimeIntent: { kind: "none" },
+      riskHandler: "model",
+    };
+  }
   const normalized = normalizeIntentText(text);
-  const mentionedSlash = /\/[a-z-]+/iu.exec(text)?.[0];
   const catalog = getCommandCapabilityCatalog();
-  const explicit = mentionedSlash
-    ? findExplicitSlashCapability(catalog, mentionedSlash, normalized)
-    : undefined;
+  const explicit = findExplicitSlashCapability(catalog, mentionedSlash, normalized);
+  if (!explicit) {
+    return {
+      action: "model",
+      confidence: 0,
+      reason: "unknown slash command delegated to model task contract",
+      candidates: [],
+      language,
+      inquiry: "execute",
+      runtimeIntent: { kind: "none" },
+      riskHandler: "model",
+    };
+  }
   const classification = classifyNaturalControlIntent(normalized);
   const inquiry = classification.inquiry;
   const dangerous = classification.dangerousReason;
