@@ -673,7 +673,7 @@ describe("tool-output-presenter", () => {
       );
       expect(structured.layered.preview).toContain("另有 1 项在详情中");
       expect(structured.layered.preview).not.toContain("src/d.ts");
-      expect(structured.text).toContain("完整内容已收起，可查看详情。");
+      expect(structured.text).toContain("完整内容已收起。");
       expect(structured.layered.details).toBe(details);
       expect(structured.block.detailsPath).toBe(".linghun/session/tool-results/diff.txt");
       expect(structured.block.evidenceId).toBe("ev-diff");
@@ -886,7 +886,7 @@ describe("tool-output-presenter", () => {
       expect(structured.text).not.toContain("大响应");
       expect(structured.text).not.toContain("tokens");
       expect(structured.block.body).not.toContain("大响应");
-      expect(structured.text).toContain("完整内容已收起，可查看详情。");
+      expect(structured.text).toContain("完整内容已收起。");
       expect(structured.layered.details).toBe(details);
       expect(structured.layered.details).toContain("| result | kept |");
       expect(structured.layered.details).toContain("```ts");

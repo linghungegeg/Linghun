@@ -46,6 +46,18 @@ importers:
         specifier: 0.1.46
         version: 0.1.46
     optionalDependencies:
+      '@linghun/codebase-memory-darwin-arm64':
+        specifier: 0.1.0
+        version: 0.1.0
+      '@linghun/codebase-memory-darwin-x64':
+        specifier: 0.1.0
+        version: 0.1.0
+      '@linghun/codebase-memory-linux-x64':
+        specifier: 0.1.0
+        version: 0.1.0
+      '@linghun/codebase-memory-win32-x64':
+        specifier: 0.1.0
+        version: 0.1.0
       '@linghun/native-runner-win32-x64':
         specifier: 0.1.0
         version: 0.1.0
@@ -186,6 +198,19 @@ importers:
       '@types/react':
         specifier: ^19.2.15
         version: 19.2.15
+    optionalDependencies:
+      '@linghun/codebase-memory-darwin-arm64':
+        specifier: 0.1.0
+        version: 0.1.0
+      '@linghun/codebase-memory-darwin-x64':
+        specifier: 0.1.0
+        version: 0.1.0
+      '@linghun/codebase-memory-linux-x64':
+        specifier: 0.1.0
+        version: 0.1.0
+      '@linghun/codebase-memory-win32-x64':
+        specifier: 0.1.0
+        version: 0.1.0
 
 packages:
 

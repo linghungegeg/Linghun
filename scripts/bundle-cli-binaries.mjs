@@ -22,7 +22,7 @@ const nativeRunnerManifest = join(repoRoot, "prototypes", "native-runner", "Carg
 const preEngineManifest = join(repoRoot, "prototypes", "pre-engine", "Cargo.toml");
 const currentPlatformArch = `${process.platform}-${process.arch}`;
 const supportedPlatformArches = ["win32-x64", "linux-x64", "darwin-arm64", "darwin-x64"];
-const codebaseMemoryVersion = process.env.LINGHUN_CODEBASE_MEMORY_VERSION ?? "v0.8.1";
+const codebaseMemoryVersion = process.env.LINGHUN_CODEBASE_MEMORY_VERSION ?? "v0.10.3";
 
 const codebaseMemoryAssets = {
   "win32-x64": "codebase-memory-mcp-windows-amd64.zip",
@@ -42,7 +42,7 @@ async function main() {
 
   if (options.preEngineArtifacts) {
     await bundlePreEngineArtifacts(options.preEngineArtifacts);
-  } else {
+  } else if (!options.skipPreEngine) {
     await bundlePreEngine(currentPlatformArch);
   }
 
@@ -52,7 +52,7 @@ async function main() {
     }
   } else if (options.downloadCodebaseMemory) {
     await bundleReleasedCodebaseMemory(options.platformArch);
-  } else if (options.localCodebaseMemory) {
+  } else {
     await bundleLocalCodebaseMemory(options.platformArch);
   }
 }
@@ -61,11 +61,11 @@ function parseArgs(args) {
   return {
     allCodebaseMemory: args.includes("--all-codebase-memory"),
     downloadCodebaseMemory: args.includes("--download-codebase-memory"),
-    localCodebaseMemory: args.includes("--local-codebase-memory"),
     nativeRunnerArtifacts: readOption(args, "--native-runner-artifacts"),
     preEngineArtifacts: readOption(args, "--pre-engine-artifacts"),
     platformArch: readOption(args, "--platform-arch") ?? currentPlatformArch,
     skipNativeRunner: args.includes("--skip-native-runner"),
+    skipPreEngine: args.includes("--skip-pre-engine"),
   };
 }
 

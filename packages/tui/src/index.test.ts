@@ -15198,7 +15198,7 @@ describe("Phase 06 TUI slash commands", () => {
       expect(output.text).toContain(`binary status: ${expected}`);
       expect(output.text).toContain("status: missing");
       expect(output.text).toContain("普通聊天不受影响");
-      expect(output.text).toContain("配置远端 codebase-memory MCP URL");
+      expect(output.text).toContain("next action: 建议：配置 LINGHUN_CODEBASE_MEMORY_MCP");
       expect(await readMockCalls(callsPath)).toEqual([]);
     }
   });
@@ -15234,7 +15234,7 @@ describe("Phase 06 TUI slash commands", () => {
       "guard: extension-contributed MCP/skill/plugin tools must pass discovery + trust + schemaLoaded + compatible runtime",
     );
     expect(output.text).toContain(
-      "package: codebase-memory binary is not shipped by default; remote MCP or external fallback is reported explicitly",
+      "license/NOTICE: Linghun-managed codebase-memory must be shipped with license/NOTICE metadata",
     );
     expect(output.text).toContain("fast status：未运行 detect_changes");
     expect(output.text).toContain("Index search（语义符号搜索");
@@ -15286,7 +15286,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(requests.length).toBeGreaterThanOrEqual(1);
     expect(output.text).toContain("codebase-memory: missing");
     expect(output.text).toContain("status: missing");
-    expect(output.text).toContain("配置远端 codebase-memory MCP URL");
+    expect(output.text).toContain("配置 LINGHUN_CODEBASE_MEMORY_MCP");
     expect(output.text).toContain("普通聊天仍然可继续");
     expect(output.text).toContain("binary status: missing");
     expect(output.text).toContain("runtime: explicit codebase-memory override");
@@ -19482,15 +19482,10 @@ describe("Phase 06 TUI slash commands", () => {
       JSON.stringify({ data: "x".repeat(1_100_000) }),
       "utf8",
     );
-    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
-    const { config } = await createMockCodebaseMemoryConfig(project, mockDir);
     await mkdir(join(project, ".linghun"), { recursive: true });
     await writeFile(
       join(project, ".linghun", "settings.json"),
-      JSON.stringify({
-        mcp: config.mcp,
-        storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
-      }),
+      JSON.stringify({ storage: { ...defaultConfig.storage, jobs: { scope: "project" } } }),
       "utf8",
     );
     const output = new MemoryOutput();

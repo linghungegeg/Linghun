@@ -3533,8 +3533,8 @@ export async function runModelBackedAgent(
             status: "blocked",
             summary:
               context.language === "en-US"
-                ? `${agent.type} blocked: child model request failed with ${kindLabel} (${code}). Run /model doctor for details; no completion was claimed.`
-                : `${agent.type} blocked：子 agent 模型请求因${kindLabel}失败（${code}）。可运行 /model doctor 查看详情；本次没有声称已完成。`,
+                ? `${agent.type} blocked: child model request failed with ${kindLabel} (${code}).`
+                : `${agent.type} blocked：子 agent 模型请求因${kindLabel}失败（${code}）。`,
             evidenceRefs: [],
           };
         }

@@ -254,8 +254,8 @@ export function formatTerminalProblemsPanel(view: TerminalReadinessView): string
   }
   lines.push(
     view.language === "en-US"
-      ? "Open details with /verify last, /details evidence, /details background <id>, or provider/index/cache doctors."
-      : "可用 /verify last、/details evidence、/details background <id> 或 provider/index/cache doctor 查看详情。",
+      ? "Open details with /verify last or /details."
+      : "可用 /verify last 或 /details。",
   );
   return lines.join("\n");
 }

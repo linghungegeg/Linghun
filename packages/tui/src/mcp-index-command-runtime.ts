@@ -50,44 +50,17 @@ export function buildMcpStatusPanel(context: TuiContext): CommandPanelView {
 }
 
 export function formatMcpStatus(context: TuiContext): string {
-  // D.13Q-UX Real Smoke Fix v3 — /mcp status 默认是中性 diagnostic：
-  //   - lastDoctor 未跑时显示"未检测，运行 /mcp doctor 检测"，不再 unknown 吓人；
-  //   - codebase-memory binary/version 未知时同样显示"未检测"；
-  //   - 末尾"启动或检测失败会隔离"那段触发关键词误伤的文案已删除，统一让
-  //     真实失败由 /mcp doctor 的输出承担。
   const isEn = context.language === "en-US";
-  const notRunHint = isEn
-    ? "not detected — run /mcp doctor to check"
-    : "未检测，运行 /mcp doctor 检测";
-  const servers = context.mcp.servers.map((server) => {
-    const suffix = server.error ? ` (${truncateDisplay(server.error, 80)})` : "";
-    return `- ${server.name}: ${server.status}; command ${redactedPath(server.command)}${suffix}`;
-  });
-  const lastDoctor = context.mcp.lastDoctor ?? notRunHint;
-  const memorySource = context.index.binarySource ?? notRunHint;
-  const memoryBinary = context.index.binaryStatus ?? notRunHint;
-  const memoryVersion = context.index.binaryVersion ?? "-";
-  const runtime =
-    context.index.runtime ??
-    (isEn
-      ? "remote codebase-memory MCP or external fallback"
-      : "远端 codebase-memory MCP 或外部 fallback");
+  const notRunHint = isEn ? "not checked" : "未检查";
+  const servers = context.mcp.servers.map((server) => `- ${server.name}: ${server.status}`);
   return [
     "MCP status",
     `- enabled: ${context.mcp.enabled ? "yes" : "no"}`,
     `- servers: ${context.mcp.servers.length}`,
     `- tools(stable): ${context.mcp.tools.length}`,
-    `- lastDoctor: ${lastDoctor}`,
+    `- lastDoctor: ${context.mcp.lastDoctor ?? notRunHint}`,
     ...servers,
-    `- codebase-memory source ${memorySource}`,
-    `- codebase-memory binary ${memoryBinary}; version ${memoryVersion}`,
-    `- runtime: ${runtime}`,
-    "- guard: codebase-memory deferred tools currently require Linghun static registry + required args before CLI execution; unknown or incomplete tool calls are rejected.",
-    "- guard: extension-contributed MCP/skill/plugin tools must pass discovery + trust + schemaLoaded + compatible runtime before execution.",
-    "- package: codebase-memory binary is not shipped by default; remote MCP or external fallback is reported explicitly.",
-    isEn
-      ? "- next: run /mcp doctor for diagnostics, /mcp tools to list registered tools, /index status for codebase-memory state."
-      : "- 下一步：运行 /mcp doctor 做诊断、/mcp tools 查看已登记工具、/index status 查看 codebase-memory 状态。",
+    isEn ? "- next: /mcp doctor or /mcp tools" : "- 下一步：/mcp doctor 或 /mcp tools",
   ].join("\n");
 }
 
@@ -144,37 +117,24 @@ export function buildIndexStatusPanel(context: TuiContext): CommandPanelView {
 export function formatIndexStatus(context: TuiContext): string {
   const suggestion =
     context.index.binaryStatus && context.index.binaryStatus !== "ready"
-      ? `建议：配置远端 codebase-memory MCP URL，或通过 ${CODEBASE_MEMORY_ENV} 指向外部 codebase-memory-mcp；普通聊天不受影响。`
+      ? `建议：配置 ${CODEBASE_MEMORY_ENV}，或安装/修复 codebase-memory。`
       : context.index.status === "missing"
         ? context.index.error
-          ? "建议：确认 codebase-memory artifact 是否存在；可显式运行 /index init fast。普通聊天不受影响。"
-          : "建议：运行 /index init fast 建立索引；如发现高风险大文件/生成物，运行 /index repair 写入 .cbmignore 后会真实跳过。"
+          ? "建议：确认 codebase-memory artifact 是否存在；可运行 /index init fast。"
+          : "建议：运行 /index init fast 建立索引。"
         : context.index.status === "stale"
-          ? "建议：按需刷新索引；如发现大文件/生成物，运行 /index repair 写入 .cbmignore 后会真实跳过。"
+          ? "建议：按需刷新索引。"
           : context.index.status === "refresh_completed_but_unverified"
-            ? "建议：索引刷新命令已完成，但读回/新鲜度尚未验证；运行 /index status --fresh 确认。"
+            ? "建议：运行 /index status --fresh 确认。"
           : context.index.status === "error"
-            ? "建议：修复 codebase-memory runtime/artifact 后重试 /index doctor 或 /index status。"
-            : "建议：可用 /index search <query> 或 /index architecture 获取短结果；新鲜度检查用 /index status --fresh 或 /index check。";
+            ? "建议：修复 codebase-memory 后重试。"
+            : "建议：可用 /index search 或 /index architecture。";
   return [
     "Index status",
     `- enabled: ${context.index.enabled ? "yes" : "no"}`,
     `- project: ${context.index.projectName ?? basename(context.projectPath)}`,
     `- project selection: ${context.index.projectSelectionSource ?? (context.index.projectName ? "root_path" : "missing")}`,
     `- status: ${context.index.status}`,
-    `- source: ${context.index.binarySource ?? "unknown"}`,
-    `- binary status: ${context.index.binaryStatus ?? "unknown"}`,
-    `- binary command: ${context.index.binaryCommand ?? "-"}`,
-    `- version: ${context.index.binaryVersion ?? "-"}`,
-    `- artifact status: ${context.index.artifactStatus ?? "unknown"}`,
-    `- artifact path (details): ${redactedPath(context.index.artifactPath)}`,
-    `- runtime: ${context.index.runtime ?? "remote codebase-memory MCP or external fallback"}`,
-    `- graph: ${context.index.nodes ?? "-"} nodes, ${context.index.edges ?? "-"} edges`,
-    `- changed files: ${context.index.changedFiles ?? "-"}`,
-    `- stale hint: ${context.index.staleHint ? truncateDisplay(context.index.staleHint, 160) : "-"}`,
-    `- safety: ${context.index.safetyRiskyFiles?.length ? `pending risky files ${context.index.safetyRiskyFiles.length}` : "-"}`,
-    `- error: ${context.index.error ? truncateDisplay(context.index.error, 120) : "-"}`,
-    `- lastQuery: ${context.index.lastQuery ?? "-"}`,
     `- next action: ${suggestion}`,
   ].join("\n");
 }

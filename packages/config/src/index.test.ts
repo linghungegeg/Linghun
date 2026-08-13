@@ -236,11 +236,7 @@ describe("config directories", () => {
     const paths = resolveStoragePaths(config, project, "/tmp/home");
 
     expect(config.mcp.enabledServers).toContain("codebase-memory");
-    expect(config.mcp.servers["codebase-memory"]?.command).toBe("npx");
-    expect(config.mcp.servers["codebase-memory"]?.args).toEqual([
-      "-y",
-      "codebase-memory-mcp@latest",
-    ]);
+    expect(config.mcp.servers["codebase-memory"]?.command).toBeTruthy();
     expect(config.storage.sessions.scope).toBe("user");
     expect(paths.memoryProject.replaceAll("\\", "/")).toContain("/.linghun/memory");
     expect(paths.memoryUser.replaceAll("\\", "/")).toBe("/tmp/home/.linghun/data/memory");

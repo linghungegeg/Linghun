@@ -19,12 +19,9 @@ describe("D.14D-R2 P2-1 provider transit failure attribution", () => {
       err("Anthropic Messages stream decode failed: eventstream CRC mismatch"),
       "en-US",
     );
-    expect(text).toContain("service or network transport issue");
-    expect(text).toContain("not a local Linghun bug");
-    // 不退化成通用 runtime 文案。
-    expect(text).not.toBe(
-      "The model request did not complete. Run /model doctor for details, then retry.",
-    );
+    expect(text).toContain("The response stream failed in transit.");
+    expect(text).toContain("This request did not complete.");
+    expect(text).not.toContain("/model doctor");
   });
 
   it("CRC mismatch 归因 provider/传输，不是 Linghun 缺陷 (zh)", () => {
@@ -32,8 +29,8 @@ describe("D.14D-R2 P2-1 provider transit failure attribution", () => {
       err("流解码失败：eventstream CRC 校验不一致"),
       "zh-CN",
     );
-    expect(text).toContain("模型服务、网关传输或本地兼容层问题");
-    expect(text).not.toBe("模型请求未完成。可运行 /model doctor 查看详情后重试。");
+    expect(text).toContain("响应流传输失败");
+    expect(text).not.toBe("模型请求未完成。");
   });
 
   it("PROVIDER_STREAM_DECODE_ERROR / PROVIDER_RETRY_EXHAUSTED codes classify as transit", () => {
@@ -42,8 +39,8 @@ describe("D.14D-R2 P2-1 provider transit failure attribution", () => {
       "en-US",
     );
     const retry = formatProviderFailurePrimary(err("boom", "PROVIDER_RETRY_EXHAUSTED"), "en-US");
-    expect(decode).toContain("transport issue");
-    expect(retry).toContain("transport issue");
+    expect(decode).toContain("failed in transit");
+    expect(retry).toContain("failed in transit");
   });
 
   it("PROVIDER_STREAM_ERROR is classified by its inner provider error text", () => {

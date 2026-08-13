@@ -3360,6 +3360,9 @@ export async function executeIndexToolUse(
   pendingApproval?: boolean;
 }> {
   const name = toolCall.name;
+  if (context.isInkSession) {
+    context.commandPanelState = undefined;
+  }
   const dispatchName = resultToolName ?? name;
   const requestTurnId = continuation?.requestTurnId;
   const requestSignal = continuation?.abortSignal;
@@ -3738,25 +3741,7 @@ export async function executeApprovedIndexToolUse(
     commitGuard,
     requestTurnId,
   );
-  if (!context.isInkSession) {
-    writeLine(output, text);
-  } else {
-    showCommandPanel(context, output, {
-      title:
-        action === "repair"
-          ? context.language === "en-US"
-            ? "Index repair"
-            : "索引修复"
-          : context.language === "en-US"
-            ? "Index refresh"
-            : "索引刷新",
-      tone: "error",
-      summary: [text],
-      actions: [
-        context.language === "en-US" ? "Use index status for details." : "可查看索引状态获取详情。",
-      ],
-    });
-  }
+  writeLine(output, text);
   return { ok: false, tool: name, text, evidenceId: evidence.id };
 }
 

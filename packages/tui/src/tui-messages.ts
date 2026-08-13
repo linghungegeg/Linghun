@@ -132,7 +132,7 @@ export const messages: Record<Language, Record<MessageKey, string>> = {
     claimNeedsDisclaimer: "缺少证据，请补齐匹配证据或移除该声明。",
     projectRulesMissingHint:
       "[hint:info] 缺少 LINGHUN.md 项目规则；如需基础模板，可运行 /memory init。不会自动生成或打断输入。",
-    toolInterrupted: "当前模型响应或工具调用已取消；可以继续输入。",
+    toolInterrupted: "已取消。",
     r3AgentsTitle: "智能体",
     r3AgentDetailStatus: "状态",
     r3AgentDetailTools: "工具",
@@ -228,7 +228,7 @@ export const messages: Record<Language, Record<MessageKey, string>> = {
     claimNeedsDisclaimer: "Evidence is missing; gather matching evidence or remove the claim.",
     projectRulesMissingHint:
       "[hint:info] LINGHUN.md project rules are missing. To create a basic template, run /memory init. I will not generate it automatically or interrupt input.",
-    toolInterrupted: "The current model response or tool call was cancelled; input is ready again.",
+    toolInterrupted: "Cancelled.",
     r3AgentsTitle: "Agents",
     r3AgentDetailStatus: "Status",
     r3AgentDetailTools: "Tools",

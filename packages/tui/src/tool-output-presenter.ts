@@ -169,7 +169,7 @@ export function createStructuredToolOutput(
 
 function formatToolDetailsHint(layered: LayeredToolOutput, language: Language): string | undefined {
   if (!layered.truncated && !layered.details && !layered.fullOutputPath) return undefined;
-  return language === "en-US" ? "Full output is tucked away in details." : "完整内容已收起，可查看详情。";
+  return language === "en-US" ? "Full output is folded." : "完整内容已收起。";
 }
 
 export function formatToolOutput(

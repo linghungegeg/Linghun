@@ -419,71 +419,71 @@ export function formatProviderFailurePrimary(error: unknown, language: Language)
       return "The upstream service explicitly ended this response without a usable answer. This request did not complete; input is ready, so retry or switch model. Run /model doctor if it repeats.";
     }
     if (kind === "compatibility") {
-      return "The endpoint returned a non-SSE stream. Check whether the endpoint/base URL supports streaming SSE and whether the endpoint profile matches this gateway. Run /model doctor for details.";
+      return "The endpoint returned a non-SSE stream.";
     }
     if (kind === "stream_parse") {
-      return "The gateway returned malformed SSE stream data. This points to an SSE compatibility-layer format issue, not ordinary network instability. Run /model doctor or inspect /details evidence.";
+      return "The gateway returned malformed SSE stream data.";
     }
     if (kind === "tool_stream") {
-      return "The tool-call stream ended incomplete. This can be a model/gateway interruption or a local stream parsing boundary issue. Run /model doctor or inspect /details evidence.";
+      return "The tool-call stream ended incomplete.";
     }
     if (kind === "transit") {
-      return "The response stream failed in transit, so this request did not complete. This is a service or network transport issue, not a local Linghun bug. Retry later or run /model doctor for details.";
+      return "The response stream failed in transit. This request did not complete.";
     }
     if (kind === "timeout") {
-      return "The model took too long to respond, so this request did not complete. Retry later or run /model doctor for details.";
+      return "The model took too long to respond. This request did not complete.";
     }
     if (kind === "abort") {
       return "This request was interrupted. Input is ready again.";
     }
     if (kind === "schema") {
-      return "The model service rejected the request shape: schema, tool choice, tool result, or reasoning settings are incompatible. Run /model doctor for details.";
+      return "The model service rejected the request shape.";
     }
-    return "The model request did not complete. Run /model doctor for details, then retry.";
+    return "The model request did not complete.";
   }
   if (kind === "rate_limit") {
-    return "模型服务触发限流。本次请求未完成；请降低请求频率或稍后重试。若已配置备用模型，Linghun 会尝试切换。可运行 /model doctor 查看详情。";
+    return "模型服务触发限流。本次请求未完成。";
   }
   if (kind === "quota_or_balance_exhausted") {
-    return "模型服务返回额度、点数或账户余额不足。本次请求未完成；请充值或检查账单，或切换密钥、服务商或模型。Linghun 没有查询余额，只是根据上游错误分类。可运行 /model doctor 查看详情。";
+    return "模型服务返回额度或余额不足。本次请求未完成。";
   }
   if (kind === "reasoning_unsupported") {
-    return "当前网关或模型不接受推理参数。请降低推理等级或更换网关/模型。可运行 /model doctor 查看详情。";
+    return "当前网关或模型不接受推理参数。";
   }
   if (kind === "auth") {
-    return "模型服务拒绝了密钥或权限。本次请求未完成；请检查密钥、账号权限或当前服务商/模型配置。可运行 /model doctor 查看详情。";
+    return "模型服务拒绝了密钥或权限。本次请求未完成。";
   }
   if (kind === "not_found") {
-    return "接口或模型不存在。本次请求未完成；请检查服务地址、接口类型和模型名称。可运行 /model doctor 查看详情。";
+    return "接口或模型不存在。本次请求未完成。";
   }
   if (kind === "gateway") {
-    return "上游模型服务或网关暂时异常，本次请求未完成。请稍后重试，或运行 /model doctor 查看详情。";
+    return "上游模型服务或网关暂时异常，本次请求未完成。";
   }
   if (kind === "response_failed") {
-    return "上游服务已明确结束本次响应，但没有生成可用答案。本次请求未完成，输入已恢复；可重试或切换模型，若重复出现请运行 /model doctor。";
+    return "上游服务没有生成可用答案。本次请求未完成。";
   }
   if (kind === "compatibility") {
-    return "接口返回的不是 SSE 流。本次请求未完成；请检查 endpoint/baseUrl 是否支持 SSE，以及 endpointProfile 是否和网关匹配。可运行 /model doctor 查看详情。";
+    return "接口返回的不是 SSE 流。本次请求未完成。";
   }
   if (kind === "stream_parse") {
-    return "网关返回的 SSE 流格式异常。本次请求未完成；这更像是 SSE 兼容层格式问题，不是普通网络抖动。可运行 /model doctor 或 /details evidence 查看详情。";
+    return "网关返回的 SSE 流格式异常。本次请求未完成。";
   }
   if (kind === "tool_stream") {
-    return "工具调用流不完整，本次请求未完成。可能是模型/网关中断，也可能是流解析边界问题。可运行 /model doctor 或 /details evidence 查看详情。";
+    return "工具调用流不完整，本次请求未完成。";
   }
   if (kind === "transit") {
-    return "响应流传输失败，本次请求未完成。可能是模型服务、网关传输或本地兼容层问题；请稍后重试，或运行 /model doctor 和 /details evidence 查看详情。";
+    return "响应流传输失败，本次请求未完成。";
   }
   if (kind === "timeout") {
-    return "等待模型响应过久，本次请求未完成。稍后重试，或运行 /model doctor 查看详情。";
+    return "等待模型响应过久，本次请求未完成。";
   }
   if (kind === "abort") {
     return "已中断本次请求，可以继续输入。";
   }
   if (kind === "schema") {
-    return "模型服务拒绝了请求格式：接口类型、工具选择、工具结果或推理设置不兼容。请运行 /model doctor 查看详情。";
+    return "模型服务拒绝了请求格式。";
   }
-  return "模型请求未完成。可运行 /model doctor 查看详情后重试。";
+  return "模型请求未完成。";
 }
 
 export function formatProviderFailureTitle(language: Language): string {
@@ -533,16 +533,16 @@ export function formatProviderFailureKindLabel(
 
 export function formatProviderEmptyResponsePrimary(language: Language): string {
   return language === "en-US"
-    ? "The model returned no answer. Run /model doctor for details, then retry."
-    : "模型没有返回有效回答。可运行 /model doctor 查看详情后重试。";
+    ? "The model returned no answer."
+    : "模型没有返回有效回答。";
 }
 
 // D.13M：thinking-only 空响应（Anthropic extended thinking 已返回，但没有最终 text/tool_use）。
 // 给用户明确人话提示，区别于"完全没产出"的通用文案。
 export function formatProviderThinkingOnlyResponsePrimary(language: Language): string {
   return language === "en-US"
-    ? "The model returned a thinking stream but no final text. Retry, lower the reasoning level, or run /model doctor for details."
-    : "模型已返回思考流但没有最终文本。请重试或降低推理等级，可运行 /model doctor 查看详情。";
+    ? "The model returned a thinking stream but no final text."
+    : "模型已返回思考流但没有最终文本。";
 }
 
 export function formatReportEvidenceRequired(language: Language): string {

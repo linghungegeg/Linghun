@@ -113,19 +113,20 @@ function configureCliBundledRoot(): void {
     "..",
     "bundled",
   );
+  configurePlatformBundledRoot("codebase-memory", "LINGHUN_CODEBASE_MEMORY_BUNDLED_DIR");
   configurePlatformBundledRoot("native-runner", "LINGHUN_NATIVE_RUNNER_BUNDLED_DIR");
   configurePlatformBundledRoot("pre-engine", "LINGHUN_PRE_ENGINE_BUNDLED_DIR");
 }
 
 function configurePlatformBundledRoot(
-  kind: "native-runner" | "pre-engine",
+  kind: "codebase-memory" | "native-runner" | "pre-engine",
   envName: string,
 ): void {
   if (process.env[envName]) {
     return;
   }
   const cliBundledRoot = process.env.LINGHUN_CLI_BUNDLED_ROOT;
-  const commandName = `linghun-${kind}`;
+  const commandName = kind === "codebase-memory" ? "codebase-memory-mcp" : `linghun-${kind}`;
   const fileName = process.platform === "win32" ? `${commandName}.exe` : commandName;
   if (
     cliBundledRoot &&
