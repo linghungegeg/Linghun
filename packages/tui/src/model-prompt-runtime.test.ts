@@ -128,6 +128,27 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     }
   });
 
+  it("injects ready index tools as current model capability without making a stale index available", () => {
+    const readyContext = createPromptTestContext({
+      index: { enabled: true, status: "ready", projectName: "synthetic-project" },
+    });
+
+    const ready = createModelSystemPromptSegments("审计仓库架构", readyContext, {});
+
+    expect(ready.dynamic).toContain("CurrentIndexCapability=");
+    expect(ready.dynamic).toContain('"availability":"ready"');
+    expect(ready.dynamic).toContain('"project":"synthetic-project"');
+    expect(ready.dynamic).toContain("IndexStatusInspect");
+    expect(ready.dynamic).toContain("SearchExtraTools");
+    expect(ready.dynamic).toContain("get_architecture");
+    expect(ready.dynamic).toContain("Do not claim it is unregistered");
+
+    const staleContext = createPromptTestContext({ index: { enabled: true, status: "stale" } });
+    const stale = createModelSystemPromptSegments("审计仓库架构", staleContext, {});
+
+    expect(stale.dynamic).not.toContain("CurrentIndexCapability=");
+  });
+
   it("records dynamic prompt section metrics without dropping accepted memory", () => {
     const context = createPromptTestContext({
       memory: {

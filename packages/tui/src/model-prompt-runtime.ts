@@ -26,6 +26,7 @@ type PromptSectionName =
   | "evidence"
   | "solution_completeness"
   | "architecture"
+  | "index_capability"
   | "deferred_tools"
   | "worktree"
   | "git_status"
@@ -99,6 +100,7 @@ export function createModelSystemPromptSegments(
   // D.13I：仅当 deferred 列表非空时注入 SearchExtraTools/ExecuteExtraTool 提示。built-in
   // 工具继续直接调用；不暴露 raw schema/secret/参数，仅提示发现-执行两步约束。
   const deferredSnapshot = snapshotDeferredTools(context);
+  const indexCapabilityLine = createCurrentIndexCapabilityContext(context, deferredSnapshot);
   const preEngineToolNames = createPreEngineToolDefinitions().map((tool) => tool.name);
   const deferredReminder = formatDeferredToolsSystemReminder(context.language, deferredSnapshot);
   const preEngineRepositoryTools = {
@@ -182,6 +184,7 @@ export function createModelSystemPromptSegments(
       volatile: true,
     },
     { name: "architecture", text: architectureDirective ?? "", volatile: true },
+    { name: "index_capability", text: indexCapabilityLine, volatile: true },
     { name: "deferred_tools", text: deferredReminder ? `DeferredToolsReminder=${deferredReminder}` : "", volatile: true },
     { name: "worktree", text: worktreeContextLine.trim(), volatile: true },
     { name: "git_status", text: gitStatusLine, volatile: true },
@@ -233,6 +236,31 @@ export function createModelSystemPromptSegments(
     })),
     volatile,
   };
+}
+
+function createCurrentIndexCapabilityContext(
+  context: TuiContext,
+  deferredSnapshot: ReturnType<typeof snapshotDeferredTools>,
+): string {
+  if (context.index?.status !== "ready") return "";
+  const codebaseMemoryTools = deferredSnapshot.tools
+    .filter((tool) => tool.kind === "codebase-memory" && tool.executable)
+    .map((tool) => tool.name)
+    .sort((a, b) => a.localeCompare(b));
+  if (codebaseMemoryTools.length === 0) return "";
+  return `CurrentIndexCapability=${JSON.stringify({
+    availability: "ready",
+    project: context.index?.projectName,
+    firstClassTools: ["IndexStatusInspect", "IndexRefresh", "IndexRepair"],
+    repositoryAnalysisTools: codebaseMemoryTools,
+    discovery: {
+      tool: "SearchExtraTools",
+      query: "codebase-memory",
+      invoke: "ExecuteExtraTool",
+    },
+    rule:
+      "This index capability is available for the current task. For repository analysis, first discover the listed codebase-memory tools, then invoke the discovered tool. Do not claim it is unregistered, unavailable, or needs build/link/runtime configuration merely because it is not a direct provider tool schema.",
+  })}`;
 }
 
 function buildPromptSections(sections: PromptSectionInput[]): PromptSection[] {
