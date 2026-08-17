@@ -14300,6 +14300,100 @@ describe("Phase 06 TUI slash commands", () => {
     ).toBe(true);
   });
 
+  it("writes generated image bytes when the image route uses an image model", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+
+    context.config.providers.minimax = {
+      type: "openai-compatible",
+      baseUrl: "https://api.minimax.io/v1",
+      apiKey: "test-image-key",
+      model: "MiniMax-M3",
+    };
+    setTestRoleRoute(context, "image", "minimax", "image-01");
+    const imageBytes = Buffer.from("89504e470d0a1a0a", "hex");
+    const fetchMock = vi.fn<(input: string | URL | Request, init?: RequestInit) => Promise<Response>>(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: "trace-1",
+            data: { image_base64: [imageBytes.toString("base64")] },
+            metadata: { success_count: 1, failed_count: 0 },
+            base_resp: { status_code: 0, status_msg: "success" },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    context.permissionMode = "auto-review";
+
+    await handleSlashCommand("/image generate a red circle", context, output);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://api.minimax.io/v1/image_generation");
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(requestBody).toEqual({
+      model: "image-01",
+      prompt: "a red circle",
+      response_format: "base64",
+    });
+    expect(context.imageResults).toHaveLength(1);
+    const image = context.imageResults[0]?.images[0];
+    expect(image?.mimeType).toBe("image/png");
+    expect(image?.path.endsWith(".png")).toBe(true);
+    expect((await readFile(image?.path ?? "")).equals(imageBytes)).toBe(true);
+    expect(output.text).toContain("Image result saved:");
+    expect(output.text).toContain("the generated image was written to the asset path");
+  });
+
+  it("records a tool failure when image generation is rejected", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+
+    context.config.providers.minimax = {
+      type: "openai-compatible",
+      baseUrl: "https://api.minimax.io/v1",
+      apiKey: "test-image-key",
+      model: "MiniMax-M3",
+    };
+    setTestRoleRoute(context, "image", "minimax", "image-01");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ base_resp: { status_code: 1026, status_msg: "sensitive content" } }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      ),
+    );
+    context.permissionMode = "auto-review";
+
+    await handleSlashCommand("/image generate a red circle", context, output);
+
+    expect(output.text).toContain("Image generation failed:");
+    expect(context.imageResults).toHaveLength(0);
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "evidence_record" && event.supportsClaims.includes("tool_failure"),
+      ),
+    ).toBe(true);
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "evidence_record" && event.supportsClaims.includes("image_result"),
+      ),
+    ).toBe(false);
+  });
+
   it("does not write /image generate metadata after denial", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });

@@ -56,7 +56,9 @@ import {
   type ModelMessage,
   type ModelToolCall,
   type ModelUsage,
+  findKnownImageModel,
   findKnownModel,
+  generateImage,
 } from "@linghun/providers";
 import {
   LINGHUN_NAME,
@@ -2407,7 +2409,10 @@ export async function handleImageCommand(
   const route = resolved.route;
   const id = `image-${randomUUID().slice(0, 8)}`;
   const outputDir = join(context.projectPath, ".linghun", "assets");
-  const assetPath = join(outputDir, `${id}.json`);
+  // A routed image model writes real image bytes; any other route keeps recording metadata
+  // only. The extension is fixed here because the approved path must be the written path.
+  const generates = Boolean(findKnownImageModel(route.primaryModel));
+  const assetPath = join(outputDir, `${id}.${generates ? "png" : "json"}`);
   const approval: Extract<PendingLocalApproval, { kind: "image_generation" }> = {
     kind: "image_generation",
     sessionId,
@@ -2421,7 +2426,7 @@ export async function handleImageCommand(
     "Write",
     {
       path: relative(context.projectPath, assetPath),
-      content: "image generation metadata",
+      content: generates ? "generated image bytes" : "image generation metadata",
       reason: "explicit /image generate",
     },
     context,
@@ -2477,6 +2482,33 @@ export async function handleImageCommand(
   await executeImageGeneration(approval, context, output);
 }
 
+/**
+ * Runs one image generation call for an approved request and writes the returned bytes to
+ * the already approved asset path. Inline bytes are requested so the asset does not depend
+ * on a link that expires after the call.
+ */
+async function writeGeneratedImageAsset(
+  approval: Extract<PendingLocalApproval, { kind: "image_generation" }>,
+  context: TuiContext,
+  modelId: string,
+): Promise<void> {
+  const provider = context.config.providers[approval.provider];
+  const generated = await generateImage({
+    apiKey: provider?.apiKey,
+    baseUrl: provider?.baseUrl,
+    request: {
+      model: modelId,
+      prompt: approval.prompt,
+      responseFormat: "base64",
+    },
+  });
+  const encoded = generated.imagesBase64[0];
+  if (!encoded) {
+    throw new Error("the response carried no inline image data");
+  }
+  await writeFile(approval.assetPath, Buffer.from(encoded, "base64"));
+}
+
 export async function executeImageGeneration(
   approval: Extract<PendingLocalApproval, { kind: "image_generation" }>,
   context: TuiContext,
@@ -2488,32 +2520,54 @@ export async function executeImageGeneration(
     return;
   }
   const now = new Date().toISOString();
+  const imageModel = findKnownImageModel(approval.model);
   await mkdir(dirname(approval.assetPath), { recursive: true });
+  if (imageModel) {
+    try {
+      await writeGeneratedImageAsset(approval, context, imageModel.id);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      await recordToolFailureEvidence(
+        context,
+        approval.sessionId,
+        "Write",
+        `image generate failed: ${reason}`,
+      );
+      writeLine(output, `Image generation failed: ${reason}`);
+      writeStatus(output, context);
+      return;
+    }
+  } else {
+    await writeFile(
+      approval.assetPath,
+      `${JSON.stringify(
+        {
+          kind: "image_generation_metadata",
+          prompt: approval.prompt,
+          provider: approval.provider,
+          model: approval.model,
+          note: "Image result metadata recorded; no size/quality/format was fixed unless user specified it.",
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+  }
   const result: ImageGenerationResult = {
     id: approval.id,
     provider: approval.provider,
     model: approval.model,
     images: [
-      { path: approval.assetPath, mimeType: "application/json", revisedPrompt: approval.prompt },
+      {
+        path: approval.assetPath,
+        mimeType: imageModel ? "image/png" : "application/json",
+        revisedPrompt: approval.prompt,
+      },
     ],
     evidenceRefs: [],
     createdAt: now,
   };
-  await writeFile(
-    approval.assetPath,
-    `${JSON.stringify(
-      {
-        kind: "image_generation_metadata",
-        prompt: approval.prompt,
-        provider: approval.provider,
-        model: approval.model,
-        note: "Image result metadata recorded; no size/quality/format was fixed unless user specified it.",
-      },
-      null,
-      2,
-    )}\n`,
-    "utf8",
-  );
   const evidence = createEvidenceRecord(
     "image_result",
     `ImageGenerationResult ${approval.id}: provider ${approval.provider}, model ${approval.model}, asset ${approval.assetPath}`,
@@ -2545,7 +2599,7 @@ export async function executeImageGeneration(
     kind: "agent",
     title: `Image generate: ${truncateDisplay(approval.prompt, 40)}`,
     status: "completed",
-    currentStep: "image result metadata saved",
+    currentStep: imageModel ? "generated image saved" : "image result metadata saved",
     progress: { completed: 1, total: 1, label: "image" },
     startedAt: now,
     updatedAt: now,
@@ -2563,7 +2617,12 @@ export async function executeImageGeneration(
   await appendBackgroundTaskEvent(context, approval.sessionId, task);
   const displayPath = relative(context.projectPath, approval.assetPath);
   writeLine(output, `Image result saved: ${displayPath}`);
-  writeLine(output, "- impact: metadata was recorded; no source image or code was changed.");
+  writeLine(
+    output,
+    imageModel
+      ? "- impact: the generated image was written to the asset path; no source image or code was changed."
+      : "- impact: metadata was recorded; no source image or code was changed.",
+  );
   writeLine(output, "- next: use the saved path when you want to inspect or reuse the result.");
 }
 
