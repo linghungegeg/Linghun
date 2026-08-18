@@ -18,21 +18,13 @@ function createContext(): TuiContext {
 }
 
 describe("tui-output-surface", () => {
-  it("merges a running tool block into its final structured result", () => {
+  it("keeps running tool state out of the transcript and renders only its cleaned result", () => {
     const context = createContext();
     const blocks: ProductBlockViewModel[] = [];
     const output = __testCreateShellBlockOutput(context, blocks);
 
     output.writeToolRunningBlock("Bash", "call-1", "git status");
-    expect(blocks).toHaveLength(1);
-    expect(blocks[0]?.messageKind).toBe("tool_call");
-    expect(blocks[0]?.status).toBe("running");
-    expect(blocks[0]?.displayBlock?.bordered).toBe(false);
-    expect(blocks[0]?.toolActivity).toMatchObject({
-      toolName: "Bash",
-      toolUseId: "call-1",
-      kind: "bash",
-    });
+    expect(blocks).toHaveLength(0);
 
     const structured = createStructuredToolOutput(
       "Bash",
@@ -52,9 +44,11 @@ describe("tui-output-surface", () => {
       kind: "bash",
     });
     expect(blocks[0]?.summary).toContain("命令已完成");
+    expect(blocks[0]?.summary).not.toContain("退出");
+    expect(blocks[0]?.summary).not.toContain("⎿");
   });
 
-  it("updates repeated running progress for the same tool in place", () => {
+  it("does not add repeated running previews to the transcript", () => {
     const context = createContext();
     const blocks: ProductBlockViewModel[] = [];
     const output = __testCreateShellBlockOutput(context, blocks);
@@ -62,27 +56,40 @@ describe("tui-output-surface", () => {
     output.writeToolRunningBlock("Bash", "call-2", "first chunk");
     output.writeToolRunningBlock("Bash", "call-2", "second chunk");
 
-    expect(blocks).toHaveLength(1);
-    expect(blocks[0]?.id).toBe("tool:Bash:call-2");
-    expect(blocks[0]?.messageKind).toBe("tool_call");
-    expect(blocks[0]?.fullText).toBe("second chunk");
-    expect(blocks[0]?.displayBlock?.title).toBe("正在处理");
-    expect(blocks[0]?.displayBlock?.body).toBe("second chunk");
-    expect(blocks[0]?.displayBlock?.bordered).toBe(false);
+    expect(blocks).toHaveLength(0);
   });
 
-  it("uses the tool name instead of an isolated processing line for empty running summaries", () => {
+  it("keeps empty running summaries out of the transcript", () => {
     const context = createContext();
     const blocks: ProductBlockViewModel[] = [];
     const output = __testCreateShellBlockOutput(context, blocks);
 
     output.writeToolRunningBlock("Read", "call-empty");
 
-    expect(blocks).toHaveLength(1);
-    expect(blocks[0]?.fullText).toBe("Read");
-    expect(blocks[0]?.summary).toBe("Read");
-    expect(blocks[0]?.displayBlock?.summary).toBe("Read");
-    expect(blocks[0]?.fullText).not.toBe("正在处理");
+    expect(blocks).toHaveLength(0);
+  });
+
+  it("keeps exit codes and diagnostics in the retained details, not the main summary", () => {
+    const context = createContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(context, blocks);
+    const structured = createStructuredToolOutput(
+      "Bash",
+      {
+        text: "boom",
+        details: "stderr: connection reset",
+        data: { exitCode: 7, diagnostics: [{ type: "network", evidence: "ECONNRESET" }] },
+      },
+      "zh-CN",
+    );
+
+    output.writeStructuredToolOutput(structured, structured.text, "call-error");
+
+    expect(blocks[0]?.summary).not.toContain("退出");
+    expect(blocks[0]?.summary).not.toContain("ECONNRESET");
+    expect(blocks[0]?.fullText).toContain("stderr: connection reset");
+    expect(context.lastFullOutput).toContain("退出码 7");
+    expect(context.lastFullOutput).toContain("ECONNRESET");
   });
 
   it("keeps inline structured tool output from replacing adjacent ordinary output", () => {

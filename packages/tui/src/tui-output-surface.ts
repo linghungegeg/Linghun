@@ -200,7 +200,9 @@ export class ShellBlockOutput extends Writable {
     if (!normalizedPrimary) return;
     const base = createOutputBlock(normalizedPrimary, this.context.language);
     const details = createVisibleStructuredDetails(structured, this.context.language);
-    const hasVisibleDetails = Boolean(details && details !== base.fullText);
+    const summary = cleanedStructuredToolSummary(structured, base.summary);
+    const retainedFullText = [details, normalizedPrimary].filter(Boolean).join("\n\n");
+    const hasVisibleDetails = retainedFullText !== summary;
     const isError = structured.block.kind === "tool_result_error";
     const detailsHint =
       this.context.language === "en-US"
@@ -218,7 +220,10 @@ export class ShellBlockOutput extends Writable {
       kind: isError ? "error" : "details",
       status: isError ? "fail" : "info",
       title: "",
-      fullText: details || base.fullText,
+      // Main screen owns the cleaned human summary. Raw structured output is
+      // retained separately for /details and the runtime ledger.
+      summary,
+      fullText: details ?? (hasVisibleDetails ? normalizedPrimary : summary),
       nextAction: hasVisibleDetails ? detailsHint : base.nextAction,
       ctrlOCollapsed: hasVisibleDetails || base.ctrlOCollapsed,
       messageKind: structured.block.kind,
@@ -226,8 +231,8 @@ export class ShellBlockOutput extends Writable {
       failureRequestTurnId: isError ? this.context.currentRequestTurnId : undefined,
       displayBlock: {
         ...structured.block,
-        summary: base.summary,
-        body: base.fullText,
+        summary,
+        body: summary,
       },
       toolActivity: createToolActivityIdentity({
         toolName: structured.block.toolName,
@@ -240,7 +245,7 @@ export class ShellBlockOutput extends Writable {
     this.upsertBlock(block);
     this.commitTerminalFirstStableBlock(block);
     if (!this.context.suppressLastFullOutputCapture) {
-      this.context.lastFullOutput = block.fullText;
+      this.context.lastFullOutput = retainedFullText;
     }
     this.compactOutputMemory().catch((error) => {
       void this.appendCompactOutputMemoryWarning(error);
@@ -249,38 +254,9 @@ export class ShellBlockOutput extends Writable {
   }
 
   writeToolRunningBlock(toolName: string, toolUseId: string, summary?: string): void {
-    const cleanSummary = this.visibleTextSanitizer.push(summary ?? "").replace(/\r/g, "").trim();
-    const title = this.context.language === "en-US" ? "Running" : "正在处理";
-    const toolLabel = cleanSummary || toolName;
-    const body = cleanSummary || toolName;
-    const base = createOutputBlock(body, this.context.language, toolBlockId(toolName, toolUseId));
-    const block: ProductBlockViewModel = {
-      ...base,
-      kind: "details",
-      status: "running",
-      title: "",
-      fullText: body,
-      nextAction: undefined,
-      ctrlOCollapsed: false,
-      messageKind: "tool_call",
-      displayBlock: {
-        id: toolUseId,
-        kind: "tool_call",
-        title,
-        status: "running",
-        summary: toolLabel,
-        body,
-        collapsible: false,
-        bordered: false,
-      },
-      toolActivity: createToolActivityIdentity({
-        toolName,
-        toolUseId,
-        requestTurnId: this.context.currentRequestTurnId,
-      }),
-    };
-    this.appendTranscriptSourceBlock(block);
-    this.upsertBlock(block);
+    // Running tool state is already projected by bottomPaneStatus. Do not
+    // insert a second transcript row containing the tool input/preview.
+    this.visibleTextSanitizer.push(summary ?? toolName);
     this.onWrite();
   }
 
@@ -847,6 +823,19 @@ export class ShellBlockOutput extends Writable {
     });
   }
 
+}
+
+function cleanedStructuredToolSummary(structured: StructuredToolOutput, fallback: string): string {
+  const title = structured.block.title?.trim();
+  const toolName = structured.block.toolName?.trim();
+  if (!title || !toolName) return structured.block.summary?.trim() || fallback;
+  const prefix = `${toolName} · `;
+  const withoutToolName = title.startsWith(prefix) ? title.slice(prefix.length).trim() : title;
+  if (!withoutToolName) return structured.block.summary?.trim() || fallback;
+  if (/退出(?:码)?\s*\d+|exit(?: code)?\s*\d+/iu.test(withoutToolName)) {
+    return withoutToolName.split(/\s*[·:]\s*/u, 1)[0]?.trim() || fallback;
+  }
+  return withoutToolName;
 }
 
 function toolBlockId(toolName: string | undefined, toolUseId: string | undefined): string | undefined {

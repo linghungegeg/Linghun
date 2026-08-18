@@ -7134,7 +7134,7 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     expect(history).toContain("  ⎿  tool body\x1B[K\r\n\x1B[K");
   });
 
-  it("structured tool output keeps preview on the main surface and details in Ctrl+O", () => {
+  it("structured tool output keeps a cleaned summary on the main surface and details in Ctrl+O", () => {
     vi.stubEnv("LINGHUN_TUI_NATIVE_SCROLLBACK", "0");
     const details = [
       "# Evidence",
@@ -7172,8 +7172,8 @@ describe("ShellBlockOutput — assistant streaming block", () => {
 
     expect(blocks).toHaveLength(1);
     expect(blocks[0]?.summary).toContain("已读取2个范围");
-    expect(blocks[0]?.summary).toContain("1. src/a.ts:1-4");
-    expect(blocks[0]?.summary).toContain("2. src/b.ts:8-12");
+    expect(blocks[0]?.summary).not.toContain("1. src/a.ts:1-4");
+    expect(blocks[0]?.summary).not.toContain("2. src/b.ts:8-12");
     expect(blocks[0]?.summary).not.toContain("DETAIL_SENTINEL");
     expect(blocks[0]?.fullText).toContain(details);
     expect(blocks[0]?.displayBlock?.detailsPath).toBe(
@@ -7243,7 +7243,7 @@ describe("ShellBlockOutput — assistant streaming block", () => {
 
     expect(blocks).toHaveLength(0);
     expect(ctx.transcriptSource?.cells).toHaveLength(1);
-    expect(read()).toContain("1. src/source.ts:4-9");
+    expect(read()).toContain("Prepared 1 snippet(s).");
     expect(read()).not.toContain("CANONICAL_DETAIL_SENTINEL");
     const blockId = ctx.transcriptSource?.cells[0]?.block.id;
     ctx.ctrlOExpandState = { active: true, blockId };
