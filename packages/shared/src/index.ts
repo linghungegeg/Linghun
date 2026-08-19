@@ -37,6 +37,47 @@ export function isMiniMaxApiModel(model: string): model is MiniMaxApiModel {
   return (MINIMAX_API_MODELS as readonly string[]).includes(model);
 }
 
+// Image generation is a separate REST surface from the chat endpoints: a single POST path
+// served by the same two hosts as the text models. The region ids keep the global and
+// mainland-China endpoints addressable without duplicating the host literals.
+export type MiniMaxRegion = "global_en" | "cn_zh";
+
+export const MINIMAX_IMAGE_ENDPOINT_PATH = "/image_generation";
+
+export const MINIMAX_IMAGE_ENDPOINTS: Readonly<Record<MiniMaxRegion, string>> = {
+  global_en: `${DEFAULT_MINIMAX_BASE_URL}${MINIMAX_IMAGE_ENDPOINT_PATH}`,
+  cn_zh: `${DEFAULT_MINIMAX_CN_BASE_URL}${MINIMAX_IMAGE_ENDPOINT_PATH}`,
+};
+
+export const MINIMAX_IMAGE_MODELS = ["image-01", "image-01-live"] as const;
+export type MiniMaxImageModel = (typeof MINIMAX_IMAGE_MODELS)[number];
+
+export const DEFAULT_MINIMAX_IMAGE_MODEL: MiniMaxImageModel = "image-01";
+
+// Returned image links are temporary, so callers must persist the bytes inside this window.
+export const MINIMAX_IMAGE_URL_TTL_HOURS = 24;
+
+export function isMiniMaxImageModel(model: string): model is MiniMaxImageModel {
+  return (MINIMAX_IMAGE_MODELS as readonly string[]).includes(model);
+}
+
+/**
+ * Picks the image region that matches an already configured chat base URL, so a project
+ * that points its provider at the mainland-China host keeps generating on that host.
+ */
+export function resolveMiniMaxRegion(baseUrl?: string): MiniMaxRegion {
+  if (!baseUrl) return "global_en";
+  try {
+    return new URL(baseUrl).hostname.endsWith("minimaxi.com") ? "cn_zh" : "global_en";
+  } catch {
+    return "global_en";
+  }
+}
+
+export function resolveMiniMaxImageEndpoint(baseUrl?: string): string {
+  return MINIMAX_IMAGE_ENDPOINTS[resolveMiniMaxRegion(baseUrl)];
+}
+
 export type Language = "zh-CN" | "en-US";
 
 export type PermissionMode = "default" | "auto-review" | "plan" | "full-access";

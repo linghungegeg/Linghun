@@ -14,6 +14,7 @@ import {
   registerClientFactories,
 } from "./provider-client-runtime.js";
 export { registerClientFactories } from "./provider-client-runtime.js";
+export * from "./image-generation.js";
 
 export type ModelUsage = {
   inputTokens: number;

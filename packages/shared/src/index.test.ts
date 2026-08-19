@@ -4,16 +4,23 @@ import {
   DEFAULT_MINIMAX_BASE_URL,
   DEFAULT_MINIMAX_CN_ANTHROPIC_BASE_URL,
   DEFAULT_MINIMAX_CN_BASE_URL,
+  DEFAULT_MINIMAX_IMAGE_MODEL,
   LINGHUN_CLI_NAME,
   LINGHUN_NAME,
   LINGHUN_VERSION,
   MINIMAX_API_MODELS,
+  MINIMAX_IMAGE_ENDPOINTS,
+  MINIMAX_IMAGE_MODELS,
+  MINIMAX_IMAGE_URL_TTL_HOURS,
   canonicalPathForCompare,
   canonicalPathKeyForCompare,
   isMiniMaxApiModel,
+  isMiniMaxImageModel,
   isPathInside,
   normalizePathSeparators,
   pathsReferToSameLocation,
+  resolveMiniMaxImageEndpoint,
+  resolveMiniMaxRegion,
 } from "./index.js";
 
 describe("shared constants", () => {
@@ -37,6 +44,41 @@ describe("MiniMax provider constants", () => {
     expect(isMiniMaxApiModel("MiniMax-M3")).toBe(true);
     expect(isMiniMaxApiModel("MiniMax-M2.7")).toBe(true);
     expect(isMiniMaxApiModel("deepseek-chat")).toBe(false);
+  });
+});
+
+describe("MiniMax image constants", () => {
+  it("exposes the global and mainland-China image endpoints", () => {
+    expect(MINIMAX_IMAGE_ENDPOINTS.global_en).toBe("https://api.minimax.io/v1/image_generation");
+    expect(MINIMAX_IMAGE_ENDPOINTS.cn_zh).toBe("https://api.minimaxi.com/v1/image_generation");
+  });
+
+  it("lists the current image models and recognizes them", () => {
+    expect(MINIMAX_IMAGE_MODELS).toEqual(["image-01", "image-01-live"]);
+    expect(DEFAULT_MINIMAX_IMAGE_MODEL).toBe("image-01");
+    expect(isMiniMaxImageModel("image-01")).toBe(true);
+    expect(isMiniMaxImageModel("image-01-live")).toBe(true);
+    expect(isMiniMaxImageModel("MiniMax-M3")).toBe(false);
+  });
+
+  it("keeps a configured mainland-China chat host on the mainland-China image endpoint", () => {
+    expect(resolveMiniMaxRegion(DEFAULT_MINIMAX_CN_BASE_URL)).toBe("cn_zh");
+    expect(resolveMiniMaxRegion(DEFAULT_MINIMAX_BASE_URL)).toBe("global_en");
+    expect(resolveMiniMaxImageEndpoint(DEFAULT_MINIMAX_CN_BASE_URL)).toBe(
+      MINIMAX_IMAGE_ENDPOINTS.cn_zh,
+    );
+    expect(resolveMiniMaxImageEndpoint(DEFAULT_MINIMAX_CN_ANTHROPIC_BASE_URL)).toBe(
+      MINIMAX_IMAGE_ENDPOINTS.cn_zh,
+    );
+  });
+
+  it("falls back to the global image endpoint for a missing or unparsable base URL", () => {
+    expect(resolveMiniMaxImageEndpoint(undefined)).toBe(MINIMAX_IMAGE_ENDPOINTS.global_en);
+    expect(resolveMiniMaxImageEndpoint("not a url")).toBe(MINIMAX_IMAGE_ENDPOINTS.global_en);
+  });
+
+  it("records the image URL lifetime so callers persist bytes in time", () => {
+    expect(MINIMAX_IMAGE_URL_TTL_HOURS).toBe(24);
   });
 });
 
