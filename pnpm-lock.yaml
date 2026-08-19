@@ -34,30 +34,30 @@ importers:
         specifier: 0.1.10
         version: 0.1.10
       '@linghun/core':
-        specifier: 0.1.8
-        version: 0.1.8
+        specifier: 0.1.9
+        version: 0.1.9
       '@linghun/providers':
-        specifier: 0.1.20
-        version: 0.1.20
+        specifier: 0.1.21
+        version: 0.1.21
       '@linghun/shared':
         specifier: 0.1.12
         version: 0.1.12
       '@linghun/tui':
-        specifier: 0.1.46
-        version: 0.1.46
+        specifier: 0.1.47
+        version: 0.1.47
     optionalDependencies:
       '@linghun/codebase-memory-darwin-arm64':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.1.1
+        version: 0.1.1
       '@linghun/codebase-memory-darwin-x64':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.1.1
+        version: 0.1.1
       '@linghun/codebase-memory-linux-x64':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.1.1
+        version: 0.1.1
       '@linghun/codebase-memory-win32-x64':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.1.1
+        version: 0.1.1
       '@linghun/native-runner-win32-x64':
         specifier: 0.1.0
         version: 0.1.0
@@ -148,8 +148,8 @@ importers:
   packages/providers:
     dependencies:
       '@linghun/core':
-        specifier: 0.1.8
-        version: 0.1.8
+        specifier: 0.1.9
+        version: 0.1.9
       '@linghun/shared':
         specifier: 0.1.12
         version: 0.1.12
@@ -171,20 +171,20 @@ importers:
         specifier: 0.1.10
         version: 0.1.10
       '@linghun/core':
-        specifier: 0.1.8
-        version: 0.1.8
+        specifier: 0.1.9
+        version: 0.1.9
       '@linghun/ink-runtime':
         specifier: 0.1.1
         version: 0.1.1(@types/react@19.2.15)(react@19.2.7)
       '@linghun/providers':
-        specifier: 0.1.20
-        version: 0.1.20
+        specifier: 0.1.21
+        version: 0.1.21
       '@linghun/shared':
         specifier: 0.1.12
         version: 0.1.12
       '@linghun/tools':
-        specifier: 0.1.11
-        version: 0.1.11
+        specifier: 0.1.12
+        version: 0.1.12
       cli-highlight:
         specifier: ^2.1.11
         version: 2.1.11
@@ -200,17 +200,17 @@ importers:
         version: 19.2.15
     optionalDependencies:
       '@linghun/codebase-memory-darwin-arm64':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.1.1
+        version: 0.1.1
       '@linghun/codebase-memory-darwin-x64':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.1.1
+        version: 0.1.1
       '@linghun/codebase-memory-linux-x64':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.1.1
+        version: 0.1.1
       '@linghun/codebase-memory-win32-x64':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.1.1
+        version: 0.1.1
 
 packages:
 
@@ -599,31 +599,26 @@ packages:
   '@larksuiteoapi/node-sdk@1.59.0':
     resolution: {integrity: sha512-sBpkruTvZDOxnVtoTbepWKRX0j1Y1ZElQYu0x7+v088sI9pcpbVp6ZzCGn62dhrKPatzNyCJyzYCPXPYQWccrA==}
 
-  '@linghun/codebase-memory-darwin-arm64@0.1.0':
-    resolution: {integrity: sha512-Rty1tya4ppz4mGGaK5s1ECubac4ohj0usOhFW8CDgfDvQTt5ZROjQl1hpJ9ymsjToC+68pAxK91gekTIvn7m8Q==}
+  '@linghun/codebase-memory-darwin-arm64@0.1.1':
     cpu: [arm64]
     os: [darwin]
 
-  '@linghun/codebase-memory-darwin-x64@0.1.0':
-    resolution: {integrity: sha512-Jgl4E99bXxSp0Lw8deOVMjTBmpvZU3HgzwVLOXONJC8l/ApAy4/UBcOdbFFJZwYkaow9gHQixU3Q7p6Nsr/vBg==}
+  '@linghun/codebase-memory-darwin-x64@0.1.1':
     cpu: [x64]
     os: [darwin]
 
-  '@linghun/codebase-memory-linux-x64@0.1.0':
-    resolution: {integrity: sha512-oYBg33tT6iAtLg5E3BXTio5AbZdN8rmvY64B5uhLHxScFAfjXQxz7mXvyztelp/Prp34qo+P4MtVh9M+Dir/gA==}
+  '@linghun/codebase-memory-linux-x64@0.1.1':
     cpu: [x64]
     os: [linux]
 
-  '@linghun/codebase-memory-win32-x64@0.1.0':
-    resolution: {integrity: sha512-QmI+ZatTsznyWChUedwl5BlKFasILw1OX9yLii8T4rewOSRWwdqTv5HW0oKp7+NrHrg7QM5fjy5VI5IHBgMAow==}
+  '@linghun/codebase-memory-win32-x64@0.1.1':
     cpu: [x64]
     os: [win32]
 
   '@linghun/config@0.1.10':
     resolution: {integrity: sha512-8wggk1rrPBrS9dKMhPEdqQJJtCs8tYt6+bpwdnPxFk5pjBUFQeVlGfkn7S2U/7I9hdwHza9ypypeLZDKpTEhww==}
 
-  '@linghun/core@0.1.8':
-    resolution: {integrity: sha512-0Dh/vsDIIMNmFT5/G4vsqRwQ2Lq2KUsakyBw6QGrqy81L07Vwh1ijK33QHUo1tSrQUGgnKdlbp0thyXyRduYRw==}
+  '@linghun/core@0.1.9': {}
 
   '@linghun/ink-runtime@0.1.1':
     resolution: {integrity: sha512-7yvtfJX6WjQyY4CFmigZ2fZU8uOoHAzni9qE3gYpqpiVjFwYnB/yu6C/0nWVvX0+kqzpvMwSzlyYQOYIIfAXOA==}
@@ -655,8 +650,7 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@linghun/providers@0.1.20':
-    resolution: {integrity: sha512-5VntmOn9ANyAHrkBXdsdnj4tW8PEnCjFcnaEolV1HRCB/yOgg4a62veSlvYy432rTZJK6guhv3zyxg08Ngkn/w==}
+  '@linghun/providers@0.1.21': {}
 
   '@linghun/shared@0.1.11':
     resolution: {integrity: sha512-OXwt3R6Iig82tML9F4wDQBlb47Tfqbh0YTlXcGurwtawkVrcB0L/mrZr0JZh3nsUy1LZeST7RPKQjt0zM24qJQ==}
@@ -664,11 +658,9 @@ packages:
   '@linghun/shared@0.1.12':
     resolution: {integrity: sha512-W6sPUNiUBVa07zEXB/32qSTj/R1Lz5qkGWTb19vnkpFTk6H5Tk8FGxq31B+rywYgIQAfkBIYB2K5OkkptUnmqA==}
 
-  '@linghun/tools@0.1.11':
-    resolution: {integrity: sha512-axcR5Ly1ElxxRF0KGZy8j04FbTOETbzEsPhr7uJSzg9GNNHNClBGCd2aepit8/QP83YC/XNCFpJ+k4fP8Qay1Q==}
+  '@linghun/tools@0.1.12': {}
 
-  '@linghun/tui@0.1.46':
-    resolution: {integrity: sha512-T0dP1TMtDMSJQbXfBlH/4HC8uc4OW6EpPrA0NZ9/AawQSt/LvrK0QXdUL2adIqF2b0pGxUrYxQC1+XF3ZmVRLg==}
+  '@linghun/tui@0.1.47': {}
 
   '@protobufjs/aspromise@1.1.2':
     resolution: {integrity: sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ==}
@@ -1917,23 +1909,23 @@ snapshots:
       - debug
       - utf-8-validate
 
-  '@linghun/codebase-memory-darwin-arm64@0.1.0':
+  '@linghun/codebase-memory-darwin-arm64@0.1.1':
     optional: true
 
-  '@linghun/codebase-memory-darwin-x64@0.1.0':
+  '@linghun/codebase-memory-darwin-x64@0.1.1':
     optional: true
 
-  '@linghun/codebase-memory-linux-x64@0.1.0':
+  '@linghun/codebase-memory-linux-x64@0.1.1':
     optional: true
 
-  '@linghun/codebase-memory-win32-x64@0.1.0':
+  '@linghun/codebase-memory-win32-x64@0.1.1':
     optional: true
 
   '@linghun/config@0.1.10':
     dependencies:
       '@linghun/shared': 0.1.12
 
-  '@linghun/core@0.1.8':
+  '@linghun/core@0.1.9':
     dependencies:
       '@linghun/shared': 0.1.11
 
@@ -1974,36 +1966,36 @@ snapshots:
       typescript: 5.9.3
     optional: true
 
-  '@linghun/providers@0.1.20':
+  '@linghun/providers@0.1.21':
     dependencies:
-      '@linghun/core': 0.1.8
+      '@linghun/core': 0.1.9
       '@linghun/shared': 0.1.12
 
   '@linghun/shared@0.1.11': {}
 
   '@linghun/shared@0.1.12': {}
 
-  '@linghun/tools@0.1.11':
+  '@linghun/tools@0.1.12':
     dependencies:
       parse5: 8.0.1
 
-  '@linghun/tui@0.1.46':
+  '@linghun/tui@0.1.47':
     dependencies:
       '@larksuiteoapi/node-sdk': 1.59.0
       '@linghun/config': 0.1.10
-      '@linghun/core': 0.1.8
+      '@linghun/core': 0.1.9
       '@linghun/ink-runtime': 0.1.1(@types/react@19.2.15)(react@19.2.7)
-      '@linghun/providers': 0.1.20
+      '@linghun/providers': 0.1.21
       '@linghun/shared': 0.1.12
-      '@linghun/tools': 0.1.11
+      '@linghun/tools': 0.1.12
       cli-highlight: 2.1.11
       marked: 18.0.5
       react: 19.2.7
     optionalDependencies:
-      '@linghun/codebase-memory-darwin-arm64': 0.1.0
-      '@linghun/codebase-memory-darwin-x64': 0.1.0
-      '@linghun/codebase-memory-linux-x64': 0.1.0
-      '@linghun/codebase-memory-win32-x64': 0.1.0
+      '@linghun/codebase-memory-darwin-arm64': 0.1.1
+      '@linghun/codebase-memory-darwin-x64': 0.1.1
+      '@linghun/codebase-memory-linux-x64': 0.1.1
+      '@linghun/codebase-memory-win32-x64': 0.1.1
     transitivePeerDependencies:
       - '@types/react'
       - bufferutil

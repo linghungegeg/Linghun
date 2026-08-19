@@ -1,6 +1,6 @@
 {
   "name": "@linghun/tui",
-  "version": "0.1.46",
+  "version": "0.1.47",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -22,20 +22,20 @@
   "dependencies": {
     "@larksuiteoapi/node-sdk": "1.59.0",
     "@linghun/config": "0.1.10",
-    "@linghun/core": "0.1.8",
+    "@linghun/core": "0.1.9",
     "@linghun/ink-runtime": "0.1.1",
-    "@linghun/providers": "0.1.20",
+    "@linghun/providers": "0.1.21",
     "@linghun/shared": "0.1.12",
-    "@linghun/tools": "0.1.11",
+    "@linghun/tools": "0.1.12",
     "cli-highlight": "^2.1.11",
     "marked": "^18.0.5",
     "react": "^19.2.6"
   },
   "optionalDependencies": {
-    "@linghun/codebase-memory-darwin-arm64": "0.1.0",
-    "@linghun/codebase-memory-darwin-x64": "0.1.0",
-    "@linghun/codebase-memory-linux-x64": "0.1.0",
-    "@linghun/codebase-memory-win32-x64": "0.1.0"
+    "@linghun/codebase-memory-darwin-arm64": "0.1.1",
+    "@linghun/codebase-memory-darwin-x64": "0.1.1",
+    "@linghun/codebase-memory-linux-x64": "0.1.1",
+    "@linghun/codebase-memory-win32-x64": "0.1.1"
   },
   "devDependencies": {
     "@types/react": "^19.2.15"
