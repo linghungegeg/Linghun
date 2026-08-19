@@ -1,6 +1,6 @@
 {
   "name": "@linghun/tui",
-  "version": "0.1.47",
+  "version": "0.1.48",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -24,8 +24,8 @@
     "@linghun/config": "0.1.10",
     "@linghun/core": "0.1.9",
     "@linghun/ink-runtime": "0.1.1",
-    "@linghun/providers": "0.1.21",
-    "@linghun/shared": "0.1.12",
+    "@linghun/providers": "0.1.22",
+    "@linghun/shared": "0.1.13",
     "@linghun/tools": "0.1.12",
     "cli-highlight": "^2.1.11",
     "marked": "^18.0.5",
