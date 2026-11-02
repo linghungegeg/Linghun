@@ -30,7 +30,7 @@ export const DEFAULT_MINIMAX_ANTHROPIC_BASE_URL = "https://api.minimax.io/anthro
 export const DEFAULT_MINIMAX_CN_BASE_URL = "https://api.minimaxi.com/v1";
 export const DEFAULT_MINIMAX_CN_ANTHROPIC_BASE_URL = "https://api.minimaxi.com/anthropic";
 
-export const MINIMAX_API_MODELS = ["MiniMax-M3", "MiniMax-M2.7"] as const;
+export const MINIMAX_API_MODELS = ["MiniMax-M3.1-Flash", "MiniMax-M3"] as const;
 export type MiniMaxApiModel = (typeof MINIMAX_API_MODELS)[number];
 
 export function isMiniMaxApiModel(model: string): model is MiniMaxApiModel {

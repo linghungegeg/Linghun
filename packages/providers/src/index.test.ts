@@ -207,12 +207,23 @@ describe("DeepSeek model capabilities", () => {
 describe("MiniMax model capabilities", () => {
   it("records MiniMax model context, pricing, modality, and thinking metadata", () => {
     const m3 = minimaxModels.find((model) => model.id === "MiniMax-M3");
-    const m27 = minimaxModels.find((model) => model.id === "MiniMax-M2.7");
+    const flash = minimaxModels[0];
+    const m27 = findKnownModel("MiniMax-M2.7");
 
+    expect(minimaxModels.map((model) => model.id)).toEqual(["MiniMax-M3.1-Flash", "MiniMax-M3"]);
+    expect(flash).toMatchObject({
+      id: "MiniMax-M3.1-Flash",
+      contextWindow: 1_000_000,
+      maxOutputTokens: 524_288,
+      inputPricePerMTok: 0.15,
+      outputPricePerMTok: 0.6,
+      supportsVision: true,
+      supportsThinking: true,
+    });
     expect(m3?.providerId).toBe("minimax");
     expect(m3?.contextWindow).toBe(1_000_000);
-    expect(m3?.inputPricePerMTok).toBe(0.6);
-    expect(m3?.outputPricePerMTok).toBe(2.4);
+    expect(m3?.inputPricePerMTok).toBe(0.3);
+    expect(m3?.outputPricePerMTok).toBe(1.2);
     expect(m3?.supportsVision).toBe(true);
     expect(m3?.supportsThinking).toBe(true);
 

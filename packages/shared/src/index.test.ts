@@ -40,9 +40,10 @@ describe("MiniMax provider constants", () => {
   });
 
   it("lists the current MiniMax API models and recognizes them", () => {
-    expect(MINIMAX_API_MODELS).toEqual(["MiniMax-M3", "MiniMax-M2.7"]);
+    expect(MINIMAX_API_MODELS).toEqual(["MiniMax-M3.1-Flash", "MiniMax-M3"]);
+    expect(isMiniMaxApiModel("MiniMax-M3.1-Flash")).toBe(true);
     expect(isMiniMaxApiModel("MiniMax-M3")).toBe(true);
-    expect(isMiniMaxApiModel("MiniMax-M2.7")).toBe(true);
+    expect(isMiniMaxApiModel("MiniMax-M2.7")).toBe(false);
     expect(isMiniMaxApiModel("deepseek-chat")).toBe(false);
   });
 });

@@ -347,16 +347,16 @@ describe("config directories", () => {
 
     expect(minimax?.type).toBe("openai-compatible");
     expect(minimax?.baseUrl).toBe("https://api.minimax.io/v1");
-    expect(minimax?.model).toBe("MiniMax-M3");
+    expect(minimax?.model).toBe("MiniMax-M3.1-Flash");
     expect(minimax?.endpointProfile).toBe("chat_completions");
 
-    expect(resolveModelSelection("MiniMax-M3", defaultConfig.providers)).toMatchObject({
-      model: "MiniMax-M3",
+    expect(resolveModelSelection("MiniMax-M3.1-Flash", defaultConfig.providers)).toMatchObject({
+      model: "MiniMax-M3.1-Flash",
       provider: "minimax",
       legacyAlias: false,
     });
-    expect(resolveModelSelection("minimax:MiniMax-M3", defaultConfig.providers)).toMatchObject({
-      model: "MiniMax-M3",
+    expect(resolveModelSelection("minimax:MiniMax-M3.1-Flash", defaultConfig.providers)).toMatchObject({
+      model: "MiniMax-M3.1-Flash",
       provider: "minimax",
     });
   });

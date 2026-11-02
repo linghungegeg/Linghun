@@ -97,6 +97,7 @@ export type ProviderRuntimeProfile =
 export type ProviderReasoningTransport =
   | "openai-reasoning-effort"
   | "anthropic-thinking-budget"
+  | "anthropic-output-effort"
   | "model-controlled"
   | "not-sent";
 
@@ -242,6 +243,7 @@ export type OpenAiChatRequest = {
   tool_choice?: "auto" | "none";
   parallel_tool_calls?: boolean;
   reasoning?: { effort: string };
+  reasoning_effort?: string;
   stream_options?: { include_usage: true };
   web_search_options?: Record<string, never>;
 };
@@ -385,7 +387,8 @@ export type AnthropicMessagesRequest = {
   system?: string | AnthropicSystemBlock[];
   tools?: AnthropicToolDefinition[];
   tool_choice?: AnthropicToolChoice;
-  thinking?: AnthropicThinkingConfig;
+  thinking?: AnthropicThinkingConfig | { type: "adaptive" | "disabled"; budget_tokens?: never };
+  output_config?: { effort: string };
 };
 
 type AnthropicStreamEvent =
@@ -527,6 +530,19 @@ export const deepSeekModels: ModelInfo[] = [
 
 export const minimaxModels: ModelInfo[] = [
   {
+    id: "MiniMax-M3.1-Flash",
+    displayName: "MiniMax M3.1 Flash",
+    providerId: "minimax",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 524_288,
+    supportsTools: true,
+    supportsVision: true,
+    supportsThinking: true,
+    supportsPromptCache: true,
+    inputPricePerMTok: 0.15,
+    outputPricePerMTok: 0.6,
+  },
+  {
     id: "MiniMax-M3",
     displayName: "MiniMax M3",
     providerId: "minimax",
@@ -536,9 +552,14 @@ export const minimaxModels: ModelInfo[] = [
     supportsVision: true,
     supportsThinking: true,
     supportsPromptCache: true,
-    inputPricePerMTok: 0.6,
-    outputPricePerMTok: 2.4,
+    // Standard pricing up to 512k context; longer requests cost $0.60/$2.40 per MTok.
+    inputPricePerMTok: 0.3,
+    outputPricePerMTok: 1.2,
   },
+];
+
+// Retain metadata for explicitly configured legacy models without advertising them.
+const legacyMiniMaxModels: ModelInfo[] = [
   {
     id: "MiniMax-M2.7",
     displayName: "MiniMax M2.7",
@@ -558,7 +579,8 @@ export function findKnownModel(modelId: string): ModelInfo | undefined {
   const normalized = normalizeDeepSeekModelName(modelId);
   return (
     deepSeekModels.find((model) => model.id === normalized) ??
-    minimaxModels.find((model) => model.id === normalized)
+    minimaxModels.find((model) => model.id === normalized) ??
+    legacyMiniMaxModels.find((model) => model.id === normalized)
   );
 }
 
@@ -1154,6 +1176,30 @@ function resolveSendableReasoning(
   };
 }
 
+function directMiniMaxModel(config: ProviderConfig, request: ModelRequest): string | undefined {
+  const model = request.model ?? config.model;
+  if (model !== "MiniMax-M3.1-Flash" && model !== "MiniMax-M3") return undefined;
+  try {
+    const url = new URL(config.baseUrl ?? "");
+    return url.protocol === "https:" &&
+      (url.hostname === "api.minimax.io" || url.hostname === "api.minimaxi.com")
+      ? model
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function miniMaxReasoning(
+  model: string,
+  level: string | undefined,
+  transport: "openai-reasoning-effort" | "anthropic-output-effort",
+): ProviderReasoningCapability {
+  return model === "MiniMax-M3.1-Flash"
+    ? resolveSendableReasoning(level, transport, ["low", "medium", "high", "xhigh", "max"])
+    : { sendReasoning: false, reasoningTransport: "model-controlled" };
+}
+
 export function resolveProviderRuntimeContract(
   config: ProviderConfig,
   request: ModelRequest = { messages: [] },
@@ -1261,12 +1307,11 @@ export function resolveProviderRuntimeContract(
   const compatibilityProfile =
     config.compatibilityProfile ??
     (endpointProfile === "anthropic_messages" ? "anthropic_messages" : "strict_openai_compatible");
+  const minimaxModel = directMiniMaxModel(config, request);
   if (endpointProfile === "anthropic_messages") {
-    const reasoning = resolveSendableReasoning(
-      reasoningLevel,
-      "anthropic-thinking-budget",
-      ["low", "medium", "high"],
-    );
+    const reasoning = minimaxModel
+      ? miniMaxReasoning(minimaxModel, reasoningLevel, "anthropic-output-effort")
+      : resolveSendableReasoning(reasoningLevel, "anthropic-thinking-budget", ["low", "medium", "high"]);
     // D.13G：anthropic_messages profile 现在原生支持 tools/tool calling。
     // 默认 supportsTools=true（与 OpenAI 路径行为一致），仅当用户显式
     // config.supportsTools=false 时才禁用；toolSchemaShape="anthropic_tools"
@@ -1313,8 +1358,9 @@ export function resolveProviderRuntimeContract(
     };
   }
   const normalizedReasoningLevel = reasoningLevel?.trim().toLowerCase();
-  const reasoning =
-    normalizedReasoningLevel === "xhigh" || normalizedReasoningLevel === "max"
+  const reasoning = minimaxModel
+    ? miniMaxReasoning(minimaxModel, reasoningLevel, "openai-reasoning-effort")
+    : normalizedReasoningLevel === "xhigh" || normalizedReasoningLevel === "max"
       ? ({
           sendReasoning: false,
           reasoningTransport: "not-sent",
@@ -1891,7 +1937,13 @@ function createChatProfileRequest(
       ? { web_search_options: {} }
       : {}),
     ...(contract.sendReasoning
-      ? createReasoningPayload(request.reasoningLevel ?? config.reasoningLevel)
+      ? directMiniMaxModel(config, request)
+        ? {
+            reasoning_effort: normalizeOpenAiReasoningEffort(
+              request.reasoningLevel ?? config.reasoningLevel ?? "max",
+            ),
+          }
+        : createReasoningPayload(request.reasoningLevel ?? config.reasoningLevel)
       : {}),
     ...(contract.includeUsage ? { stream_options: { include_usage: true as const } } : {}),
   };
@@ -2086,7 +2138,16 @@ function createAnthropicMessagesProfileRequest(
   // 1024/4096/8192。其它等级在 builder 入口明确报 unsupported，不做静默回退。
   // max_tokens 安全处理：thinking budget 必须严格小于 max_tokens；
   // 不足时把 max_tokens 抬到 budget + 1024，保证 Anthropic 不返回 invalid_request_error。
-  if (contract.sendReasoning) {
+  const minimaxModel = directMiniMaxModel(config, request);
+  if (minimaxModel) {
+    const level = request.reasoningLevel ?? config.reasoningLevel;
+    if (minimaxModel === "MiniMax-M3.1-Flash") {
+      body.thinking = { type: "adaptive" };
+      if (level) body.output_config = { effort: normalizeOpenAiReasoningEffort(level) };
+    } else if (level) {
+      body.thinking = { type: level.trim().toLowerCase() === "none" ? "disabled" : "adaptive" };
+    }
+  } else if (contract.sendReasoning) {
     const thinking = createAnthropicThinkingPayload(
       request.reasoningLevel ?? config.reasoningLevel,
     );
@@ -2101,7 +2162,7 @@ function createAnthropicMessagesProfileRequest(
   // D.13G：tools 走 Anthropic 原生 schema，按 name 字典序稳定排序（与 OpenAI 路径一致），
   // 用于保护 prompt cache 前缀 hash。tool_choice 默认 "auto"；显式 "none" 时同步透传。
   if (contract.supportsTools && request.tools && request.tools.length > 0) {
-    body.tools = createAnthropicTools(request);
+    body.tools = createAnthropicTools(request, !minimaxModel);
     body.tool_choice =
       request.toolChoice === "none"
         ? { type: "none" }
@@ -2174,7 +2235,10 @@ function createAnthropicCacheControl(request: ModelRequest): AnthropicCacheContr
   return request.promptCacheTtl === "1h" ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" };
 }
 
-function createAnthropicTools(request: ModelRequest): AnthropicToolDefinition[] | undefined {
+function createAnthropicTools(
+  request: ModelRequest,
+  hostedWebSearch = true,
+): AnthropicToolDefinition[] | undefined {
   // D.13G：tools 数组按 name 字典序稳定排序，与 OpenAI chat/responses 路径一致；
   // D.13L：启用 prompt cache 时在稳定 tool schema block 末尾挂 cache_control，
   // 让 Anthropic 同时缓存长 system prefix 与稳定工具定义，减少大工具集反复写入。
@@ -2188,7 +2252,7 @@ function createAnthropicTools(request: ModelRequest): AnthropicToolDefinition[] 
       ? { cache_control: createAnthropicCacheControl(request) }
       : {}),
   }));
-  return shouldAttachHostedWebSearch(request)
+  return hostedWebSearch && shouldAttachHostedWebSearch(request)
     ? [...customTools, createAnthropicWebSearchTool()]
     : customTools;
 }
@@ -2397,6 +2461,7 @@ function shouldAttachChatNativeWebSearch(
     request.toolChoice !== "none" &&
     Boolean(request.tools?.length) &&
     config.type === "openai-compatible" &&
+    !directMiniMaxModel(config, request) &&
     contract.endpointProfile === "chat_completions"
   );
 }

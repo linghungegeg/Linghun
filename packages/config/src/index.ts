@@ -549,7 +549,7 @@ LINGHUN_OPENAI_INCLUDE_USAGE=false
 # Mainland China hosts: https://api.minimaxi.com/v1 / https://api.minimaxi.com/anthropic.
 # LINGHUN_MINIMAX_BASE_URL=https://api.minimax.io/v1
 # LINGHUN_MINIMAX_API_KEY=
-# LINGHUN_MINIMAX_MODEL=MiniMax-M3
+# LINGHUN_MINIMAX_MODEL=MiniMax-M3.1-Flash
 
 # Optional Gemini native provider (chat-completions SSE + native web search).
 # LINGHUN_GEMINI_BASE_URL=https://api.example.com/v1
