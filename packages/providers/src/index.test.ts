@@ -24,6 +24,7 @@ import {
   resolveEffectiveEndpointProfile,
   resolveProviderBaseUrlDiagnostic,
   resolveProviderRuntimeContract,
+  uberllmModels,
 } from "./index.js";
 
 const EXPECTED_REQUEST_USER_AGENT = `${LINGHUN_NAME}/${LINGHUN_VERSION} (@linghun/${LINGHUN_CLI_NAME})`;
@@ -237,6 +238,34 @@ describe("MiniMax model capabilities", () => {
   it("resolves MiniMax models through the shared known-model lookup", () => {
     expect(findKnownModel("MiniMax-M3")?.displayName).toBe("MiniMax M3");
     expect(findKnownModel("MiniMax-M2.7")?.displayName).toBe("MiniMax M2.7");
+    expect(findKnownModel("deepseek-chat")?.providerId).toBe("deepseek");
+  });
+});
+
+describe("UberLLM model capabilities", () => {
+  it("records UberLLM model context, modality, and thinking metadata", () => {
+    const flash = uberllmModels[0];
+    const pro = uberllmModels.find((model) => model.id === "deepseek/deepseek-v4-pro");
+
+    expect(uberllmModels.map((model) => model.id)).toEqual([
+      "deepseek/deepseek-v4.1-flash",
+      "deepseek/deepseek-v4-pro",
+    ]);
+    expect(flash).toMatchObject({
+      providerId: "uberllm",
+      contextWindow: 1_048_576,
+      maxOutputTokens: 384_000,
+      supportsVision: true,
+      supportsThinking: true,
+    });
+    expect(flash.inputPricePerMTok).toBeUndefined();
+    expect(pro?.contextWindow).toBe(1_000_000);
+    expect(pro?.supportsVision).toBe(false);
+  });
+
+  it("resolves UberLLM models through the shared known-model lookup", () => {
+    expect(findKnownModel("deepseek/deepseek-v4.1-flash")?.providerId).toBe("uberllm");
+    expect(findKnownModel("deepseek/deepseek-v4-pro")?.displayName).toBe("DeepSeek V4 Pro (UberLLM)");
     expect(findKnownModel("deepseek-chat")?.providerId).toBe("deepseek");
   });
 });

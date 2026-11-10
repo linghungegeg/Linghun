@@ -361,6 +361,27 @@ describe("config directories", () => {
     });
   });
 
+  it("registers UberLLM as a first-class OpenAI-compatible provider and resolves its default model", () => {
+    const uberllm = defaultConfig.providers.uberllm;
+
+    expect(uberllm?.type).toBe("openai-compatible");
+    expect(uberllm?.baseUrl).toBe("https://api.uberllm.dev/v1");
+    expect(uberllm?.model).toBe("deepseek/deepseek-v4.1-flash");
+    expect(uberllm?.endpointProfile).toBe("chat_completions");
+
+    expect(resolveModelSelection("deepseek/deepseek-v4.1-flash", defaultConfig.providers)).toMatchObject({
+      model: "deepseek/deepseek-v4.1-flash",
+      provider: "uberllm",
+      legacyAlias: false,
+    });
+    expect(
+      resolveModelSelection("uberllm:deepseek/deepseek-v4.1-flash", defaultConfig.providers),
+    ).toMatchObject({
+      model: "deepseek/deepseek-v4.1-flash",
+      provider: "uberllm",
+    });
+  });
+
   it("requires provider qualification when model names collide", () => {
     const providers = {
       ...defaultConfig.providers,

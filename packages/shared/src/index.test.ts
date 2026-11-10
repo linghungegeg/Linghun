@@ -5,6 +5,7 @@ import {
   DEFAULT_MINIMAX_CN_ANTHROPIC_BASE_URL,
   DEFAULT_MINIMAX_CN_BASE_URL,
   DEFAULT_MINIMAX_IMAGE_MODEL,
+  DEFAULT_UBERLLM_BASE_URL,
   LINGHUN_CLI_NAME,
   LINGHUN_NAME,
   LINGHUN_VERSION,
@@ -12,11 +13,13 @@ import {
   MINIMAX_IMAGE_ENDPOINTS,
   MINIMAX_IMAGE_MODELS,
   MINIMAX_IMAGE_URL_TTL_HOURS,
+  UBERLLM_API_MODELS,
   canonicalPathForCompare,
   canonicalPathKeyForCompare,
   isMiniMaxApiModel,
   isMiniMaxImageModel,
   isPathInside,
+  isUberLlmApiModel,
   normalizePathSeparators,
   pathsReferToSameLocation,
   resolveMiniMaxImageEndpoint,
@@ -80,6 +83,19 @@ describe("MiniMax image constants", () => {
 
   it("records the image URL lifetime so callers persist bytes in time", () => {
     expect(MINIMAX_IMAGE_URL_TTL_HOURS).toBe(24);
+  });
+});
+
+describe("UberLLM provider constants", () => {
+  it("exposes one OpenAI- and Anthropic-compatible base URL", () => {
+    expect(DEFAULT_UBERLLM_BASE_URL).toBe("https://api.uberllm.dev/v1");
+  });
+
+  it("lists the default UberLLM models and recognizes them", () => {
+    expect(UBERLLM_API_MODELS).toEqual(["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4-pro"]);
+    expect(isUberLlmApiModel("deepseek/deepseek-v4.1-flash")).toBe(true);
+    expect(isUberLlmApiModel("deepseek/deepseek-v4-pro")).toBe(true);
+    expect(isUberLlmApiModel("deepseek-chat")).toBe(false);
   });
 });
 
