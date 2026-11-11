@@ -575,12 +575,40 @@ const legacyMiniMaxModels: ModelInfo[] = [
   },
 ];
 
+// Gateway prices move with each upstream host, so they are left to the live
+// https://uberllm.dev/models list instead of being pinned here.
+export const uberllmModels: ModelInfo[] = [
+  {
+    id: "deepseek/deepseek-v4.1-flash",
+    displayName: "DeepSeek V4.1 Flash (UberLLM)",
+    providerId: "uberllm",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 384_000,
+    supportsTools: true,
+    supportsVision: true,
+    supportsThinking: true,
+    supportsPromptCache: true,
+  },
+  {
+    id: "deepseek/deepseek-v4-pro",
+    displayName: "DeepSeek V4 Pro (UberLLM)",
+    providerId: "uberllm",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 128_000,
+    supportsTools: true,
+    supportsVision: false,
+    supportsThinking: true,
+    supportsPromptCache: true,
+  },
+];
+
 export function findKnownModel(modelId: string): ModelInfo | undefined {
   const normalized = normalizeDeepSeekModelName(modelId);
   return (
     deepSeekModels.find((model) => model.id === normalized) ??
     minimaxModels.find((model) => model.id === normalized) ??
-    legacyMiniMaxModels.find((model) => model.id === normalized)
+    legacyMiniMaxModels.find((model) => model.id === normalized) ??
+    uberllmModels.find((model) => model.id === normalized)
   );
 }
 

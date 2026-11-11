@@ -9,9 +9,11 @@ import {
   DEEPSEEK_API_MODELS,
   DEFAULT_DEEPSEEK_BASE_URL,
   DEFAULT_MINIMAX_BASE_URL,
+  DEFAULT_UBERLLM_BASE_URL,
   type Language,
   MINIMAX_API_MODELS,
   type PermissionMode,
+  UBERLLM_API_MODELS,
   canonicalPathForCompare,
   formatDiagnosticError,
   isDeepSeekApiModel,
@@ -511,6 +513,9 @@ const providerEnvKeys = new Set([
   "LINGHUN_MINIMAX_BASE_URL",
   "LINGHUN_MINIMAX_API_KEY",
   "LINGHUN_MINIMAX_MODEL",
+  "LINGHUN_UBERLLM_BASE_URL",
+  "LINGHUN_UBERLLM_API_KEY",
+  "LINGHUN_UBERLLM_MODEL",
   "LINGHUN_GEMINI_BASE_URL",
   "LINGHUN_GEMINI_API_KEY",
   "LINGHUN_GEMINI_MODEL",
@@ -550,6 +555,12 @@ LINGHUN_OPENAI_INCLUDE_USAGE=false
 # LINGHUN_MINIMAX_BASE_URL=https://api.minimax.io/v1
 # LINGHUN_MINIMAX_API_KEY=
 # LINGHUN_MINIMAX_MODEL=MiniMax-M3.1-Flash
+
+# Optional UberLLM provider (one key for DeepSeek, MiniMax, GLM, Kimi, Qwen, Claude and more).
+# The same base URL also serves Anthropic-compatible /v1/messages. Models: https://uberllm.dev/models
+# LINGHUN_UBERLLM_BASE_URL=https://api.uberllm.dev/v1
+# LINGHUN_UBERLLM_API_KEY=
+# LINGHUN_UBERLLM_MODEL=deepseek/deepseek-v4.1-flash
 
 # Optional Gemini native provider (chat-completions SSE + native web search).
 # LINGHUN_GEMINI_BASE_URL=https://api.example.com/v1
@@ -670,6 +681,14 @@ export const defaultConfig: LinghunConfig = {
       baseUrl: process.env.LINGHUN_MINIMAX_BASE_URL ?? DEFAULT_MINIMAX_BASE_URL,
       apiKey: process.env.LINGHUN_MINIMAX_API_KEY,
       model: process.env.LINGHUN_MINIMAX_MODEL ?? MINIMAX_API_MODELS[0],
+      endpointProfile: "chat_completions",
+      compatibilityProfile: "strict_openai_compatible",
+    },
+    uberllm: {
+      type: "openai-compatible",
+      baseUrl: process.env.LINGHUN_UBERLLM_BASE_URL ?? DEFAULT_UBERLLM_BASE_URL,
+      apiKey: process.env.LINGHUN_UBERLLM_API_KEY,
+      model: process.env.LINGHUN_UBERLLM_MODEL ?? UBERLLM_API_MODELS[0],
       endpointProfile: "chat_completions",
       compatibilityProfile: "strict_openai_compatible",
     },

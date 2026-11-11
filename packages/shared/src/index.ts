@@ -78,6 +78,18 @@ export function resolveMiniMaxImageEndpoint(baseUrl?: string): string {
   return MINIMAX_IMAGE_ENDPOINTS[resolveMiniMaxRegion(baseUrl)];
 }
 
+// UberLLM is a pay-as-you-go gateway with one key for DeepSeek, MiniMax, GLM, Kimi, Qwen,
+// Claude and other models. The same /v1 base URL serves /chat/completions, /responses and
+// the Anthropic-compatible /v1/messages, so every endpoint profile works without a second host.
+export const DEFAULT_UBERLLM_BASE_URL = "https://api.uberllm.dev/v1";
+
+export const UBERLLM_API_MODELS = ["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4-pro"] as const;
+export type UberLlmApiModel = (typeof UBERLLM_API_MODELS)[number];
+
+export function isUberLlmApiModel(model: string): model is UberLlmApiModel {
+  return (UBERLLM_API_MODELS as readonly string[]).includes(model);
+}
+
 export type Language = "zh-CN" | "en-US";
 
 export type PermissionMode = "default" | "auto-review" | "plan" | "full-access";
