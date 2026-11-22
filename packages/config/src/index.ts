@@ -556,9 +556,9 @@ LINGHUN_OPENAI_INCLUDE_USAGE=false
 # LINGHUN_MINIMAX_API_KEY=
 # LINGHUN_MINIMAX_MODEL=MiniMax-M3.1-Flash
 
-# Optional UberLLM provider (one key for DeepSeek, MiniMax, GLM, Kimi, Qwen, Claude and more).
-# The same base URL also serves Anthropic-compatible /v1/messages. Models: https://uberllm.dev/models
-# LINGHUN_UBERLLM_BASE_URL=https://api.uberllm.dev/v1
+# Optional MartLLM provider (one key for DeepSeek, MiniMax, GLM, Kimi, Qwen, Claude and more).
+# The same base URL also serves Anthropic-compatible /v1/messages. Models: https://martllm.com/models
+# LINGHUN_UBERLLM_BASE_URL=https://api.martllm.com/v1
 # LINGHUN_UBERLLM_API_KEY=
 # LINGHUN_UBERLLM_MODEL=deepseek/deepseek-v4.1-flash
 

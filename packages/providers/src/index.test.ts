@@ -242,8 +242,8 @@ describe("MiniMax model capabilities", () => {
   });
 });
 
-describe("UberLLM model capabilities", () => {
-  it("records UberLLM model context, modality, and thinking metadata", () => {
+describe("MartLLM model capabilities", () => {
+  it("records MartLLM model context, modality, and thinking metadata", () => {
     const flash = uberllmModels[0];
     const pro = uberllmModels.find((model) => model.id === "deepseek/deepseek-v4-pro");
 
@@ -263,9 +263,9 @@ describe("UberLLM model capabilities", () => {
     expect(pro?.supportsVision).toBe(false);
   });
 
-  it("resolves UberLLM models through the shared known-model lookup", () => {
+  it("resolves MartLLM models through the shared known-model lookup", () => {
     expect(findKnownModel("deepseek/deepseek-v4.1-flash")?.providerId).toBe("uberllm");
-    expect(findKnownModel("deepseek/deepseek-v4-pro")?.displayName).toBe("DeepSeek V4 Pro (UberLLM)");
+    expect(findKnownModel("deepseek/deepseek-v4-pro")?.displayName).toBe("DeepSeek V4 Pro (MartLLM)");
     expect(findKnownModel("deepseek-chat")?.providerId).toBe("deepseek");
   });
 });
