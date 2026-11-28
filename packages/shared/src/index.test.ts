@@ -86,12 +86,12 @@ describe("MiniMax image constants", () => {
   });
 });
 
-describe("UberLLM provider constants", () => {
+describe("MartLLM provider constants", () => {
   it("exposes one OpenAI- and Anthropic-compatible base URL", () => {
-    expect(DEFAULT_UBERLLM_BASE_URL).toBe("https://api.uberllm.dev/v1");
+    expect(DEFAULT_UBERLLM_BASE_URL).toBe("https://api.martllm.com/v1");
   });
 
-  it("lists the default UberLLM models and recognizes them", () => {
+  it("lists the default MartLLM models and recognizes them", () => {
     expect(UBERLLM_API_MODELS).toEqual(["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4-pro"]);
     expect(isUberLlmApiModel("deepseek/deepseek-v4.1-flash")).toBe(true);
     expect(isUberLlmApiModel("deepseek/deepseek-v4-pro")).toBe(true);

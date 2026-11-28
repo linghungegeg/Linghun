@@ -361,11 +361,11 @@ describe("config directories", () => {
     });
   });
 
-  it("registers UberLLM as a first-class OpenAI-compatible provider and resolves its default model", () => {
+  it("registers MartLLM as a first-class OpenAI-compatible provider and resolves its default model", () => {
     const uberllm = defaultConfig.providers.uberllm;
 
     expect(uberllm?.type).toBe("openai-compatible");
-    expect(uberllm?.baseUrl).toBe("https://api.uberllm.dev/v1");
+    expect(uberllm?.baseUrl).toBe("https://api.martllm.com/v1");
     expect(uberllm?.model).toBe("deepseek/deepseek-v4.1-flash");
     expect(uberllm?.endpointProfile).toBe("chat_completions");
 

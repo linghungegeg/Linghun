@@ -576,11 +576,11 @@ const legacyMiniMaxModels: ModelInfo[] = [
 ];
 
 // Gateway prices move with each upstream host, so they are left to the live
-// https://uberllm.dev/models list instead of being pinned here.
+// https://martllm.com/models list instead of being pinned here.
 export const uberllmModels: ModelInfo[] = [
   {
     id: "deepseek/deepseek-v4.1-flash",
-    displayName: "DeepSeek V4.1 Flash (UberLLM)",
+    displayName: "DeepSeek V4.1 Flash (MartLLM)",
     providerId: "uberllm",
     contextWindow: 1_048_576,
     maxOutputTokens: 384_000,
@@ -591,7 +591,7 @@ export const uberllmModels: ModelInfo[] = [
   },
   {
     id: "deepseek/deepseek-v4-pro",
-    displayName: "DeepSeek V4 Pro (UberLLM)",
+    displayName: "DeepSeek V4 Pro (MartLLM)",
     providerId: "uberllm",
     contextWindow: 1_000_000,
     maxOutputTokens: 128_000,
